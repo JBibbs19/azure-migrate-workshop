@@ -66,7 +66,7 @@ param(
     [SecureString]$AdminPassword,
 
     [Parameter(Mandatory = $false)]
-    [string]$VMSize = "Standard_E4s_v5"
+    [string]$VMSize = "Standard_E4s_v7"
 )
 
 Set-StrictMode -Version Latest
