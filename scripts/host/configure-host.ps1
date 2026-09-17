@@ -963,7 +963,42 @@ foreach ($name in @('OnPrem-Linux-Web','OnPrem-Linux-App')) {
 }
 Remove-Item "$labRoot\CloudInit" -Recurse -Force -ErrorAction SilentlyContinue
 # cloud-init retains a root-only copy of user-data within Linux; credentials are lab-only.
-@{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle } |
+# =============================================================
+# PHASE 6 - Stage the optional traffic generator on the host
+# =============================================================
+# Written to disk only. Nothing here starts traffic: the instructor decides whether to run
+# it, and when. Delivering it now means no file has to be copied onto HyperVHost by hand.
+Write-Log "PHASE 6: Staging the optional lab traffic generator..."
+$trafficScriptPath = "$labRoot\enable-lab-traffic.ps1"
+$trafficSettingsPath = "$labRoot\lab-traffic.settings.json"
+$trafficPayload = '__LAB_TRAFFIC_PAYLOAD__'
+$payloadStream = [IO.MemoryStream]::new([Convert]::FromBase64String($trafficPayload))
+$decompressor = [IO.Compression.GzipStream]::new($payloadStream, [IO.Compression.CompressionMode]::Decompress)
+$payloadReader = [IO.StreamReader]::new($decompressor, [Text.UTF8Encoding]::new($false))
+try { $trafficScript = $payloadReader.ReadToEnd() } finally { $payloadReader.Dispose() }
+if ([string]::IsNullOrWhiteSpace($trafficScript)) { throw 'The staged lab traffic script decoded empty.' }
+[IO.File]::WriteAllText($trafficScriptPath, $trafficScript, [Text.UTF8Encoding]::new($false))
+# Deployment knows the lab user and the guest addresses; record them so the script can be
+# run on this host with no arguments beyond the lab password.
+[ordered]@{
+    SchemaVersion    = 1
+    GeneratedUtc     = (Get-Date).ToUniversalTime().ToString('o')
+    LinuxUsername    = $guestUser
+    WindowsGuests    = @('OnPrem-Web','OnPrem-SQL')
+    LinuxGuests      = @('OnPrem-Linux-Web','OnPrem-Linux-App')
+    WorkloadAddresses = [ordered]@{
+        'onprem-web'   = '192.168.0.10'
+        'onprem-sql'   = '192.168.0.11'
+        'onprem-nginx' = '192.168.0.12'
+        'onprem-app'   = '192.168.0.13'
+    }
+    SqlLogin         = 'labapp'
+    IntervalSeconds  = 20
+} | ConvertTo-Json -Depth 4 | Set-Content $trafficSettingsPath -Encoding UTF8
+Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
+
+@{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
+   TrafficScript = $trafficScriptPath } |
     ConvertTo-Json | Set-Content "$labRoot\setup-complete.json" -Encoding UTF8
 Write-Output 'LAB_WORKLOADS_READY'
 

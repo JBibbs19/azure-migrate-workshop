@@ -210,16 +210,40 @@ function New-LabWindowsGuestDiskConfig {
     return $disk
 }
 
+function Compress-LabScript {
+    param([Parameter(Mandatory)][string]$Text)
+    # Gzip keeps the embedded copy small so the managed Run Command payload stays close to
+    # its original size. The host decompresses it with the matching framework classes.
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $buffer = [IO.MemoryStream]::new()
+    $compressor = [IO.Compression.GzipStream]::new($buffer, [IO.Compression.CompressionMode]::Compress)
+    try { $compressor.Write($bytes, 0, $bytes.Length) } finally { $compressor.Dispose() }
+    return [Convert]::ToBase64String($buffer.ToArray())
+}
+
 function Read-LabHostConfiguration {
     param([Parameter(Mandatory)][string]$Path)
     $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($content)) { throw 'The host configuration script is empty. Obtain the complete workshop checkout.' }
-    $healthPath = Join-Path (Split-Path (Split-Path $Path -Parent) -Parent) 'health.ps1'
+    $scriptsRoot = Split-Path (Split-Path $Path -Parent) -Parent
+    $healthPath = Join-Path $scriptsRoot 'health.ps1'
     $health = Get-Content -LiteralPath $healthPath -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($health) -or ([regex]::Matches($content, '(?m)^# LAB_HEALTH_HELPERS\r?$')).Count -ne 1) {
         throw 'Host health helpers are missing or incompatible. Obtain the complete workshop checkout.'
     }
     $content = $content.Replace('# LAB_HEALTH_HELPERS', $health)
+    # The optional traffic generator is delivered to the host during setup so the instructor
+    # never has to copy a file onto HyperVHost by hand. The host payload writes it to disk;
+    # it is never executed by deployment.
+    $trafficPath = Join-Path $scriptsRoot 'enable-lab-traffic.ps1'
+    $traffic = Get-Content -LiteralPath $trafficPath -Raw -Encoding UTF8 -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($traffic) -or ([regex]::Matches($content, '__LAB_TRAFFIC_PAYLOAD__')).Count -ne 1) {
+        throw 'The lab traffic script is missing or its host placeholder is incompatible. Obtain the complete workshop checkout.'
+    }
+    $trafficTokens = $null; $trafficErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($traffic, [ref]$trafficTokens, [ref]$trafficErrors)
+    if ($trafficErrors.Count) { throw 'The lab traffic script has syntax errors. Obtain the reviewed workshop revision.' }
+    $content = $content.Replace('__LAB_TRAFFIC_PAYLOAD__', (Compress-LabScript $traffic))
     $tokens = $null; $errors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'The host configuration script has syntax errors. Obtain the reviewed workshop revision.' }

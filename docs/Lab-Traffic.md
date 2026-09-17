@@ -8,7 +8,8 @@ order desk that produces continuous TCP traffic between the guests, which gives 
 analysis something real to observe and makes the performance-based assessment comparison in
 Module 1 meaningful.
 
-It is opt-in. A lab deployed without it behaves exactly as Modules 0–5 describe.
+It is opt-in, and it is delivered to the host by deployment rather than copied there by
+hand. A lab that never runs it behaves exactly as Modules 0–5 describe.
 
 ## What it creates
 
@@ -30,25 +31,37 @@ separate units.
 
 ## Run it
 
-Deploy the lab first and wait for workload readiness. Then, inside HyperVHost in an elevated
-Windows PowerShell session:
+The script is already on the host. Deployment writes it to
+`C:\AzMigrateLab\enable-lab-traffic.ps1`, together with
+`C:\AzMigrateLab\lab-traffic.settings.json` holding the lab user name, the guest addresses
+and the request interval. Nothing is started for you.
+
+Deploy the lab, confirm workload readiness, then in an elevated Windows PowerShell session
+inside HyperVHost:
 
 ```powershell
-$password = Read-Host 'Lab password' -AsSecureString
-.\enable-lab-traffic.ps1 -AdminPassword $password
+C:\AzMigrateLab\enable-lab-traffic.ps1
 ```
+
+Enter the lab password when prompted. That is the only value the script needs; everything
+else comes from the settings file. Explicit parameters override it when you pass them.
 
 Windows guests are configured over PowerShell Direct, which needs no network path. The two
 Linux guests are configured over SSH from the host; the script prompts for the `labadmin`
 password once per guest. If no SSH client is present it tries to add the OpenSSH client
-capability, and failing that writes each guest's script to `C:\AzMigrateLab\Traffic\` for the
-instructor to run from the Hyper-V console.
+capability, and failing that writes each guest's script to `C:\AzMigrateLab\Traffic\` to run
+from the Hyper-V console.
 
 Useful switches:
 
 - `-IntervalSeconds 20` — seconds between request cycles. Keep it low-rate.
 - `-SkipLinux` — configure the Windows guests only and write the Linux scripts to disk.
+- `-SettingsPath` — point at a different settings file.
 - `-Disable` — stop and remove the generators, the proxy and the lab SQL login.
+
+> **Note:** Running the repository copy from your workstation will not work. The script needs
+> Hyper-V cmdlets and PowerShell Direct access to the guests, so it must run on HyperVHost.
+> It stops with a clear message if you try.
 
 ## Verify
 
@@ -108,5 +121,5 @@ are readable by an administrator of the guest. Use lab-only credentials, as Modu
 ## Firewall
 
 The base deployment already permits this traffic between guests; see
-[Module 0](Module-0-Setup.md#7-lab-firewall-posture). No additional rules are needed for the
+[Module 0](Module-0-Setup.md#8-lab-firewall-posture). No additional rules are needed for the
 mesh itself.

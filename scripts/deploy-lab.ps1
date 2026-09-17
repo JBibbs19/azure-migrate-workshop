@@ -192,6 +192,7 @@ Write-Output 'APPLIANCE_STAGING_READY'
     Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
     if ($stagingSummary) { Write-Host $stagingSummary }
+    Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
     Write-Host "Download and extract the Azure Migrate appliance VHD into ${stagingDrive}:\Appliance on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
 } catch {
     try {

@@ -93,9 +93,9 @@ The deployment scripts require **new, dedicated resource groups**. They intentio
 |---|---|
 | `Start-LabRehearsal.ps1` | Ordered, resumable instructor rehearsal; automatic checks plus explicit manual checkpoints, reports and separate deployment/cleanup approval |
 | `deploy-lab.ps1` | Billable source host, nested guests, DHCP/NAT and samples; attaches and verifies the appliance staging volume; protected setup parameters; fails if readiness is not observed |
-| `host/configure-host.ps1` | Runs inside the Windows host; creates the four workload VMs only |
+| `host/configure-host.ps1` | Runs inside the Windows host; creates the four workload VMs and stages the optional traffic generator |
 | `migrate-step1-setup-project.ps1` | Billable target/test network preparation; portal project creation follows |
-| `enable-lab-traffic.ps1` | Optional, instructor-run on HyperVHost; wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` reverses it |
+| `enable-lab-traffic.ps1` | Optional; staged on HyperVHost by deployment and run there with its generated settings file. Wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` reverses it |
 | `Test-MigratedWorkloads.ps1` | Executes smoke tests inside explicitly named Azure VMs using their VM agents |
 | `Test-LabSqlData.ps1` | Runs inside the SQL VM; captures or compares every defined column of the two sample tables against a preserved source baseline |
 | `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |

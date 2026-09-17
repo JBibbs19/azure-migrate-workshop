@@ -20,32 +20,43 @@ Windows guests are configured over PowerShell Direct. Linux guests are configure
 from this host; when no SSH client is available the guest scripts are written to
 C:\AzMigrateLab\Traffic for the instructor to paste into the Hyper-V console.
 
+Deployment stages this script at C:\AzMigrateLab\enable-lab-traffic.ps1 on HyperVHost and
+writes C:\AzMigrateLab\lab-traffic.settings.json beside it with the lab user name and the
+guest addresses already filled in. Run it from that folder and the only value you supply is
+the lab password. Command-line parameters override the settings file when both are present.
+
 Lab-only. Traffic uses names from each guest's hosts file, not addresses, so the mesh can be
 repointed after cutover by editing hosts entries instead of rebuilding the applications.
 .PARAMETER AdminPassword
 The lab password supplied to deploy-lab.ps1. Used for the Windows guests' Administrator
-account, the Linux lab user, and the SQL login the generators authenticate with.
+account, the Linux lab user, and the SQL login the generators authenticate with. You are
+prompted for it when it is not supplied.
 .PARAMETER LinuxUsername
-The Linux lab user created by cloud-init. Defaults to labadmin.
+The Linux lab user created by cloud-init. Read from the settings file, otherwise labadmin.
 .PARAMETER IntervalSeconds
 Seconds between generated request cycles. Keep this low-rate: the goal is a steady trickle
 that dependency polling can observe, not a load test that distorts performance-based sizing.
+.PARAMETER SettingsPath
+Location of the deployment-written settings file. Defaults to the copy beside this script.
 .PARAMETER SkipLinux
 Configure only the Windows guests and write the Linux scripts to disk without connecting.
 .PARAMETER Disable
 Stop and remove the generators, the proxy and the SQL login. Leaves the sample workloads,
 the firewall rules and the hosts entries in place.
 .EXAMPLE
-$password = Read-Host 'Lab password' -AsSecureString
-.\enable-lab-traffic.ps1 -AdminPassword $password
+C:\AzMigrateLab\enable-lab-traffic.ps1
 .EXAMPLE
-.\enable-lab-traffic.ps1 -AdminPassword $password -Disable
+$password = Read-Host 'Lab password' -AsSecureString
+C:\AzMigrateLab\enable-lab-traffic.ps1 -AdminPassword $password -IntervalSeconds 30
+.EXAMPLE
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][SecureString]$AdminPassword,
-    [ValidatePattern('^[a-z][a-z0-9]{2,18}$')][string]$LinuxUsername = 'labadmin',
-    [ValidateRange(5,600)][int]$IntervalSeconds = 20,
+    [SecureString]$AdminPassword,
+    [ValidatePattern('^[a-z][a-z0-9]{2,18}$')][string]$LinuxUsername,
+    [ValidateRange(5,600)][int]$IntervalSeconds,
+    [string]$SettingsPath,
     [switch]$SkipLinux,
     [switch]$Disable
 )
@@ -59,6 +70,50 @@ $labHosts = [ordered]@{
     'onprem-sql'   = '192.168.0.11'
     'onprem-nginx' = '192.168.0.12'
     'onprem-app'   = '192.168.0.13'
+}
+
+# ---------- Values written by deployment ----------
+# Setup records the lab user and guest addresses on the host, so running this script inside
+# HyperVHost needs no arguments. Explicit parameters still win; the built-in values above are
+# the last resort when the file is absent, for example on a hand-built host.
+if (-not $SettingsPath) {
+    $SettingsPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'lab-traffic.settings.json' }
+                    else { Join-Path $labRoot 'lab-traffic.settings.json' }
+}
+if (-not (Test-Path -LiteralPath $SettingsPath)) { $SettingsPath = Join-Path $labRoot 'lab-traffic.settings.json' }
+$settings = $null
+if (Test-Path -LiteralPath $SettingsPath) {
+    try {
+        $settings = Get-Content -LiteralPath $SettingsPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        Write-Host "Using deployment settings from $SettingsPath"
+    } catch {
+        Write-Warning "Could not read $SettingsPath. Continuing with built-in lab defaults."
+    }
+}
+function Get-LabSetting {
+    param([string]$Name)
+    if ($null -ne $settings -and $null -ne $settings.PSObject.Properties[$Name]) { return $settings.$Name }
+    return $null
+}
+if (-not $LinuxUsername) {
+    $configured = Get-LabSetting 'LinuxUsername'
+    $LinuxUsername = if ($configured) { [string]$configured } else { 'labadmin' }
+}
+if (-not $PSBoundParameters.ContainsKey('IntervalSeconds')) {
+    $configured = Get-LabSetting 'IntervalSeconds'
+    $IntervalSeconds = if ($configured) { [int]$configured } else { 20 }
+}
+$configuredLogin = Get-LabSetting 'SqlLogin'
+if ($configuredLogin) { $sqlLogin = [string]$configuredLogin }
+$configuredAddresses = Get-LabSetting 'WorkloadAddresses'
+if ($null -ne $configuredAddresses) {
+    foreach ($key in @($labHosts.Keys)) {
+        $value = $configuredAddresses.PSObject.Properties[$key]
+        if ($null -ne $value -and $value.Value -match '^\d{1,3}(\.\d{1,3}){3}$') { $labHosts[$key] = [string]$value.Value }
+    }
+}
+if (-not $AdminPassword) {
+    $AdminPassword = Read-Host 'Lab password used during deployment' -AsSecureString
 }
 
 function Write-Step { param([string]$Message) Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Message" }
