@@ -5,7 +5,7 @@ Deploy the TD SYNNEX Cloud Enablement Services Hyper-V workshop.
 Creates one Standard-security Windows host and provisions four nested workload VMs
 (two Windows, two Linux) that behave as one small-business environment. No appliance
 OS VM is created: Module 1 downloads the Azure Migrate appliance VHD onto the host's
-dedicated staging volume and imports it. This script creates billable Azure resources.
+own OS disk and imports it. This script creates billable Azure resources.
 Use a new dedicated resource group. Existing groups are refused intentionally.
 .PARAMETER AdminSourceCidr
 Your public IPv4 address as a /32. Required for the host RDP rule.
@@ -13,14 +13,10 @@ Your public IPv4 address as a /32. Required for the host RDP rule.
 Maximum monitored wait for each Azure host, network or disk creation operation.
 .PARAMETER GuestSetupTimeoutMinutes
 Azure's execution limit for ConfigureWorkshop; individual installer limits also apply.
-.PARAMETER ApplianceStagingDiskSizeGB
-Size of the data disk attached to the host for the Azure Migrate appliance VHD download
-and extraction. It is kept free of lab guest disks so at least 30 GB stays unused.
-.PARAMETER ApplianceStagingDiskType
-Managed disk SKU for the staging disk. StandardSSD_LRS keeps the lab's cost lower;
-Premium_LRS shortens extraction time.
-.PARAMETER ApplianceStagingDriveLetter
-Drive letter presented inside HyperVHost for the staging volume.
+.PARAMETER ApplianceStagingMinimumFreeGB
+Free space required on the host's C: drive before deployment continues, reserved for the
+Module 1 appliance VHD download and extraction. The default covers the published archive,
+its expanded VHD and room for the guest disks to grow during the workshop.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
@@ -38,9 +34,7 @@ param(
     [string]$VMSize = 'Standard_E8s_v7',
     [ValidateRange(15,120)][int]$AzureOperationTimeoutMinutes = 60,
     [ValidateRange(30,240)][int]$GuestSetupTimeoutMinutes = 240,
-    [ValidateRange(64,4095)][int]$ApplianceStagingDiskSizeGB = 128,
-    [ValidateSet('StandardSSD_LRS','Premium_LRS')][string]$ApplianceStagingDiskType = 'StandardSSD_LRS',
-    [ValidatePattern('^[E-Ze-z]$')][string]$ApplianceStagingDriveLetter = 'L',
+    [ValidateRange(40,400)][int]$ApplianceStagingMinimumFreeGB = 80,
     [string]$HealthPath
 )
 $ErrorActionPreference = 'Stop'
@@ -50,7 +44,7 @@ $hostScript = Read-LabHostConfiguration "$PSScriptRoot/host/configure-host.ps1"
 Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
     'Source deployment', 'Create source network', 'Create host public IP', 'Create host firewall rules',
     'Create host network interface', 'Create Azure host', 'Install Hyper-V and DHCP', 'Restart Azure host',
-    'Check Hyper-V readiness', 'Prepare appliance staging volume', 'Create guest image disk',
+    'Check Hyper-V readiness', 'Check appliance staging space', 'Create guest image disk',
     'Submit guest setup', 'Guest setup'
 )
 if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
@@ -73,7 +67,7 @@ $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
 $windowsImages = Get-LabWindowsImages -Location $Location
 $guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
 Write-Host "Selected host: $($hostSku.Name), $($hostSku.Cores) enabled vCPUs, $($hostSku.MemoryGB) GiB RAM. Confirm this series supports nested virtualization with Standard security before running deployment."
-Write-Host "Appliance staging disk: $ApplianceStagingDiskSizeGB GB $ApplianceStagingDiskType presented as $($ApplianceStagingDriveLetter.ToUpperInvariant()): for the Module 1 appliance VHD."
+Write-Host "Appliance staging: $ApplianceStagingMinimumFreeGB GB must stay free on the host's C: drive for the Module 1 appliance VHD."
 foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Storage','Microsoft.Migrate','Microsoft.OffAzure','Microsoft.RecoveryServices','Microsoft.KeyVault')) {
     $state = @(Get-AzResourceProvider -ProviderNamespace $provider)[0].RegistrationState
     if ($state -ne 'Registered') { throw "Register $provider first with Register-AzResourceProvider and wait until Registered." }
@@ -83,8 +77,7 @@ Write-LabHealth 'Source deployment' Preparing 0 'Preflight passed. Starting dedi
 $tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training' }
 $vmName = 'HyperVHost'
 $diskName = 'WinServerBase-temp'
-$stagingDiskName = "$vmName-appliance-staging"
-$stagingDrive = $ApplianceStagingDriveLetter.ToUpperInvariant()
+$appliancePath = 'C:\AzMigrateLab\Appliance'
 $runName = 'ConfigureWorkshop'
 $diskCreated = $false
 $runCreated = $false
@@ -108,10 +101,6 @@ try {
     $vm = Set-AzVMOperatingSystem -VM $vm -Windows -ComputerName $vmName -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
     $vm = Set-AzVMSourceImage -VM $vm -PublisherName $windowsImages.Host.Publisher -Offer $windowsImages.Host.Offer -Skus $windowsImages.Host.Sku -Version $windowsImages.Host.Version
     $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 512
-    # Guest VHDs stay on the OS disk. This separate empty data disk is created with the
-    # host so the appliance VHD always has its own unused capacity; it is never consumed
-    # by base image downloads, guest disks or SQL growth.
-    $vm = Add-AzVMDataDisk -VM $vm -Name $stagingDiskName -Lun 0 -CreateOption Empty -DiskSizeInGB $ApplianceStagingDiskSizeGB -StorageAccountType $ApplianceStagingDiskType -Caching None
     $vm = Add-AzVMNetworkInterface -VM $vm -Id $nic.Id
     $vm = Set-AzVMBootDiagnostic -VM $vm -Enable
     $job = New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vm -Tag $tags -AsJob
@@ -142,36 +131,31 @@ Write-Output 'HYPERV_INSTALLED'
         }
     }
     if (-not $ready) { throw 'Hyper-V host did not become ready.' }
-    # Bring the staging disk online as its own NTFS volume and prove the appliance VHD has
-    # room before any guest disk work starts. Reported free space is observed, not assumed.
+    # The 512 GB OS disk has ample room for the Module 1 appliance VHD, so no extra billed
+    # data disk is attached. Confirm the space is actually there and prepare the folder now,
+    # rather than letting the instructor discover a full disk mid-download.
     $stagingTemplate = @'
 $ErrorActionPreference = 'Stop'
-$letter = '__DRIVE__'
-$label = 'ApplianceStaging'
-$requiredBytes = 30GB
-$volume = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $volume) {
-    $candidate = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and -not $_.IsBoot -and -not $_.IsSystem } |
-        Sort-Object Number | Select-Object -First 1
-    if (-not $candidate) { throw 'No uninitialized data disk is present for appliance staging.' }
-    Initialize-Disk -Number $candidate.Number -PartitionStyle GPT -ErrorAction Stop
-    $partition = New-Partition -DiskNumber $candidate.Number -UseMaximumSize -DriveLetter $letter -ErrorAction Stop
-    $volume = Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force -ErrorAction Stop
-}
-if ($volume.DriveLetter -ne $letter) { throw "Appliance staging volume is mounted as $($volume.DriveLetter), not $letter." }
-New-Item -ItemType Directory -Path "${letter}:\Appliance" -Force | Out-Null
-$staging = Get-Volume -DriveLetter $letter -ErrorAction Stop
-if ($staging.SizeRemaining -lt $requiredBytes) {
-    throw "Appliance staging volume has $([math]::Round($staging.SizeRemaining/1GB,1)) GB free; at least 30 GB is required for the appliance VHD."
-}
+$labRoot = 'C:\AzMigrateLab'
+$appliancePath = Join-Path $labRoot 'Appliance'
+$requiredBytes = __REQUIREDGB__GB
 $system = Get-Volume -DriveLetter C -ErrorAction Stop
-Write-Output ("Appliance staging {0}: {1} GB free; system C: {2} GB free." -f $letter,
-    [math]::Round($staging.SizeRemaining/1GB,1), [math]::Round($system.SizeRemaining/1GB,1))
+if ($system.SizeRemaining -lt $requiredBytes) {
+    throw "Drive C: has $([math]::Round($system.SizeRemaining/1GB,1)) GB free; __REQUIREDGB__ GB is required to download and extract the Azure Migrate appliance VHD."
+}
+New-Item -ItemType Directory -Path $appliancePath -Force | Out-Null
+# C:\AzMigrateLab blocks inheritance and grants only SYSTEM and Administrators. Under UAC a
+# non-elevated process such as a browser download holds Administrators as deny-only, so grant
+# the lab administrator explicit rights on this subfolder while the parent stays restricted.
+& icacls.exe $appliancePath /grant:r '__ADMINUSER__:(OI)(CI)M' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not grant the lab administrator access to the appliance staging folder.' }
+Write-Output ("Appliance staging folder {0} ready; {1} GB free on C:." -f $appliancePath,
+    [math]::Round($system.SizeRemaining/1GB,1))
 Write-Output 'APPLIANCE_STAGING_READY'
 '@
-    $stagingScript = $stagingTemplate.Replace('__DRIVE__', $stagingDrive)
+    $stagingScript = $stagingTemplate.Replace('__REQUIREDGB__', [string]$ApplianceStagingMinimumFreeGB).Replace('__ADMINUSER__', $AdminUsername)
     $job = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $stagingScript -AsJob
-    $stagingResult = Wait-LabJob $job 'Prepare appliance staging volume' -TimeoutSeconds 1800 -HealthPath $HealthPath
+    $stagingResult = Wait-LabJob $job 'Check appliance staging space' -TimeoutSeconds 900 -HealthPath $HealthPath
     $stagingOutput = Assert-LabRunResult $stagingResult 'APPLIANCE_STAGING_READY'
     $stagingSummary = @($stagingOutput -split "`n" | Where-Object { $_ -match 'GB free' } | ForEach-Object { $_.Trim() })[0]
     $job = New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Disk $guestDiskConfig -AsJob
@@ -193,7 +177,7 @@ Write-Output 'APPLIANCE_STAGING_READY'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
-    Write-Host "Download and extract the Azure Migrate appliance VHD into ${stagingDrive}:\Appliance on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
+    Write-Host "Download and extract the Azure Migrate appliance VHD into $appliancePath on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
 } catch {
     try {
         $lastHealth = Get-Content -LiteralPath $HealthPath -Raw -ErrorAction Stop | ConvertFrom-Json

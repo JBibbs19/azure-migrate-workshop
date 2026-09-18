@@ -24,7 +24,7 @@ When you add host credentials later, use `HyperVHost\labadmin` (or whichever hos
 
 ## 3. Download, extract and import the appliance VHD
 
-The Azure Migrate appliance is a lightweight Windows Server VM that performs agentless discovery of your Hyper-V environment. Deployment did not create it — it created the four workloads and a staging volume sized for the appliance download. You build the appliance here, from Microsoft's published VHD.
+The Azure Migrate appliance is a lightweight Windows Server VM that performs agentless discovery of your Hyper-V environment. Deployment did not create it — it created the four workloads and reserved host capacity for the appliance, as listed in [Module 0, section 3.7](Module-0-Setup.md#37--azure-migrate-appliance-requirements). You build the appliance here, from Microsoft's published VHD.
 
 Work inside HyperVHost in an elevated Windows PowerShell session.
 
@@ -35,26 +35,27 @@ Work inside HyperVHost in an elevated Windows PowerShell session.
 3. Enter the appliance name `MigrateAppl` and generate the project key.
 4. **Copy the key and keep it somewhere safe** — you need it during registration, and it must stay out of Git, screenshots and chat.
 
-### 3.2 — Confirm the staging volume
+### 3.2 — Confirm the staging space
 
-Before downloading anything, check that the volume deployment prepared for you is present and has room:
+Before downloading anything, check that the folder deployment prepared for you is present and the host still has room:
 
 ```powershell
-Get-Volume -DriveLetter L | Select-Object DriveLetter,FileSystemLabel,SizeRemaining
+Get-Item C:\AzMigrateLab\Appliance
+Get-Volume -DriveLetter C | Select-Object DriveLetter,SizeRemaining
 ```
 
-**Expected result:** `L:` exists, is labelled `ApplianceStaging`, and reports at least 30 GB free.
+**Expected result:** the folder exists, and `C:` reports at least 80 GB free.
 
-> **Note:** Both the compressed download and the extracted VHD have to fit here. Do not stage either one on `C:` — that is where the four guest VHDs live, and filling it will disrupt the running workloads.
+> **Note:** The compressed download and the expanded VHD both have to fit, alongside four guest VHDs that grow as the workshop runs. Deployment checked this space before provisioning, but confirm it again here — the guests have been running since.
 
 ### 3.3 — Download and verify the archive
 
-Download the appliance archive from the project's download link into `L:\Appliance`. Then verify it against the hash Microsoft publishes for that exact file before you extract it:
+Download the appliance archive from the project's download link into `C:\AzMigrateLab\Appliance`. Then verify it against the hash Microsoft publishes for that exact file before you extract it:
 
 ```powershell
-$archive = Get-ChildItem 'L:\Appliance' -Filter *.zip | Select-Object -First 1
+$archive = Get-ChildItem 'C:\AzMigrateLab\Appliance' -Filter *.zip | Select-Object -First 1
 Get-FileHash -Path $archive.FullName -Algorithm SHA256 | Format-List
-Expand-Archive -Path $archive.FullName -DestinationPath 'L:\Appliance\Extracted'
+Expand-Archive -Path $archive.FullName -DestinationPath 'C:\AzMigrateLab\Appliance\Extracted'
 ```
 
 Stop if the hash does not match. Keep the archive until the import succeeds; delete it afterwards only if you need the space back.
@@ -66,8 +67,8 @@ Stop if the hash does not match. Keep the archive until the import succeeds; del
 Create the appliance VM on the internal lab switch and reserve its address:
 
 ```powershell
-$vhd = (Get-ChildItem 'L:\Appliance\Extracted' -Recurse -Include *.vhd,*.vhdx | Select-Object -First 1).FullName
-New-VM -Name MigrateAppl -MemoryStartupBytes 16GB -VHDPath $vhd -SwitchName intSwitch -Path 'L:\Appliance\VMs' -Generation 1
+$vhd = (Get-ChildItem 'C:\AzMigrateLab\Appliance\Extracted' -Recurse -Include *.vhd,*.vhdx | Select-Object -First 1).FullName
+New-VM -Name MigrateAppl -MemoryStartupBytes 16GB -VHDPath $vhd -SwitchName intSwitch -Path 'C:\AzMigrateLab\Appliance\VMs' -Generation 1
 Set-VMProcessor -VMName MigrateAppl -Count 8
 Set-VMMemory -VMName MigrateAppl -DynamicMemoryEnabled $false
 Set-VM -Name MigrateAppl -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
@@ -94,7 +95,7 @@ Open the VM console in Hyper-V Manager, accept the appliance's first-boot prompt
 
 > **Note:** The appliance software is already in Microsoft's VHD. Do not run `AzureMigrateInstaller.ps1` inside it, and never run it on HyperVHost itself.
 
-> **Instructor note.** If you deliberately choose the script-based installation route on a Windows VM you build separately, prepare the Gateway payload first with [Expand-LabApplianceGateway.ps1](../scripts/Expand-LabApplianceGateway.ps1), and follow [Gateway extraction troubleshooting](Troubleshooting.md#appliance-installer-cannot-find-the-gateway-setup-program) if it fails. Note also that Microsoft's production prerequisites document an external switch; this nested lab uses one NIC with NAT and DHCP for both host reachability and egress, so prove that path end to end in rehearsal before teaching it. [Set up an appliance for Hyper-V](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v)
+> **Instructor note.** Microsoft's production prerequisites document an external switch. This nested lab uses one NIC with NAT and DHCP for both host reachability and egress, so validate that path end to end before teaching it, and do not present the nested topology as a supported production configuration. [Set up an appliance for Hyper-V](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v)
 
 ## 4. Register and discover
 

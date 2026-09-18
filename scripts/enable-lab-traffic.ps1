@@ -445,11 +445,24 @@ function Invoke-LabLinuxPayload {
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($expanded -replace "`r`n","`n")))
     Write-Step "Connecting to $VMName ($Address). Enter the lab password for $LinuxUsername when prompted."
     $remote = "echo $encoded | base64 -d | sudo bash"
-    $output = & $ssh.Source '-o' 'StrictHostKeyChecking=no' '-o' 'UserKnownHostsFile=NUL' `
-        '-o' 'ConnectTimeout=15' "$LinuxUsername@$Address" $remote 2>&1
+    # ssh writes progress and host-key notices to stderr even on success. Merging that stream
+    # with 2>&1 while ErrorActionPreference is 'Stop' turns each line into a terminating
+    # NativeCommandError, so the run aborts on a benign warning. Relax the preference for the
+    # duration of the native call and judge the result by exit code and marker instead.
+    # LogLevel=ERROR also suppresses the 'Permanently added ... to the list of known hosts'
+    # notice, which is emitted on every run because the throwaway known-hosts file never
+    # retains the key.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $ssh.Source '-o' 'StrictHostKeyChecking=no' '-o' 'UserKnownHostsFile=NUL' `
+            '-o' 'LogLevel=ERROR' '-o' 'ConnectTimeout=15' "$LinuxUsername@$Address" $remote 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    $text = @($output | ForEach-Object { [string]$_ }) -join "`n"
     $output | ForEach-Object { Write-Host "  $_" }
-    if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch [regex]::Escape($Marker)) {
-        Write-Warning "$VMName did not report $Marker. Review the output above, or run $scriptPath from its console."
+    if ($exitCode -ne 0 -or $text -notmatch [regex]::Escape($Marker)) {
+        Write-Warning "$VMName did not report $Marker (ssh exit code $exitCode). Review the output above, or run $scriptPath from its console."
         return $false
     }
     Write-Step "$VMName configured."

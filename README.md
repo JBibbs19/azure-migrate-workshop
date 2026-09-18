@@ -2,32 +2,32 @@
 
 **Cloud Enablement Services** · Partner hands-on training
 
-Read the course in the [workshop wiki](https://github.com/j33pguy/azure-migrate-workshop/wiki), or use the versioned local guides linked below. The [maintenance guide](docs/Repository-Maintenance.md) explains how the two stay synchronized.
+Work through the guides linked below in order. Each module builds on the environment the previous one left behind.
 
 Discover, assess, test and migrate four Hyper-V VMs to Azure, then validate and clean up the environment. All four workloads use the **Hyper-V host replication provider**. The discovery appliance performs assessment; the replication provider on the Hyper-V host moves VM data. SQL Server does not require a different replication architecture simply because it stores data. [Microsoft Hyper-V migration tutorial](https://learn.microsoft.com/azure/migrate/tutorial-migrate-hyper-v)
 
-**Release status:** awaiting live Azure/Hyper-V rehearsal. Automated checks run on Windows and Linux; an instructor must complete the [release checklist](docs/Instructor-Guide.md) before partner delivery. Use the [validation workflow](https://github.com/j33pguy/azure-migrate-workshop/actions/workflows/validate.yml) to check results for the exact revision you plan to use.
+**Release status:** awaiting a full live Azure/Hyper-V run. Validate the scripts end to end in a training subscription before partner delivery, and record the revision you used.
 
 ## Learning path
 
-Provision the environment before the teaching session. Budget a full working day for initial delivery; actual deployment, discovery, replication and backup time depends on bandwidth, quota and regional capacity. Measure duration in rehearsal before advertising a timed agenda.
+Provision the environment before the teaching session. Budget a full working day for initial delivery; actual deployment, discovery, replication and backup time depends on bandwidth, quota and regional capacity. Measure the duration yourself before advertising a timed agenda.
 
 | Module | Exercise | Completion evidence |
 |---|---|---|
-| 0 | [Setup](docs/Module-0-Setup.md) | Four nested VMs healthy; appliance staging volume with at least 30 GB free |
+| 0 | [Setup](docs/Module-0-Setup.md) | Four nested VMs healthy; host staging space confirmed |
 | 1 | [Discovery and assessment](docs/Module-1-Discovery.md) | Four workload names discovered and an Azure VM assessment; optionally a populated dependency map via the [lab traffic mesh](docs/Lab-Traffic.md) |
 | 2 | [Hyper-V replication and test migration](docs/Module-2-HyperV-Migration.md) | Successful isolated tests for every workload |
 | 3 | [Cutover and stateful validation](docs/Module-3-Stateful-Migration.md) | Planned migration, SQL data comparison, application acceptance |
 | 4 | [Azure Migrate and Site Recovery](docs/Module-4-ASR-Comparison.md) | Explain migration versus ongoing disaster recovery |
 | 5 | [Post-migration operations](docs/Module-5-Post-Migration.md) | Monitoring evidence, optional backup/restore, cost and security review |
-| Finish | [Cleanup](docs/Cleanup.md) | Test/replication artifacts and all workshop resources accounted for |
+| Finish | Cleanup | Test/replication artifacts and all workshop resources accounted for |
 
 ## Environment
 
 ```mermaid
 flowchart LR
   subgraph Source["Source resource group · 10.0.0.0/16"]
-    Host["HyperVHost · Windows Server 2022\nStandard_E8s_v7 · 8 vCPU / 64 GB\n512 GB OS disk · 128 GB appliance staging disk (L:)\nStandard security"]
+    Host["HyperVHost · Windows Server 2022\nStandard_E8s_v7 · 8 vCPU / 64 GB\n512 GB OS disk · Standard security"]
     subgraph Nested["intSwitch · NAT + DHCP reservations · 192.168.0.0/24"]
       IIS["OnPrem-Web · .10 · IIS"]
       SQL["OnPrem-SQL · .11 · SQL Express 2022"]
@@ -48,16 +48,14 @@ flowchart LR
   Project --> Target
 ```
 
-This is a **single nested Hyper-V host**, not a cluster or a production landing zone. Its internal NAT topology is a workshop adaptation. Microsoft documents an external switch for a production appliance deployment; validate the nested topology in rehearsal and do not describe it as production support certification. [Appliance prerequisites](https://learn.microsoft.com/azure/migrate/deploy-appliance-script)
+This is a **single nested Hyper-V host**, not a cluster or a production landing zone. Its internal NAT topology is a workshop adaptation. Microsoft documents an external switch for a production appliance deployment; validate the nested topology yourself and do not describe it as production support certification. [Appliance prerequisites](https://learn.microsoft.com/azure/migrate/deploy-appliance-script)
 
 The sites and Node API are independent samples. The IIS page is static; Nginx is not a reverse proxy; the Node API has no database client or persistence. The SQL database remains named `ContosoApp` to keep its sample schema and validation stable.
 
 ## Start here
 
-For an instructor rehearsal, use the [single-launcher walkthrough](docs/Automated-Rehearsal.md) and double-click [Start-Rehearsal.cmd](Start-Rehearsal.cmd) on Windows. It runs scripted stages in order, pauses for portal/evidence checkpoints and saves a resumable report. The manual learner path follows below.
-
 1. Read [Module 0](docs/Module-0-Setup.md), including subscription, quota, licensing, downloads and cost preparation.
-2. Obtain the merged version from [j33pguy/azure-migrate-workshop](https://github.com/j33pguy/azure-migrate-workshop/tree/main). Use `main` for rehearsal and record the exact commit shown below. For partner delivery, the instructor must supply the release tag or commit that passed rehearsal so every learner uses the same revision. Run these commands in a terminal, then continue from the repository directory:
+2. Obtain the repository and record the exact commit shown below. For partner delivery, supply the release tag or commit you validated so every learner uses the same revision. Run these commands in a terminal, then continue from the repository directory:
 
    ```bash
    git clone --branch main https://github.com/j33pguy/azure-migrate-workshop.git
@@ -91,13 +89,11 @@ The deployment scripts require **new, dedicated resource groups**. They intentio
 
 | Script | Behavior |
 |---|---|
-| `Start-LabRehearsal.ps1` | Ordered, resumable instructor rehearsal; automatic checks plus explicit manual checkpoints, reports and separate deployment/cleanup approval |
-| `deploy-lab.ps1` | Billable source host, nested guests, DHCP/NAT and samples; attaches and verifies the appliance staging volume; protected setup parameters; fails if readiness is not observed |
+| `deploy-lab.ps1` | Billable source host, nested guests, DHCP/NAT and samples; verifies appliance staging space; protected setup parameters; fails if readiness is not observed |
 | `host/configure-host.ps1` | Runs inside the Windows host; creates the four workload VMs and stages the optional traffic generator |
 | `migrate-step1-setup-project.ps1` | Billable target/test network preparation; portal project creation follows |
 | `enable-lab-traffic.ps1` | Optional; staged on HyperVHost by deployment and run there with its generated settings file. Wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` reverses it |
-| `Test-MigratedWorkloads.ps1` | Executes smoke tests inside explicitly named Azure VMs using their VM agents |
-| `Test-LabSqlData.ps1` | Runs inside the SQL VM; captures or compares every defined column of the two sample tables against a preserved source baseline |
+| `migrate-step2` – `migrate-step5` | Discovery/assessment, replication, test migration and cutover helpers for Modules 1–3 |
 | `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |
 | `cleanup-lab.ps1` | Preview/confirmed deletion of explicitly named, tagged groups; refuses vaults and locks |
 
@@ -110,10 +106,26 @@ Estimate the host, OS disk, target/test VMs, replicated disks/storage, **two NAT
     -ResourceGroupName $targetRg,$sourceRg -WhatIf
 ```
 
-Follow [Cleanup](docs/Cleanup.md) before running the deletion without `-WhatIf`.
+Review the preview output before running the deletion without `-WhatIf`.
+
+## A note from the author
+
+These notes record environment issues met while building and running this lab, and why parts of the scripts look the way they do. They are observations from one subscription and one region, not a compatibility matrix.
+
+**The host size default changed from `Standard_E8s_v5` to `Standard_E8s_v7`.** The v5 size was not available to the subscription this lab was built in. Esv7 offers the same 8 vCPU / 64 GB shape and reports nested virtualization support, so it became the default. `deploy-lab.ps1` validates whatever size you pass against your own subscription's SKU metadata and quota, so a different family works if it meets the lab's floor.
+
+**Esv7 is a Generation 2 only series, and its sizes require an OS image with NVMe support.** The workshop's Windows Server 2022 Gen2 host image satisfies both. If you change the host image, check those two properties first.
+
+**Deployment pins the image catalog API version and forces Standard security on the temporary guest disk.** Both are deliberate. Letting the installed Az.Compute module pick its own API version produced inconsistent results across machines, and the disk cmdlets will otherwise default a Trusted Launch image lookup that is incompatible with exporting the disk to nested Hyper-V guests.
+
+**The Azure Migrate appliance VHD Microsoft publishes for Hyper-V is Generation 1.** Module 1 creates the appliance VM with `-Generation 1` for that reason. Confirm the current generation and disk format in Microsoft's article before you run it — a Generation 2 VM will not boot a Generation 1 VHD, and the failure looks like a corrupt download.
+
+**The lab stages the appliance on the host's own OS disk.** An earlier revision attached a separate managed data disk for this. It was removed because the 512 GB OS disk already has the capacity and a data disk bills continuously, including while the VM is deallocated.
+
+No attempt has been made to solve for environments beyond the one this was built in. If you hit a different compatibility problem — a region without the host size, a policy that blocks disk export, a proxy that blocks a package source — please open an issue with the error and your region and subscription type. Feedback of that kind is what turns one environment's findings into guidance that holds up more broadly.
 
 ## Maintenance and provenance
 
-Run `pwsh -NoProfile -File scripts/Start-LabRehearsal.ps1 -Mode Validate` and `python3 tests/check_docs.py` before sharing changes. CI also runs the PowerShell checks with Windows PowerShell 5.1 and exercises Linux HTTP failure handling. See the [instructor checklist](docs/Instructor-Guide.md), [repository maintenance guide](docs/Repository-Maintenance.md), and [branding guide](docs/Branding-and-Forking.md).
+Parse every script with PowerShell before sharing changes, and confirm the documentation links resolve. The host-side scripts target Windows PowerShell 5.1; the deployment client works on either 5.1 or PowerShell 7.
 
-The supplied source has an [MIT license](LICENSE) attributed to Pamir Erdem. Its GitHub metadata reports a standalone repository; the claimed Microsoft original was not identified. Preserve the existing license and trace the original source before making Microsoft-derived attribution claims. See [NOTICE](NOTICE.md).
+The supplied source has an [MIT license](LICENSE) attributed to Pamir Erdem. Its GitHub metadata reports a standalone repository; the claimed Microsoft original was not identified. Preserve the existing license and trace the original source before making Microsoft-derived attribution claims.

@@ -192,6 +192,16 @@ function Wait-LabJob {
     }
 }
 
+# Kept beside its only caller so this file stands alone: deploy-lab.ps1 dot-sources it
+# after common.ps1, and configure-host.ps1 embeds it without common.ps1 at all.
+function Assert-LabManagedRunResult {
+    param([Parameter(Mandatory)]$InstanceView)
+    if ($InstanceView.ExecutionState -ne 'Succeeded' -or $null -eq $InstanceView.ExitCode -or $InstanceView.ExitCode -ne 0 -or
+        $InstanceView.Output -cnotmatch '(?m)^LAB_WORKLOADS_READY\r?$') {
+        throw 'Guest setup did not pass. Inspect the managed Run Command instance view and C:\AzMigrateLab\setup-log.txt.'
+    }
+}
+
 function Wait-LabManagedSetup {
     param([Parameter(Mandatory)][scriptblock]$ReadStatus, [Parameter(Mandatory)][hashtable]$Observation,
         [ValidateRange(1,18000)][int]$TimeoutSeconds = 15000,

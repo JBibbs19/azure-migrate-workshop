@@ -63,6 +63,11 @@ Useful switches:
 > Hyper-V cmdlets and PowerShell Direct access to the guests, so it must run on HyperVHost.
 > It stops with a clear message if you try.
 
+> **Tip:** Re-running the script is safe. Every step is written to be repeatable — hosts entries
+> are replaced between markers, the SQL login is created or altered, the scheduled task is
+> registered with `-Force`, and the Linux units are rewritten and restarted. If a run stops
+> part-way, fix the cause and run it again rather than unpicking what it already did.
+
 ## Verify
 
 ```powershell
@@ -121,5 +126,5 @@ are readable by an administrator of the guest. Use lab-only credentials, as Modu
 ## Firewall
 
 The base deployment already permits this traffic between guests; see
-[Module 0](Module-0-Setup.md#8-lab-firewall-posture). No additional rules are needed for the
-mesh itself.
+[Module 0, section 8.2](Module-0-Setup.md#82--lab-firewall-posture). No additional rules are
+needed for the mesh itself.

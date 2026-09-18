@@ -53,15 +53,6 @@ function Get-LabResourceGroup {
     return [pscustomobject]@{ ResourceGroupName=$body.name; ResourceId=$body.id; Tags=$tags }
 }
 
-function Assert-LabResourceGroup {
-    param([Parameter(Mandatory)][string]$Name)
-    $rg = Get-LabResourceGroup $Name
-    if (-not $rg.Tags -or $rg.Tags['Workshop'] -ne 'TD-SYNNEX-CES-HyperV') {
-        throw "Resource group '$Name' is not tagged as this workshop. It will not be modified."
-    }
-    return $rg
-}
-
 function Assert-LabAdminSource {
     param([Parameter(Mandatory)][string]$Cidr)
     $ip = $null
@@ -72,17 +63,6 @@ function Assert-LabAdminSource {
         $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
         $parts[0] -eq '0.0.0.0') {
         throw 'AdminSourceCidr must be your current public IPv4 address followed by /32.'
-    }
-}
-
-function Assert-LabWorkloadNames {
-    param([Parameter(Mandatory)][string[]]$Names)
-    if ($Names.Count -ne 4) { throw 'Supply the exact names of all four workload VMs.' }
-    $unique = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($name in $Names) {
-        if ($name -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$' -or -not $unique.Add($name)) {
-            throw 'Workload VM names must be four distinct exact names, without wildcards or whitespace.'
-        }
     }
 }
 
@@ -260,12 +240,4 @@ function Assert-LabRunResult {
         throw "Remote validation did not pass. Review the VM Run Command output. $stderr"
     }
     return $stdout
-}
-
-function Assert-LabManagedRunResult {
-    param([Parameter(Mandatory)]$InstanceView)
-    if ($InstanceView.ExecutionState -ne 'Succeeded' -or $null -eq $InstanceView.ExitCode -or $InstanceView.ExitCode -ne 0 -or
-        $InstanceView.Output -cnotmatch '(?m)^LAB_WORKLOADS_READY\r?$') {
-        throw 'Guest setup did not pass. Inspect the managed Run Command instance view and C:\AzMigrateLab\setup-log.txt.'
-    }
 }
