@@ -36,8 +36,10 @@ Every infrastructure choice in this lab was made deliberately. The table below d
 | Decision | Choice | Rationale |
 |---|---|---|
 | **Host VM size** | `Standard_E8s_v7` | 8 vCPUs, 64 GB RAM. The Esv7 series is memory-optimized and supports nested virtualization. The four guests consume 12 GB, leaving room for the host OS, Hyper-V overhead, disk caching and the 16 GB Azure Migrate appliance added in Module 1. Smaller sizes such as `Standard_E4s_v7` support nesting but have only 32 GB, which is too tight once the appliance is running. |
-| **OS disk** | 512 GB Premium SSD | The host OS, Hyper-V role, base images and all four guest VHDs share one disk, and the Module 1 appliance VHD is downloaded and expanded here too. Premium SSD provides the IOPS needed when four guests perform simultaneous disk I/O; Standard SSD works but adds noticeable latency during guest provisioning. |
-| **Appliance staging** | Host OS disk, no data disk | An additional managed data disk would bill continuously — including while the VM is deallocated — for capacity the 512 GB OS disk already has spare. Deployment instead verifies free space and prepares `C:\AzMigrateLab\Appliance` before provisioning begins. |
+| **OS disk** | 512 GB Premium SSD | One disk holds the host OS, the Hyper-V role, the base images, 140 GB of fixed guest VHDs and a dedicated appliance partition. Premium SSD provides the IOPS needed when four guests perform simultaneous disk I/O; Standard SSD works but adds noticeable latency during guest provisioning and to the fixed-disk allocation below. |
+| **Guest disk type** | Fixed, not dynamic | Each guest VHD is allocated in full at creation: 40 GB for each Windows guest and 30 GB for each Linux guest, 140 GB in total. Host capacity is therefore known from the start and does not shift under the workshop as guests write. A dynamic disk also expands on write, and that write amplification appears as erratic disk I/O in the Module 1 performance-based assessment. The cost is deployment time — see [section 4](#4-deployment-steps). |
+| **Guest memory** | Static, not dynamic | Fixed startup memory with dynamic memory disabled, for the same reason: the assessment should observe a stable machine, not one whose memory the hypervisor is resizing. |
+| **Appliance storage** | Dedicated `D:` partition on the OS disk | A separate managed data disk would bill continuously — including while the VM is deallocated — for capacity the 512 GB OS disk already has spare. Deployment instead carves a 100 GB partition from that disk, which the guest VHDs never touch, so the appliance cannot be starved by guest growth and vice versa. |
 | **Appliance delivery** | VHD import in Module 1 | Deployment does not pre-build an appliance VM. Microsoft publishes a ready-made appliance VHD, so importing it is both closer to real practice and avoids provisioning a Windows guest that is immediately replaced. |
 | **Guest network** | `192.168.0.0/24` with NAT | Simulates an isolated on-premises network. NAT provides outbound internet access, required for package downloads during provisioning, without exposing guests to inbound traffic from the Azure VNet. This mirrors how many on-premises datacenters sit behind NAT with no direct internet-facing exposure. |
 | **VM generation** | Gen 2 | UEFI boot, vTPM support and larger OS disk support. Gen 2 is required for several Azure features post-migration (Trusted Launch, Confidential VMs), so starting here avoids a generation conversion later. |
@@ -125,9 +127,11 @@ You build the Azure Migrate appliance in Module 1, not here. Deployment leaves r
 |---|---|
 | Host memory headroom | 16 GB, unallocated after the four guests take 12 GB |
 | Host vCPU | 8 virtual processors, oversubscribed against the host's 8 |
-| Free disk space on `C:` | 80 GB, verified during deployment and reserved for the appliance archive and its expanded VHD |
-| Staging folder | `C:\AzMigrateLab\Appliance`, created and permissioned during deployment |
+| Appliance storage | A dedicated 100 GB `D:` partition, created during deployment and untouched by the guest VHDs |
+| Staging folder | `D:\Appliance`, created and permissioned during deployment |
 | Network | Outbound HTTPS from the host for the appliance download, and from the appliance itself for Azure registration |
+
+> **Note:** The default host size has no local temporary disk, so `D:` is available for this partition. A size that provides a temporary disk will already be using `D:`; pass `-ApplianceStoreDriveLetter` to choose another letter in that case.
 
 > **Instructor note.** The appliance archive is a large download performed on the host during Module 1. Confirm your proxy permits it — one that allows the Azure portal but blocks the appliance download will strand learners at the start of the module.
 
@@ -180,9 +184,9 @@ $password = Read-Host 'Lab-only administrator password' -AsSecureString
 
 Write all four decimal octets of `$adminCidr` without leading zeros; abbreviated, hexadecimal and integer address forms are rejected. If your address changes later, update the existing NSG rule rather than redeploying.
 
-Before provisioning begins, deployment verifies the host has 80 GB free on `C:` and prepares `C:\AzMigrateLab\Appliance`, so a space problem surfaces immediately rather than an hour into setup. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
+Before provisioning begins, deployment shrinks `C:` and creates the 100 GB `D:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
 
-> ⏱️ **Estimated time: 30–60 minutes.** Progress is printed as each stage completes. No interaction is needed once it starts.
+> ⏱️ **Estimated time: 50–100 minutes.** Progress is printed as each stage completes, and no interaction is needed once it starts. The guest disks are fixed rather than dynamic, so setup writes all 140 GB during provisioning instead of deferring it to first use. On a 512 GB Premium SSD that adds roughly 20–40 minutes over a dynamic-disk build — paid once, at deployment, rather than unpredictably during the workshop.
 >
 > 💡 **Tip:** Detailed logs are written to `C:\AzMigrateLab\setup-log.txt` on the host VM.
 
@@ -233,8 +237,15 @@ Get-DhcpServerv4Lease -ScopeId 192.168.0.0
 # Setup record on HyperVHost — expect the four VM names and a CompletedUtc timestamp
 Get-Content C:\AzMigrateLab\setup-complete.json
 
-# Free space on HyperVHost — expect 80 GB or more remaining on C:
-Get-Volume -DriveLetter C | Select-Object DriveLetter,SizeRemaining
+# Appliance store on HyperVHost — expect label ApplianceStore, roughly 100 GB, nearly all free
+Get-Volume -DriveLetter D | Select-Object DriveLetter,FileSystemLabel,Size,SizeRemaining
+
+# Guest disk allocation on HyperVHost — expect four Fixed disks: 40, 40, 30, 30 GB
+Get-VM | Get-VMHardDiskDrive | ForEach-Object { Get-VHD $_.Path } |
+    Select-Object @{N='VHD';E={Split-Path $_.Path -Leaf}},VhdType,@{N='MaxGB';E={[math]::Round($_.Size/1GB)}}
+
+# Guest memory on HyperVHost — expect DynamicMemoryEnabled False on all four
+Get-VM | Select-Object Name,DynamicMemoryEnabled,MemoryStartup
 
 # IIS on OnPrem-Web — expect HTTP 200
 (Invoke-WebRequest http://192.168.0.10 -UseBasicParsing).StatusCode
@@ -257,7 +268,9 @@ Test-NetConnection 192.168.0.11 -Port 1433
 | Both `Invoke-WebRequest` calls | `200` |
 | `Invoke-RestMethod` | `status: healthy` |
 | `Test-NetConnection` | `TcpTestSucceeded: True` |
-| `Get-Volume -DriveLetter C` | At least 80 GB remaining |
+| `Get-Volume -DriveLetter D` | Label `ApplianceStore`, roughly 100 GB, nearly all free |
+| `Get-VHD` output | Four disks, all `VhdType: Fixed` — 40, 40, 30 and 30 GB |
+| `DynamicMemoryEnabled` | `False` on all four guests |
 
 > **Note:** A VM heartbeat or a successful ping does not prove an application works. That is why every workload check above targets an application-layer endpoint rather than ICMP.
 
@@ -357,13 +370,21 @@ Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database Con
 | 3 | `westeurope` | Primary European region |
 | 4 | `northeurope` | European fallback |
 
-### Insufficient Free Space on C:
+### Appliance Store Partition Cannot Be Created
 
-**Symptom:** Deployment stops at the appliance staging check, reporting the observed free space.
+**Symptom:** Deployment stops at *Create appliance store partition*, reporting that it cannot free the requested space, or that the drive letter is in use.
 
-**Cause:** The host OS disk does not have the required headroom for the Module 1 appliance download and its expanded VHD.
+**Cause:** The OS disk cannot give up 100 GB while still leaving room for Windows and the 140 GB of fixed guest disks — or the chosen letter is already taken, most often by a temporary disk on a host size that provides one.
 
-**Resolution:** Deploy with a larger OS disk, or lower the gate with `-ApplianceStagingMinimumFreeGB` only if you have confirmed the appliance will still fit. The guest VHDs are dynamic and grow during the workshop, so do not run the host close to full.
+**Resolution:** Deploy with a larger OS disk, reduce `-ApplianceStoreSizeGB`, or choose a free letter with `-ApplianceStoreDriveLetter`. Do not reclaim the space by making the guest disks dynamic; the fixed allocation is what keeps host capacity and the Module 1 assessment predictable.
+
+### Guest Disk Creation Is Slow
+
+**Symptom:** *Create OnPrem-Web disk* and its siblings take far longer than in earlier revisions of this lab.
+
+**Cause:** Expected. The guest disks are fixed, so all 140 GB is written during setup rather than on first use.
+
+**Resolution:** None needed. Budget 50–100 minutes for deployment. If it is genuinely stalled rather than slow, check `C:\AzMigrateLab\setup-log.txt` for the conversion stage and confirm the OS disk is Premium SSD.
 
 ### Guest VM Not Starting
 
@@ -527,7 +548,7 @@ Understanding the cost profile is essential for planning workshops at scale and 
 
 > **Note:** The four guest VMs run inside the host and incur **no separate Azure charges** — their compute and storage come from the host's resources. The same is true of the Azure Migrate appliance you add in Module 1.
 
-> 💡 **A deliberate saving.** Earlier revisions of this lab attached a separate 128 GB managed data disk to stage the appliance VHD. It was removed: the 512 GB OS disk already has the capacity, and a data disk bills continuously — including while the VM is deallocated — for space the lab already owns.
+> 💡 **A deliberate saving.** Earlier revisions of this lab attached a separate 128 GB managed data disk to stage the appliance VHD. It was removed in favour of a partition on the OS disk: the 512 GB disk already has the capacity, and a second managed disk bills continuously — including while the VM is deallocated — for space the lab already owns.
 
 ### 9.2 — Cost Optimization Tips
 
@@ -563,8 +584,9 @@ Estimate every resource listed in the [README](../README.md) for your own region
 |---|---|---|
 | Azure VM provisioning | ~5–10 minutes | Resource group, networking, host VM creation |
 | Hyper-V role installation and reboot | ~5–10 minutes | Feature installation, mandatory restart |
-| Guest VM creation and workload configuration | ~20–40 minutes | Image downloads, VHD creation, OS provisioning, application installation |
-| **Total** | **~30–60 minutes** | Fully automated — no manual steps required |
+| Appliance store partition | ~1 minute | Shrink `C:`, create and format `D:` |
+| Guest VM creation and workload configuration | ~40–80 minutes | Image downloads, **fixed** VHD allocation of 140 GB, OS provisioning, application installation |
+| **Total** | **~50–100 minutes** | Fully automated — no manual steps required |
 
 ---
 

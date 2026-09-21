@@ -285,9 +285,16 @@ function Create-WindowsGuestVM {
 
     $vmVhdPath = "$vhdPath\$VMName.vhdx"
     if (-not (Test-Path $vmVhdPath)) {
-        $job = Convert-VHD -Path $windowsBaseVhd -DestinationPath $vmVhdPath -VHDType Dynamic -AsJob -ErrorAction Stop
-        $null = Wait-LabJob $job "Create $VMName disk" -TimeoutSeconds 1800
+        # Fixed, not dynamic. The guest disks are allocated in full at creation so host
+        # capacity is deterministic and does not shift under the workshop as the guests
+        # write. A dynamic disk also produces expansion write amplification, which shows up
+        # as erratic disk I/O in the performance-based assessment in Module 1.
+        $job = Convert-VHD -Path $windowsBaseVhd -DestinationPath $vmVhdPath -VHDType Fixed -AsJob -ErrorAction Stop
+        $null = Wait-LabJob $job "Create $VMName disk" -TimeoutSeconds 5400
         Resize-VHD -Path $vmVhdPath -SizeBytes ($DiskGB * 1GB)
+        $created = Get-VHD -Path $vmVhdPath
+        if ($created.VhdType -ne 'Fixed') { throw "$VMName disk is $($created.VhdType); the workshop requires a fixed disk." }
+        Write-Log "Created $VMName disk: ${DiskGB} GB fixed."
     }
 
     # Generate unattend.xml
@@ -372,7 +379,7 @@ function Create-WindowsGuestVM {
 function Create-LinuxGuestVM {
     param(
         [string]$VMName, [string]$IPAddress,
-        [int]$MemoryMB = 2048, [int]$CPUs = 2,
+        [int]$MemoryMB = 2048, [int]$CPUs = 2, [int]$DiskGB = 30,
         [string[]]$ExtraPackages = @(),
         [string]$ExtraRunCmdYaml = ""
     )
@@ -384,12 +391,19 @@ function Create-LinuxGuestVM {
 
     $vmVhdPath = "$vhdPath\$VMName.vhdx"
     if (-not (Test-Path $vmVhdPath)) {
-        $job = Convert-VHD -Path $ubuntuBaseVhd -DestinationPath $vmVhdPath -VHDType Dynamic -AsJob -ErrorAction Stop
-        $null = Wait-LabJob $job "Create $VMName disk" -TimeoutSeconds 1800
+        # Fixed for the same reason as the Windows guests: predictable host capacity and
+        # steady disk I/O for the Module 1 assessment.
+        $job = Convert-VHD -Path $ubuntuBaseVhd -DestinationPath $vmVhdPath -VHDType Fixed -AsJob -ErrorAction Stop
+        $null = Wait-LabJob $job "Create $VMName disk" -TimeoutSeconds 5400
     }
 
-    # Resize the standalone disk so cloud-init has room
-    Resize-VHD -Path $vmVhdPath -SizeBytes 30GB -ErrorAction Stop
+    # Resize the standalone disk so cloud-init has room. On a fixed disk this allocates the
+    # remaining capacity on the host now rather than on first write.
+    Resize-VHD -Path $vmVhdPath -SizeBytes ($DiskGB * 1GB) -ErrorAction Stop
+    $created = Get-VHD -Path $vmVhdPath
+    if ($created.VhdType -ne 'Fixed') { throw "$VMName disk is $($created.VhdType); the workshop requires a fixed disk." }
+    Write-Log "Created $VMName disk: ${DiskGB} GB fixed."
+
 
     # Cloud-init files
     $cloudInitDir = "$labRoot\CloudInit\$VMName"
