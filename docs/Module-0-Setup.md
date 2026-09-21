@@ -39,7 +39,7 @@ Every infrastructure choice in this lab was made deliberately. The table below d
 | **OS disk** | 512 GB Premium SSD | One disk holds the host OS, the Hyper-V role, the base images, 140 GB of fixed guest VHDs and a dedicated appliance partition. Premium SSD provides the IOPS needed when four guests perform simultaneous disk I/O; Standard SSD works but adds noticeable latency during guest provisioning and to the fixed-disk allocation below. |
 | **Guest disk type** | Fixed, not dynamic | Each guest VHD is allocated in full at creation: 40 GB for each Windows guest and 30 GB for each Linux guest, 140 GB in total. Host capacity is therefore known from the start and does not shift under the workshop as guests write. A dynamic disk also expands on write, and that write amplification appears as erratic disk I/O in the Module 1 performance-based assessment. The cost is deployment time — see [section 4](#4-deployment-steps). |
 | **Guest memory** | Static, not dynamic | Fixed startup memory with dynamic memory disabled, for the same reason: the assessment should observe a stable machine, not one whose memory the hypervisor is resizing. |
-| **Appliance storage** | Dedicated `D:` partition on the OS disk | A separate managed data disk would bill continuously — including while the VM is deallocated — for capacity the 512 GB OS disk already has spare. Deployment instead carves a 100 GB partition from that disk, which the guest VHDs never touch, so the appliance cannot be starved by guest growth and vice versa. |
+| **Appliance storage** | Dedicated partition on the OS disk, first free letter (`E:`) | A separate managed data disk would bill continuously — including while the VM is deallocated — for capacity the 512 GB OS disk already has spare. Deployment instead carves a 100 GB partition from that disk, which the guest VHDs never touch, so the appliance cannot be starved by guest growth and vice versa. |
 | **Appliance delivery** | VHD import in Module 1 | Deployment does not pre-build an appliance VM. Microsoft publishes a ready-made appliance VHD, so importing it is both closer to real practice and avoids provisioning a Windows guest that is immediately replaced. |
 | **Guest network** | `192.168.0.0/24` with NAT | Simulates an isolated on-premises network. NAT provides outbound internet access, required for package downloads during provisioning, without exposing guests to inbound traffic from the Azure VNet. This mirrors how many on-premises datacenters sit behind NAT with no direct internet-facing exposure. |
 | **VM generation** | Gen 2 | UEFI boot, vTPM support and larger OS disk support. Gen 2 is required for several Azure features post-migration (Trusted Launch, Confidential VMs), so starting here avoids a generation conversion later. |
@@ -127,11 +127,11 @@ You build the Azure Migrate appliance in Module 1, not here. Deployment leaves r
 |---|---|
 | Host memory headroom | 16 GB, unallocated after the four guests take 12 GB |
 | Host vCPU | 8 virtual processors, oversubscribed against the host's 8 |
-| Appliance storage | A dedicated 100 GB `D:` partition, created during deployment and untouched by the guest VHDs |
-| Staging folder | `D:\Appliance`, created and permissioned during deployment |
+| Appliance storage | A dedicated 100 GB partition on the first free drive letter — `E:` on the default host size — created during deployment and untouched by the guest VHDs |
+| Staging folder | `E:\Appliance`, created and permissioned during deployment |
 | Network | Outbound HTTPS from the host for the appliance download, and from the appliance itself for Azure registration |
 
-> **Note:** The default host size has no local temporary disk, so `D:` is available for this partition. A size that provides a temporary disk will already be using `D:`; pass `-ApplianceStoreDriveLetter` to choose another letter in that case.
+> **Note:** Deployment takes the **first unassigned drive letter** rather than a fixed one, and reports which it used. On the default host size that is `E:` — `C:` is the OS disk, and because the size has no local temporary disk Windows gives `D:` to the virtual DVD drive. A host size that provides a temporary disk will also be using `E:`, so the store lands on `F:`. Nothing existing is moved or reassigned. Pass `-ApplianceStoreDriveLetter` only to override the choice.
 
 > **Instructor note.** The appliance archive is a large download performed on the host during Module 1. Confirm your proxy permits it — one that allows the Azure portal but blocks the appliance download will strand learners at the start of the module.
 
@@ -144,7 +144,11 @@ You build the Azure Migrate appliance in Module 1, not here. Deployment leaves r
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery
 Connect-AzAccount
-$subscriptionId = Read-Host 'Workshop subscription ID'
+
+# Masked at the prompt so it is not readable over a shared screen
+$secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
+$subscriptionId = [pscredential]::new('subscription', $secureSubscriptionId).GetNetworkCredential().Password
+
 Set-AzContext -SubscriptionId $subscriptionId
 Get-AzContext | Select-Object Account,Subscription,Tenant
 
@@ -169,22 +173,30 @@ Keep the complete reviewed checkout together. Before it contacts Azure, deployme
 $sourceRg = 'rg-ces-source-01'
 $targetRg = 'rg-ces-target-01'
 $location = 'eastus'
-$adminCidr = Read-Host 'Your public IPv4 address followed by /32'
+
+# Both masked at the prompt, like the password below
+$secureAdminCidr = Read-Host 'Your public IPv4 address followed by /32' -AsSecureString
 $password = Read-Host 'Lab-only administrator password' -AsSecureString
 
-.\scripts\deploy-lab.ps1 -SubscriptionId $subscriptionId `
+.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId `
     -ResourceGroupName $sourceRg -Location $location `
-    -AdminUsername labadmin -AdminPassword $password -AdminSourceCidr $adminCidr
+    -AdminUsername labadmin -AdminPassword $password -AdminSourceCidr $secureAdminCidr
 
-.\scripts\migrate-step1-setup-project.ps1 -SubscriptionId $subscriptionId `
+.\scripts\migrate-step1-setup-project.ps1 `
     -SourceResourceGroup $sourceRg -TargetResourceGroup $targetRg -Location $location
 ```
 
+`deploy-lab.ps1` takes the subscription ID and the address as **SecureString** values, so neither is visible while you type them — useful when the session is being shared or recorded. `$secureSubscriptionId` comes from Step 1.
+
+The `migrate-step` scripts take no subscription parameter at all. They use whichever subscription is active in your session, which is why `Set-AzContext` in Step 1 matters — confirm it with `Get-AzContext` before running them.
+
+> **Note:** Masking applies to entry only. Both values still reach Azure, and both remain visible afterwards — the subscription ID in `Get-AzContext` and in every resource ID, the address in the host's NSG rule.
+
 > ⚠️ **Password requirements.** Use 12–72 characters with at least three of: lowercase, uppercase, digit, symbol. This password is used for the host and for every guest VM. Use approved lab-only credentials — Windows unattended setup and Linux cloud-init both handle it in plaintext during first boot, and any administrator of the host can read guest setup data. **Never use a corporate password here.**
 
-Write all four decimal octets of `$adminCidr` without leading zeros; abbreviated, hexadecimal and integer address forms are rejected. If your address changes later, update the existing NSG rule rather than redeploying.
+Write all four decimal octets of the address without leading zeros; abbreviated, hexadecimal and integer forms are rejected. Because the value is masked as you type it, check it before pressing Enter — a typo surfaces as a validation error rather than as visibly wrong text. If your address changes later, update the existing NSG rule rather than redeploying.
 
-Before provisioning begins, deployment shrinks `C:` and creates the 100 GB `D:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
+Before provisioning begins, deployment shrinks `C:` and creates the 100 GB `E:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
 
 > ⏱️ **Estimated time: 50–100 minutes.** Progress is printed as each stage completes, and no interaction is needed once it starts. The guest disks are fixed rather than dynamic, so setup writes all 140 GB during provisioning instead of deferring it to first use. On a 512 GB Premium SSD that adds roughly 20–40 minutes over a dynamic-disk build — paid once, at deployment, rather than unpredictably during the workshop.
 >
@@ -237,8 +249,8 @@ Get-DhcpServerv4Lease -ScopeId 192.168.0.0
 # Setup record on HyperVHost — expect the four VM names and a CompletedUtc timestamp
 Get-Content C:\AzMigrateLab\setup-complete.json
 
-# Appliance store on HyperVHost — expect label ApplianceStore, roughly 100 GB, nearly all free
-Get-Volume -DriveLetter D | Select-Object DriveLetter,FileSystemLabel,Size,SizeRemaining
+# Appliance store on HyperVHost — expect roughly 100 GB, nearly all free, normally on E:
+Get-Volume -FileSystemLabel ApplianceStore | Select-Object DriveLetter,FileSystemLabel,Size,SizeRemaining
 
 # Guest disk allocation on HyperVHost — expect four Fixed disks: 40, 40, 30, 30 GB
 Get-VM | Get-VMHardDiskDrive | ForEach-Object { Get-VHD $_.Path } |
@@ -268,7 +280,7 @@ Test-NetConnection 192.168.0.11 -Port 1433
 | Both `Invoke-WebRequest` calls | `200` |
 | `Invoke-RestMethod` | `status: healthy` |
 | `Test-NetConnection` | `TcpTestSucceeded: True` |
-| `Get-Volume -DriveLetter D` | Label `ApplianceStore`, roughly 100 GB, nearly all free |
+| `Get-Volume -FileSystemLabel ApplianceStore` | Roughly 100 GB, nearly all free, normally `E:` |
 | `Get-VHD` output | Four disks, all `VhdType: Fixed` — 40, 40, 30 and 30 GB |
 | `DynamicMemoryEnabled` | `False` on all four guests |
 
@@ -374,9 +386,11 @@ Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database Con
 
 **Symptom:** Deployment stops at *Create appliance store partition*, reporting that it cannot free the requested space, or that the drive letter is in use.
 
-**Cause:** The OS disk cannot give up 100 GB while still leaving room for Windows and the 140 GB of fixed guest disks — or the chosen letter is already taken, most often by a temporary disk on a host size that provides one.
+**Cause:** The OS disk cannot give up 100 GB while still leaving room for Windows and the 140 GB of fixed guest disks — or you supplied `-ApplianceStoreDriveLetter` and that letter is already taken.
 
-**Resolution:** Deploy with a larger OS disk, reduce `-ApplianceStoreSizeGB`, or choose a free letter with `-ApplianceStoreDriveLetter`. Do not reclaim the space by making the guest disks dynamic; the fixed allocation is what keeps host capacity and the Module 1 assessment predictable.
+**Resolution:** Deploy with a larger OS disk, or reduce `-ApplianceStoreSizeGB`. If you named a letter explicitly, omit the parameter and let deployment pick the first free one. Do not reclaim the space by making the guest disks dynamic; the fixed allocation is what keeps host capacity and the Module 1 assessment predictable.
+
+The check runs before `C:` is resized, so a failure here leaves the OS disk untouched.
 
 ### Guest Disk Creation Is Slow
 
@@ -557,7 +571,7 @@ Understanding the cost profile is essential for planning workshops at scale and 
 | **Deallocate when not in use.** `Stop-AzVM -ResourceGroupName $sourceRg -Name HyperVHost -Force` | Eliminates host compute charges. Guest VMs stop with it. |
 | **Set auto-shutdown.** Azure Portal → VM → Auto-shutdown. | Prevents overnight charges from a forgotten lab. |
 | **Use Azure Dev/Test pricing.** If eligible. | Significant reduction on Windows compute. |
-| **Delete when done.** `.\scripts\cleanup-lab.ps1 -SubscriptionId $subscriptionId -ResourceGroupName $targetRg,$sourceRg -WhatIf` first, then without `-WhatIf`. | Eliminates all charges, including the disk and IP charges that persist through deallocation. |
+| **Delete when done.** Run `.\scripts\cleanup-lab.ps1 -ResourceGroupName $targetRg`, then again for `$sourceRg`. One group per run. | Eliminates all charges, including the disk and IP charges that persist through deallocation. |
 | **Choose a cost-effective region.** | Varies by region; US regions are generally lower. |
 
 > ⚠️ **Deallocating is not deleting.** Stopping the VM ends compute charges but leaves disks, public IPs, NAT gateways and any retained backups billing. Set a budget alert before you start — an alert does not enforce a spending cap.
@@ -584,7 +598,7 @@ Estimate every resource listed in the [README](../README.md) for your own region
 |---|---|---|
 | Azure VM provisioning | ~5–10 minutes | Resource group, networking, host VM creation |
 | Hyper-V role installation and reboot | ~5–10 minutes | Feature installation, mandatory restart |
-| Appliance store partition | ~1 minute | Shrink `C:`, create and format `D:` |
+| Appliance store partition | ~1 minute | Shrink `C:`, create and format `E:` |
 | Guest VM creation and workload configuration | ~40–80 minutes | Image downloads, **fixed** VHD allocation of 140 GB, OS provisioning, application installation |
 | **Total** | **~50–100 minutes** | Fully automated — no manual steps required |
 

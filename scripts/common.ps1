@@ -1,6 +1,23 @@
 # Shared checks. Dot-source this file; it never connects to Azure or changes resources.
 Set-StrictMode -Version Latest
 
+function ConvertFrom-LabSecureString {
+    param([Parameter(Mandatory)][SecureString]$Secure, [Parameter(Mandatory)][string]$Name)
+    # Masked at the prompt so the value is not readable over a shared screen. It is not a
+    # stored secret: the value still reaches Azure and appears in resource identifiers.
+    $plain = [pscredential]::new('lab', $Secure).GetNetworkCredential().Password
+    if ($null -ne $plain) { $plain = $plain.Trim() }
+    if ([string]::IsNullOrWhiteSpace($plain)) { throw "$Name was entered empty. Rerun and supply it when prompted." }
+    return $plain
+}
+
+function Assert-LabSubscriptionId {
+    param([Parameter(Mandatory)][string]$SubscriptionId)
+    if ($SubscriptionId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        throw 'SubscriptionId must be one subscription GUID. Check for a stray character or a pasted resource ID.'
+    }
+}
+
 function Assert-LabContext {
     param([Parameter(Mandatory)][string]$SubscriptionId)
     $context = Get-AzContext -ErrorAction Stop

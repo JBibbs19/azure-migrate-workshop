@@ -41,25 +41,27 @@ Deployment created a dedicated partition for the appliance. Everything in this s
 
 ```powershell
 # Appliance store on HyperVHost — expect label ApplianceStore, roughly 100 GB, nearly all free
-Get-Volume -DriveLetter D | Select-Object DriveLetter,FileSystemLabel,Size,SizeRemaining
-Get-Item D:\Appliance
+Get-Volume -DriveLetter E | Select-Object DriveLetter,FileSystemLabel,Size,SizeRemaining
+Get-Item E:\Appliance
 ```
 
-**Expected result:** `D:` exists, is labelled `ApplianceStore`, and the `D:\Appliance` folder is present.
+**Expected result:** `E:` exists, is labelled `ApplianceStore`, and the `E:\Appliance` folder is present.
+
+> **Note:** Deployment takes the first unassigned drive letter and reports it when it finishes — `E:` on the default host size, because `D:` holds the virtual DVD drive. If yours differs, substitute it in the commands below. `Get-Volume -FileSystemLabel ApplianceStore` finds it whatever the letter.
 
 > **Note:** This partition is the appliance's own capacity. The four workload VHDs are fixed disks on `C:` and never grow into it, so the appliance cannot be starved by guest growth. Keep it that way — do not stage the download on `C:`.
 
 ### 3.3 — Download and verify the archive
 
-Download the appliance archive from the project's download link into `D:\Appliance`. Then verify it against the hash Microsoft publishes for that exact file before you extract it:
+Download the appliance archive from the project's download link into `E:\Appliance`. Then verify it against the hash Microsoft publishes for that exact file before you extract it:
 
 ```powershell
-$archive = Get-ChildItem 'D:\Appliance' -Filter *.zip | Select-Object -First 1
+$archive = Get-ChildItem 'E:\Appliance' -Filter *.zip | Select-Object -First 1
 Get-FileHash -Path $archive.FullName -Algorithm SHA256 | Format-List
-Expand-Archive -Path $archive.FullName -DestinationPath 'D:\Appliance\Extracted'
+Expand-Archive -Path $archive.FullName -DestinationPath 'E:\Appliance\Extracted'
 ```
 
-Stop if the hash does not match. Keep the archive until the import succeeds, then delete it — the archive and the extracted VHD both sit on `D:`, and reclaiming roughly 11 GB gives the appliance disk room to grow.
+Stop if the hash does not match. Keep the archive until the import succeeds, then delete it — the archive and the extracted VHD both sit on `E:`, and reclaiming roughly 11 GB gives the appliance disk room to grow.
 
 > **Tip:** Download directly onto the host with the Edge browser inside HyperVHost, rather than downloading to your workstation and copying a 10 GB file across an RDP session.
 
@@ -68,9 +70,9 @@ Stop if the hash does not match. Keep the archive until the import succeeds, the
 Create the appliance VM on the internal lab switch and reserve its address:
 
 ```powershell
-# Keep the VHD on D: — the VM must run from the appliance store, not from C:
-$vhd = (Get-ChildItem 'D:\Appliance\Extracted' -Recurse -Include *.vhd,*.vhdx | Select-Object -First 1).FullName
-New-VM -Name MigrateAppl -MemoryStartupBytes 16GB -VHDPath $vhd -SwitchName intSwitch -Path 'D:\Appliance\VMs' -Generation 1
+# Keep the VHD on E: — the VM must run from the appliance store, not from C:
+$vhd = (Get-ChildItem 'E:\Appliance\Extracted' -Recurse -Include *.vhd,*.vhdx | Select-Object -First 1).FullName
+New-VM -Name MigrateAppl -MemoryStartupBytes 16GB -VHDPath $vhd -SwitchName intSwitch -Path 'E:\Appliance\VMs' -Generation 1
 Set-VMProcessor -VMName MigrateAppl -Count 8
 Set-VMMemory -VMName MigrateAppl -DynamicMemoryEnabled $false
 Set-VM -Name MigrateAppl -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
@@ -80,31 +82,31 @@ Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 `
     -ClientId '00-15-5D-00-00-14' -Name MigrateAppl
 ```
 
-The four workload VMs use fixed disks and static memory so the assessment observes stable machines. Give the appliance the same treatment before you start it. Convert its disk to fixed, which claims its full size on `D:` now rather than as the appliance writes:
+The four workload VMs use fixed disks and static memory so the assessment observes stable machines. Give the appliance the same treatment before you start it. Convert its disk to fixed, which claims its full size on `E:` now rather than as the appliance writes:
 
 ```powershell
-# Check what the extracted VHD needs — MaxGB must fit in the free space on D:
+# Check what the extracted VHD needs — MaxGB must fit in the free space on E:
 Get-VHD $vhd | Select-Object VhdType,@{N='CurrentGB';E={[math]::Round($_.FileSize/1GB,1)}},@{N='MaxGB';E={[math]::Round($_.Size/1GB,1)}}
-Get-Volume -DriveLetter D | Select-Object SizeRemaining
+Get-Volume -DriveLetter E | Select-Object SizeRemaining
 ```
 
-If `MaxGB` fits in the free space on `D:`, convert it and repoint the VM at the converted disk:
+If `MaxGB` fits in the free space on `E:`, convert it and repoint the VM at the converted disk:
 
 ```powershell
-$fixed = 'D:\Appliance\MigrateAppl-Fixed.vhd'
+$fixed = 'E:\Appliance\MigrateAppl-Fixed.vhd'
 Convert-VHD -Path $vhd -DestinationPath $fixed -VHDType Fixed
 Get-VMHardDiskDrive -VMName MigrateAppl | Set-VMHardDiskDrive -Path $fixed
 Remove-Item $vhd -Force
 Start-VM -Name MigrateAppl
 ```
 
-If it does not fit, leave the disk as it is and start the VM — the appliance still works, and `D:` is dedicated to it either way:
+If it does not fit, leave the disk as it is and start the VM — the appliance still works, and `E:` is dedicated to it either way:
 
 ```powershell
 Start-VM -Name MigrateAppl
 ```
 
-**Expected result:** `Get-VM MigrateAppl` shows the VM running, and `Get-VMHardDiskDrive -VMName MigrateAppl` shows its disk on `D:`.
+**Expected result:** `Get-VM MigrateAppl` shows the VM running, and `Get-VMHardDiskDrive -VMName MigrateAppl` shows its disk on `E:`.
 
 The static MAC follows the same `00-15-5D-00-00-xx` scheme deployment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
 
@@ -122,7 +124,7 @@ Get-VMIntegrationService -VMName MigrateAppl -Name 'Time Synchronization'
 Open the VM console in Hyper-V Manager, accept the appliance's first-boot prompts, and set its administrator password when asked. Then confirm the appliance has:
 
 - Eight processors and 16 GB RAM, with dynamic memory off
-- Its virtual disk on `D:`, not `C:`
+- Its virtual disk on `E:`, not `C:`
 - Address `192.168.0.20`, gateway `192.168.0.1`
 - Working DNS and internet access
 - A correct clock, checked in UTC
@@ -164,7 +166,7 @@ Work through the configuration manager in order:
 2. Paste the project key and sign in to the correct Azure tenant and subscription.
 3. Add the Hyper-V host credentials and the host address `192.168.0.1`. Use `HyperVHost\labadmin` — the guest Windows credentials are different.
 4. Validate the source, resolve every failed prerequisite, then start discovery.
-5. Add guest credentials only for the software inventory or dependency features you intend to demonstrate. Check their guest-side prerequisites in the support matrix first.
+5. **Add guest credentials.** In *Manage credentials and discovery sources*, step 3, add credentials for the guests themselves — `Administrator` for the Windows guests and `labadmin` for the Linux guests, both with the lab password. These are separate from the Hyper-V host credentials in step 3 above, and without them the appliance discovers the VMs but never looks inside them.
 6. Return to the project and confirm the four workloads appear:
 
 | Workload | Expected source OS | Expected address |
@@ -175,6 +177,35 @@ Work through the configuration manager in order:
 | OnPrem-Linux-App | Ubuntu 22.04 | 192.168.0.13 |
 
 Check the **names**, OS details, CPU and memory — not just the count. A raw total of four machines is not proof, because the appliance itself can appear in inventory.
+
+Then open the **Software inventory** column on the Discovered servers page. You should see:
+
+| Guest | Expected inventory |
+|---|---|
+| OnPrem-Web | IIS web server role, ASP.NET 4.5 |
+| OnPrem-SQL | SQL Server 2022 Express, with the `ContosoApp` database under SQL discovery |
+| OnPrem-Linux-Web | Nginx |
+| OnPrem-Linux-App | Node.js, the `contoso-app` service |
+
+> **Warning:** An empty Software inventory column almost always means guest credentials are missing, not that the guests have no applications. VM inventory comes through the Hyper-V host; software inventory connects **directly to each guest** over PowerShell remoting on Windows and SSH on Linux, using the credentials from step 5. No credentials, no applications — and no error message either.
+
+If the column stays empty after adding credentials and rerunning discovery, check the connection the appliance actually uses:
+
+```powershell
+# From MigrateAppl — expect TcpTestSucceeded True for both Windows guests
+Test-NetConnection 192.168.0.10 -Port 5985
+Test-NetConnection 192.168.0.11 -Port 5985
+```
+
+```bash
+# From MigrateAppl or the host — expect a version string from both Linux guests
+ssh labadmin@192.168.0.12 'command -v locate && nginx -v'
+ssh labadmin@192.168.0.13 'command -v locate && node --version'
+```
+
+Deployment enables PowerShell remoting on the Windows guests and installs `plocate` on the Linux guests, because software inventory runs `locate` to find installed applications and Ubuntu cloud images omit it. If either check fails, that prerequisite did not take.
+
+> **Note:** Software inventory and the Azure VM assessment are different things. Applications appear under **Discovered servers → Software inventory**; the assessment reports sizing, readiness and cost, and never lists applications.
 
 > **Tip:** Discovery runs continuously and takes time, so a short wait and a refresh are normal. But if host validation is failing, waiting longer will not fix it — diagnose the validation error first. [Hyper-V assessment support matrix](https://learn.microsoft.com/azure/migrate/migrate-support-matrix-hyper-v)
 

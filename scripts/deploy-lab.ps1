@@ -7,8 +7,12 @@ Creates one Standard-security Windows host and provisions four nested workload V
 OS VM is created: Module 1 downloads the Azure Migrate appliance VHD onto the host's
 own OS disk and imports it. This script creates billable Azure resources.
 Use a new dedicated resource group. Existing groups are refused intentionally.
+.PARAMETER SubscriptionId
+The workshop subscription GUID, supplied as a SecureString so it is masked at the prompt
+rather than displayed on a shared screen. It is not treated as a stored secret.
 .PARAMETER AdminSourceCidr
-Your public IPv4 address as a /32. Required for the host RDP rule.
+Your public IPv4 address as a /32, supplied as a SecureString for the same reason.
+Required for the host RDP rule.
 .PARAMETER AzureOperationTimeoutMinutes
 Maximum monitored wait for each Azure host, network or disk creation operation.
 .PARAMETER GuestSetupTimeoutMinutes
@@ -17,31 +21,38 @@ Azure's execution limit for ConfigureWorkshop; individual installer limits also 
 Size of the dedicated partition carved out of the host OS disk for the Azure Migrate
 appliance. The guest VHDs never touch it, so the appliance has capacity of its own.
 .PARAMETER ApplianceStoreDriveLetter
-Drive letter for that partition inside HyperVHost. The default host size has no local
-temporary disk, so D: is free; a size that provides one needs a different letter.
+Drive letter for that partition inside HyperVHost. Leave it unset and deployment uses the
+first unassigned letter, which is E: on the default host size: C: is the OS disk and D: is
+the virtual DVD drive. Supply a letter only to override that choice.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
+$secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
+$secureAdminCidr = Read-Host 'Your public IPv4 address followed by /32' -AsSecureString
 $password = Read-Host 'Lab password' -AsSecureString
-.\scripts\deploy-lab.ps1 -SubscriptionId $subscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $adminCidr
+.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$SubscriptionId,
+    [Parameter(Mandatory)][SecureString]$SubscriptionId,
     [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9_-]{1,60}$')][string]$ResourceGroupName,
     [string]$Location = 'eastus',
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9]{2,18}$')][string]$AdminUsername,
     [Parameter(Mandatory)][SecureString]$AdminPassword,
-    [Parameter(Mandatory)][string]$AdminSourceCidr,
+    [Parameter(Mandatory)][SecureString]$AdminSourceCidr,
     [string]$VMSize = 'Standard_E8s_v7',
     [ValidateRange(15,120)][int]$AzureOperationTimeoutMinutes = 60,
     [ValidateRange(30,240)][int]$GuestSetupTimeoutMinutes = 240,
     [ValidateRange(60,400)][int]$ApplianceStoreSizeGB = 100,
-    [ValidatePattern('^[D-Zd-z]$')][string]$ApplianceStoreDriveLetter = 'D',
+    [ValidatePattern('^([D-Zd-z])?$')][string]$ApplianceStoreDriveLetter = '',
     [string]$HealthPath
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/common.ps1"
+# Both values arrive masked. Convert once, validate, then use the plain form internally.
+$subscriptionIdPlain = ConvertFrom-LabSecureString -Secure $SubscriptionId -Name 'SubscriptionId'
+Assert-LabSubscriptionId $subscriptionIdPlain
+$adminSourceCidrPlain = ConvertFrom-LabSecureString -Secure $AdminSourceCidr -Name 'AdminSourceCidr'
 $hostScript = Read-LabHostConfiguration "$PSScriptRoot/host/configure-host.ps1"
 . "$PSScriptRoot/health.ps1"
 Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
@@ -51,12 +62,12 @@ Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
     'Submit guest setup', 'Guest setup'
 )
 if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
-Assert-LabAdminSource $AdminSourceCidr
+Assert-LabAdminSource $adminSourceCidrPlain
 Assert-LabHostSizeName $VMSize
 foreach ($module in @('Az.Accounts','Az.Resources','Az.Network','Az.Compute')) {
     Import-Module $module -ErrorAction Stop
 }
-$null = Assert-LabContext $SubscriptionId
+$null = Assert-LabContext $subscriptionIdPlain
 foreach ($command in @('Set-AzVMRunCommand','Get-AzVMRunCommand')) { $null = Get-Command $command -ErrorAction Stop }
 if (-not (Get-Command Set-AzVMRunCommand).Parameters.ContainsKey('ProtectedParameter')) { throw 'Update Az.Compute; managed Run Command protected parameters are required.' }
 if ($AdminUsername -in @('admin','administrator','root','guest','user','test')) { throw 'Choose a non-reserved administrator username, such as labadmin.' }
@@ -70,19 +81,21 @@ $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
 $windowsImages = Get-LabWindowsImages -Location $Location
 $guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
 Write-Host "Selected host: $($hostSku.Name), $($hostSku.Cores) enabled vCPUs, $($hostSku.MemoryGB) GiB RAM. Confirm this series supports nested virtualization with Standard security before running deployment."
-Write-Host "Appliance store: a $ApplianceStoreSizeGB GB partition is created as $($ApplianceStoreDriveLetter.ToUpperInvariant()): for the Module 1 appliance VHD."
+$storeDriveLabel = if ($ApplianceStoreDriveLetter) { "$($ApplianceStoreDriveLetter.ToUpperInvariant()):" } else { 'the first unassigned drive letter, normally E:' }
+Write-Host "Appliance store: a $ApplianceStoreSizeGB GB partition is created as $storeDriveLabel for the Module 1 appliance VHD."
 Write-Host 'Guest disks are fixed, not dynamic: 140 GB is allocated in full during setup, which adds roughly 20-40 minutes to deployment.'
 foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Storage','Microsoft.Migrate','Microsoft.OffAzure','Microsoft.RecoveryServices','Microsoft.KeyVault')) {
     $state = @(Get-AzResourceProvider -ProviderNamespace $provider)[0].RegistrationState
     if ($state -ne 'Registered') { throw "Register $provider first with Register-AzResourceProvider and wait until Registered." }
 }
-Write-Host "Creating source lab in subscription $SubscriptionId, region $Location."
+Write-Host "Creating source lab in the selected subscription, region $Location."
 Write-LabHealth 'Source deployment' Preparing 0 'Preflight passed. Starting dedicated workshop resource creation.' $HealthPath
 $tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training' }
 $vmName = 'HyperVHost'
 $diskName = 'WinServerBase-temp'
-$storeDrive = $ApplianceStoreDriveLetter.ToUpperInvariant()
-$appliancePath = "${storeDrive}:\Appliance"
+# Resolved by the host during the store step, since only the host knows which letters are free.
+$storeDrive = $null
+$appliancePath = $null
 $runName = 'ConfigureWorkshop'
 $diskCreated = $false
 $runCreated = $false
@@ -97,7 +110,7 @@ try {
     # The host's attached Standard public IP provides explicit outbound connectivity.
     $job = New-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -Location $Location -AllocationMethod Static -Sku Standard -AsJob
     $pip = Wait-LabJob $job 'Create host public IP' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
-    $rdp = New-AzNetworkSecurityRuleConfig -Name Allow-RDP -Access Allow -Protocol Tcp -Direction Inbound -Priority 100 -SourceAddressPrefix $AdminSourceCidr -SourcePortRange '*' -DestinationAddressPrefix '*' -DestinationPortRange 3389
+    $rdp = New-AzNetworkSecurityRuleConfig -Name Allow-RDP -Access Allow -Protocol Tcp -Direction Inbound -Priority 100 -SourceAddressPrefix $adminSourceCidrPlain -SourcePortRange '*' -DestinationAddressPrefix '*' -DestinationPortRange 3389
     $job = New-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -Location $Location -SecurityRules $rdp -AsJob
     $nsg = Wait-LabJob $job 'Create host firewall rules' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
     $job = New-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -Location $Location -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $pip.Id -NetworkSecurityGroupId $nsg.Id -EnableAcceleratedNetworking:$hostSku.AcceleratedNetworking -AsJob
@@ -141,14 +154,32 @@ Write-Output 'HYPERV_INSTALLED'
     # before any guest disk work so a capacity problem surfaces in minutes, not an hour.
     $storeTemplate = @'
 $ErrorActionPreference = 'Stop'
-$letter = '__DRIVE__'
+$requested = '__DRIVE__'
 $storeBytes = __STOREGB__GB
 $label = 'ApplianceStore'
 $guestReserveBytes = 140GB
 $existing = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $existing) {
-    if (Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue) {
-        throw "Drive ${letter}: is already in use on this host. Rerun with a different -ApplianceStoreDriveLetter."
+if ($existing) {
+    $letter = $existing.DriveLetter
+} else {
+    # Only the host knows which letters are free. C: is the OS disk, and on a size with no
+    # local temporary disk Windows gives the next letter to the virtual DVD drive, so the
+    # first unassigned letter is normally E:. Nothing is moved or reassigned.
+    $taken = @()
+    $taken += @(Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.TrimEnd(':').ToUpperInvariant() })
+    $taken += @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.Length -eq 1 } | ForEach-Object { $_.Name.ToUpperInvariant() })
+    if ($requested) {
+        $letter = $requested.ToUpperInvariant()
+        if ($letter -in $taken) {
+            $occupant = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${letter}:'" -ErrorAction SilentlyContinue
+            $detail = if ($occupant) { "type $($occupant.DriveType), label '$($occupant.Label)'" } else { 'an existing drive' }
+            throw "Drive ${letter}: is already in use on this host ($detail). Omit -ApplianceStoreDriveLetter to take the first free letter, or choose another."
+        }
+    } else {
+        $letter = @(68..90 | ForEach-Object { [char]$_ }) | Where-Object { $_ -notin $taken } | Select-Object -First 1
+        if (-not $letter) { throw 'No unassigned drive letter is available for the appliance store.' }
     }
     $system = Get-Partition -DriveLetter C -ErrorAction Stop
     $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
@@ -165,19 +196,24 @@ if (-not $existing) {
 $store = Get-Volume -DriveLetter $letter -ErrorAction Stop
 if ($store.FileSystemLabel -ne $label) { throw "Drive ${letter}: is not the appliance store." }
 New-Item -ItemType Directory -Path "${letter}:\Appliance" -Force | Out-Null
-# C:\AzMigrateLab blocks inheritance; this partition is separate, but grant the lab
-# administrator explicit rights so a non-elevated browser download can write here.
+# Grant the lab administrator explicit rights so a non-elevated browser download can write here.
 & icacls.exe "${letter}:\Appliance" /grant:r '__ADMINUSER__:(OI)(CI)M' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not grant the lab administrator access to the appliance store.' }
 $system = Get-Volume -DriveLetter C -ErrorAction Stop
+Write-Output ("APPLIANCE_STORE_DRIVE|{0}" -f $letter)
 Write-Output ("Appliance store {0}: {1} GB free; system C: {2} GB free before guest disks." -f $letter,
     [math]::Round($store.SizeRemaining/1GB,1), [math]::Round($system.SizeRemaining/1GB,1))
 Write-Output 'APPLIANCE_STORE_READY'
 '@
-    $storeScript = $storeTemplate.Replace('__DRIVE__', $storeDrive).Replace('__STOREGB__', [string]$ApplianceStoreSizeGB).Replace('__ADMINUSER__', $AdminUsername)
+    $storeScript = $storeTemplate.Replace('__DRIVE__', $ApplianceStoreDriveLetter.ToUpperInvariant()).Replace('__STOREGB__', [string]$ApplianceStoreSizeGB).Replace('__ADMINUSER__', $AdminUsername)
     $job = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $storeScript -AsJob
     $storeResult = Wait-LabJob $job 'Create appliance store partition' -TimeoutSeconds 1800 -HealthPath $HealthPath
     $storeOutput = Assert-LabRunResult $storeResult 'APPLIANCE_STORE_READY'
+    $driveMatch = [regex]::Match($storeOutput, '(?m)^APPLIANCE_STORE_DRIVE\|([A-Z])\r?$')
+    if (-not $driveMatch.Success) { throw 'The appliance store step did not report which drive letter it used.' }
+    $storeDrive = $driveMatch.Groups[1].Value
+    $appliancePath = "${storeDrive}:\Appliance"
+    Write-Host "Appliance store created as ${storeDrive}: ($ApplianceStoreSizeGB GB)."
     $stagingSummary = @($storeOutput -split "`n" | Where-Object { $_ -match 'GB free' } | ForEach-Object { $_.Trim() })[0]
     $job = New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Disk $guestDiskConfig -AsJob
     $null = Wait-LabJob $job 'Create guest image disk' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
@@ -211,6 +247,8 @@ Write-Output 'APPLIANCE_STORE_READY'
 } finally {
     Complete-LabProgress
     $passwordPlain = $null
+    $subscriptionIdPlain = $null
+    $adminSourceCidrPlain = $null
     $protected = $null
     if ($diskCreated -and (-not $runCreated -or $setupObservation.Terminal)) {
         try {

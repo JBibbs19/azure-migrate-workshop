@@ -430,7 +430,9 @@ ethernets:
     # linux-cloud-tools-common supplies the systemd units and helper scripts for the
     # Hyper-V guest daemons. The matching per-kernel binaries are installed in runcmd,
     # where the running kernel version can be resolved.
-    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "walinuxagent", "linux-cloud-tools-common")
+    # plocate provides the locate command. Azure Migrate software inventory runs locate on
+    # Linux guests to find installed applications, and Ubuntu cloud images omit it.
+    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "walinuxagent", "linux-cloud-tools-common", "plocate")
     $allPackages  = $basePackages + $ExtraPackages
     $pkgYaml = ($allPackages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -480,6 +482,7 @@ ethernets:
   - udevadm settle || true
   - systemctl enable --now hv-kvp-daemon.service || true
   - systemctl enable --now hv-vss-daemon.service || true
+  - updatedb || true
   - |
     if systemctl is-active --quiet hv-kvp-daemon.service; then
       echo 'LAB_KVP_DAEMON_RUNNING'
@@ -783,6 +786,13 @@ foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
         Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
         Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
 
+        # Azure Migrate software inventory connects to each guest over PowerShell remoting to
+        # read installed roles, features and applications. Windows Server enables WinRM by
+        # default, but a DHCP guest can classify its network as Public and refuse the
+        # listener, so configure it explicitly rather than relying on the default.
+        Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop | Out-Null
+        if ((Get-Service WinRM).Status -ne 'Running') { Start-Service WinRM }
+
         # Enclosed training lab: the nested subnet, the Hyper-V host and the target/test
         # VNets are trusted. Two scoped rules replace ad-hoc group enablement such as
         # 'File and Printer Sharing', which would also open SMB and NetBIOS to obtain ping.
@@ -807,6 +817,16 @@ foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
             -RemoteAddress $labRanges | Out-Null
     }
 }
+# Software inventory depends on this path; prove it from the host rather than assuming.
+foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
+    $address = if ($name -eq 'OnPrem-Web') { '192.168.0.10' } else { '192.168.0.11' }
+    if (Test-NetConnection $address -Port 5985 -InformationLevel Quiet -WarningAction SilentlyContinue) {
+        Write-Log "PowerShell remoting reachable on $name ($address)."
+    } else {
+        Write-Log "WARNING: WinRM port 5985 is not reachable on $name ($address). Azure Migrate software inventory will return no applications for this guest."
+    }
+}
+
 # ---- OnPrem-Web: IIS + ASP.NET + sample site ----
 Write-Log "--- Configuring OnPrem-Web (192.168.0.10) ---"
 try {
