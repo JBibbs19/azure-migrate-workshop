@@ -73,12 +73,20 @@ Set-VMProcessor -VMName MigrateAppl -Count 8
 Set-VMMemory -VMName MigrateAppl -DynamicMemoryEnabled $false
 Set-VM -Name MigrateAppl -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
 Set-VMNetworkAdapter -VMName MigrateAppl -StaticMacAddress '00155D000014'
+Enable-VMIntegrationService -VMName MigrateAppl -Name 'Time Synchronization'
 Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 `
     -ClientId '00-15-5D-00-00-14' -Name MigrateAppl
 Start-VM -Name MigrateAppl
 ```
 
 The static MAC follows the same `00-15-5D-00-00-xx` scheme deployment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
+
+Time Synchronization is enabled by default on a new Hyper-V VM, so the line above is usually redundant. It is included because this VM comes from an imported configuration rather than one you created, and an import carries whatever the exported settings held. Confirm it took effect:
+
+```powershell
+# Time sync on MigrateAppl — expect Enabled True and PrimaryStatusDescription OK
+Get-VMIntegrationService -VMName MigrateAppl -Name 'Time Synchronization'
+```
 
 > **Warning:** `-Generation 1` matches the `.vhd` Microsoft currently publishes. Confirm the generation and disk format in the current article rather than assuming — a Generation 2 VM will not boot a Generation 1 VHD, and the failure looks like a broken download.
 
@@ -89,9 +97,28 @@ Open the VM console in Hyper-V Manager, accept the appliance's first-boot prompt
 - Eight processors and 16 GB RAM
 - Address `192.168.0.20`, gateway `192.168.0.1`
 - Working DNS and internet access
-- Correct system time
+- A correct clock, checked in UTC
 
-**Expected outcome:** `MigrateAppl` is running in Hyper-V Manager alongside the four workload VMs.
+Check the clock explicitly, inside `MigrateAppl`:
+
+```powershell
+# Appliance clock on MigrateAppl — expect UTC within a minute or two of real time
+[DateTime]::UtcNow
+
+# Time zone on MigrateAppl — expect UTC, matching HyperVHost and the workload guests
+Get-TimeZone
+```
+
+If the time zone is wrong, set it to match the rest of the lab and force a resynchronization:
+
+```powershell
+Set-TimeZone -Id 'UTC'
+w32tm /resync /force
+```
+
+**Expected outcome:** `MigrateAppl` is running in Hyper-V Manager alongside the four workload VMs, with a UTC clock that agrees with the host.
+
+> ⚠️ **Check the clock before you register.** Hyper-V time synchronization aligns the guest's **UTC clock** with the host's, but it does not set the guest's **time zone**, and it does not override a clock changed inside the guest after boot. An appliance whose clock has drifted or whose region was set during first-boot prompts will still register successfully and then discover nothing, because Azure rejects the timestamps on its requests. Discovery returning an empty inventory with no obvious error is the usual symptom.
 
 > **Note:** The appliance software is already in Microsoft's VHD. Do not run `AzureMigrateInstaller.ps1` inside it, and never run it on HyperVHost itself.
 
@@ -122,6 +149,62 @@ Work through the configuration manager in order:
 Check the **names**, OS details, CPU and memory — not just the count. A raw total of four machines is not proof, because the appliance itself can appear in inventory.
 
 > **Tip:** Discovery runs continuously and takes time, so a short wait and a refresh are normal. But if host validation is failing, waiting longer will not fix it — diagnose the validation error first. [Hyper-V assessment support matrix](https://learn.microsoft.com/azure/migrate/migrate-support-matrix-hyper-v)
+
+**If no servers appear at all,** work through these in order before waiting any longer:
+
+| Check | Where | Expectation |
+|---|---|---|
+| Appliance clock | `[DateTime]::UtcNow` in `MigrateAppl` | UTC within a minute or two of real time. A skewed clock is the most common cause of an empty inventory. |
+| Host reachability | `Test-NetConnection 192.168.0.1 -Port 5985` in `MigrateAppl` | `TcpTestSucceeded: True` |
+| PowerShell remoting | `Enter-PSSession -ComputerName 192.168.0.1 -Credential HyperVHost\labadmin` in `MigrateAppl` | A session opens. Run `Exit-PSSession` afterwards. |
+| Host inventory | `Get-VM` on HyperVHost | Four VMs, all `Running` |
+| Host validation | Appliance configuration manager, discovery source panel | Validation succeeded, with no error text |
+
+Integration Services is worth ruling in or out correctly here: it governs whether the host can report a guest's **operating system details**, not whether the VM is discovered at all. Missing Integration Services shows up as servers listed with blank OS information — not as an empty inventory.
+
+If the **Linux** servers appear with missing OS details, check the Data Exchange (KVP) daemon on each of them:
+
+```powershell
+# KVP daemon on the Linux guests — expect active
+ssh labadmin@192.168.0.12 'systemctl is-active hv-kvp-daemon'
+ssh labadmin@192.168.0.13 'systemctl is-active hv-kvp-daemon'
+```
+
+Deployment loads the required module and starts this daemon. If it reports anything other than `active`, work through the following on the affected guest, then restart discovery.
+
+First confirm the kernel module is loaded — the daemon's systemd unit requires the device node it creates:
+
+```bash
+# Hyper-V utilities module — expect hv_utils in the output
+lsmod | grep hv_
+
+# KVP device node — expect hv_kvp to exist
+ls -l /dev/vmbus/
+```
+
+If the module or device is missing, load it and make it persistent:
+
+```bash
+sudo modprobe hv_utils
+echo hv_utils | sudo tee /etc/modules-load.d/hyperv.conf
+```
+
+Then install the userspace daemons. Install the two packages **separately** — combined in one command, an unavailable versioned package causes apt to abort the whole transaction and install neither:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y linux-cloud-tools-common
+sudo apt-get install -y "linux-cloud-tools-$(uname -r)" \
+  || sudo apt-get install -y linux-cloud-tools-virtual linux-tools-virtual
+sudo systemctl enable --now hv-kvp-daemon.service
+systemctl is-active hv-kvp-daemon
+```
+
+> **Note:** Ubuntu cloud images carry the `hv_netvsc` and `hv_storvsc` modules but not `hv_utils`, and none of the userspace daemons. That is why a guest can have working network and disk while reporting nothing about itself to the host.
+
+> **Warning:** `A dependency job for hv-kvp-daemon.service failed` means the unit's required device is absent, not that the daemon itself failed — load `hv_utils` before trying to start the service. If `modprobe hv_utils` reports no such module, the kernel flavour does not ship it; installing `linux-virtual` provides one that does, and that path needs a reboot.
+
+> **Instructor note.** Run these commands with `sudo`. Ubuntu cloud images leave the root account locked by design, and `systemctl` without `sudo` falls through to a polkit prompt asking for a root password that does not exist. The lab user has passwordless sudo.
 
 When you plan migration waves later, exclude `MigrateAppl` from the workloads you move. The appliance is lab infrastructure, not a workload.
 

@@ -109,7 +109,7 @@ You also need your current internet-facing IPv4 address as a `/32`, including an
 
 ### 3.6 — Downloads and Package Sources
 
-Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, NodeSource's Node.js packages, and Express from npm.
+Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, NodeSource's Node.js packages, Express from npm, and the Hyper-V guest daemon packages for the Linux guests from the Ubuntu archive.
 
 ADK and SQL installers receive Authenticode checks, and the Ubuntu image is verified against Canonical's published hash. These are online package sources, not a pinned offline distribution — a proxy that allows Microsoft endpoints but blocks Canonical, Chocolatey, NodeSource or npm will break setup.
 

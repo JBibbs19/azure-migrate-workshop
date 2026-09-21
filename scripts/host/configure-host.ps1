@@ -413,7 +413,10 @@ ethernets:
     $networkConfig = Expand-LabTextTemplate $networkConfig @{ '__MAC__' = $macColon }
     [System.IO.File]::WriteAllText("$cloudInitDir\network-config", $networkConfig, [System.Text.UTF8Encoding]::new($false))
 
-    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "walinuxagent")
+    # linux-cloud-tools-common supplies the systemd units and helper scripts for the
+    # Hyper-V guest daemons. The matching per-kernel binaries are installed in runcmd,
+    # where the running kernel version can be resolved.
+    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "walinuxagent", "linux-cloud-tools-common")
     $allPackages  = $basePackages + $ExtraPackages
     $pkgYaml = ($allPackages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -436,9 +439,47 @@ ethernets:
 '@
     # ufw is present but inactive on Ubuntu cloud images; the explicit disable keeps an
     # enclosed lab guest reachable for ping and lab traffic even if an image ships it enabled.
+    # Hyper-V Data Exchange (KVP) is how the host reports this guest's operating system
+    # and IP address. Azure Migrate reads guest OS details through the host, so without the
+    # daemon the guest is discovered but its OS information is blank.
+    #
+    # Two separate pieces are needed and both are missing from an Ubuntu cloud image as
+    # provisioned. The hv_utils kernel module publishes /dev/vmbus/hv_kvp; the daemon's
+    # systemd unit Requires that device, so starting the service before the module is
+    # loaded fails with 'A dependency job for hv-kvp-daemon.service failed'. Load the
+    # module first and persist it, then install the userspace daemons.
+    #
+    # hv_utils is distinct from hv_netvsc and hv_storvsc, which the image already loads --
+    # a guest can therefore have working network and disk while reporting nothing about
+    # itself to the host. The per-kernel package matches the running kernel and needs no
+    # reboot; the -virtual meta-packages are a fallback for images whose exact version is
+    # not in the archive, and that path does require a reboot to take effect.
+    $hyperVIntegration = @'
+  - modprobe hv_utils || true
+  - |
+    echo hv_utils > /etc/modules-load.d/hyperv.conf
+  - |
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y "linux-cloud-tools-$(uname -r)" \
+      || apt-get install -y linux-cloud-tools-virtual linux-tools-virtual \
+      || true
+  - udevadm settle || true
+  - systemctl enable --now hv-kvp-daemon.service || true
+  - systemctl enable --now hv-vss-daemon.service || true
+  - |
+    if systemctl is-active --quiet hv-kvp-daemon.service; then
+      echo 'LAB_KVP_DAEMON_RUNNING'
+    else
+      echo 'LAB_KVP_DAEMON_MISSING - guest OS details will not reach Azure Migrate'
+      lsmod | grep -q hv_utils || echo 'LAB_KVP_CAUSE - hv_utils module is not loaded'
+      test -e /dev/vmbus/hv_kvp || echo 'LAB_KVP_CAUSE - /dev/vmbus/hv_kvp does not exist'
+      command -v hv_kvp_daemon >/dev/null 2>&1 || ls /usr/lib/linux-tools/*/hv_kvp_daemon >/dev/null 2>&1 \
+        || echo 'LAB_KVP_CAUSE - daemon binary not installed for this kernel'
+    fi
+'@
     $baseRun = @("  - systemctl enable ssh", "  - systemctl start ssh", "  - systemctl enable walinuxagent", "  - systemctl start walinuxagent",
         "  - ufw --force disable || true")
-    $runYaml = ($baseRun -join "`n") + "`n" + $networkPrepare
+    $runYaml = ($baseRun -join "`n") + "`n" + $networkPrepare + "`n" + $hyperVIntegration
     if ($ExtraRunCmdYaml) { $runYaml += "`n$ExtraRunCmdYaml" }
 
     $userData = @'
