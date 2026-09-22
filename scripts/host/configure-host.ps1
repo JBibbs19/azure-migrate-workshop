@@ -458,7 +458,11 @@ ethernets:
     # where the running kernel version can be resolved.
     # plocate provides the locate command. Azure Migrate software inventory runs locate on
     # Linux guests to find installed applications, and Ubuntu cloud images omit it.
-    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "walinuxagent", "linux-cloud-tools-common", "plocate")
+    # Azure Migrate runs a fixed command set over SSH for software inventory and agentless
+    # dependency analysis. net-tools supplies netstat, iproute2 supplies ss, libcap2-bin
+    # supplies getcap and plocate supplies locate -- none of which ship in a cloud image.
+    $basePackages = @("openssh-server", "curl", "wget", "net-tools", "iproute2", "libcap2-bin",
+        "walinuxagent", "linux-cloud-tools-common", "plocate")
     $allPackages  = $basePackages + $ExtraPackages
     $pkgYaml = ($allPackages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -505,42 +509,80 @@ ethernets:
     apt-get install -y "linux-cloud-tools-$(uname -r)" \
       || apt-get install -y linux-cloud-tools-virtual linux-tools-virtual \
       || true
+  - udevadm control --reload-rules || true
+  - udevadm trigger --subsystem-match=vmbus || true
   - udevadm settle || true
-  - systemctl enable --now hv-kvp-daemon.service || true
-  - systemctl enable --now hv-vss-daemon.service || true
+  - systemctl enable hv-kvp-daemon.service || true
+  - systemctl enable hv-vss-daemon.service || true
+  - systemctl start hv-kvp-daemon.service || true
+  - systemctl start hv-vss-daemon.service || true
   - updatedb || true
   - |
     if systemctl is-active --quiet hv-kvp-daemon.service; then
       echo 'LAB_KVP_DAEMON_RUNNING'
     else
-      echo 'LAB_KVP_DAEMON_MISSING - guest OS details will not reach Azure Migrate'
+      # Expected on first pass. The tools package installs udev rules that create
+      # /dev/vmbus/hv_kvp, and the daemon unit Requires that device, so the service cannot
+      # start until the rules have been applied to a fresh boot. The services are enabled,
+      # so the reboot below starts them. Record why for the log either way.
+      echo 'LAB_KVP_DAEMON_PENDING_REBOOT - services enabled; starting after the scheduled reboot'
       lsmod | grep -q hv_utils || echo 'LAB_KVP_CAUSE - hv_utils module is not loaded'
-      test -e /dev/vmbus/hv_kvp || echo 'LAB_KVP_CAUSE - /dev/vmbus/hv_kvp does not exist'
+      test -e /dev/vmbus/hv_kvp || echo 'LAB_KVP_CAUSE - /dev/vmbus/hv_kvp does not exist yet'
       command -v hv_kvp_daemon >/dev/null 2>&1 || ls /usr/lib/linux-tools/*/hv_kvp_daemon >/dev/null 2>&1 \
         || echo 'LAB_KVP_CAUSE - daemon binary not installed for this kernel'
     fi
+  - |
+    # Confirm the account and command set Azure Migrate needs over SSH, so a gap appears in
+    # the cloud-init log rather than as an empty inventory days later.
+    sudo -n true 2>/dev/null && echo 'LAB_SUDO_NOPASSWD_OK' || echo 'LAB_SUDO_NOPASSWD_MISSING'
+    # passwd -S reports P for a usable password, L for locked, NP for none.
+    case "$(passwd -S __USER__ 2>/dev/null | awk '{print $2}')" in
+      P) echo 'LAB_GUEST_PASSWORD_SET' ;;
+      L) echo 'LAB_GUEST_PASSWORD_LOCKED - console and SSH sign-in will fail' ;;
+      *) echo 'LAB_GUEST_PASSWORD_MISSING - console and SSH sign-in will fail' ;;
+    esac
+    missing=''
+    for c in ls netstat ss touch chmod cat ps grep echo sha256sum awk sudo dpkg sed getcap which date locate; do
+      command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+    done
+    if [ -n "$missing" ]; then echo "LAB_DEPENDENCY_COMMANDS_MISSING -$missing"; else echo 'LAB_DEPENDENCY_COMMANDS_OK'; fi
+    systemctl is-active --quiet ssh && echo 'LAB_SSH_ACTIVE' || echo 'LAB_SSH_INACTIVE'
 '@
     $baseRun = @("  - systemctl enable ssh", "  - systemctl start ssh", "  - systemctl enable walinuxagent", "  - systemctl start walinuxagent",
         "  - ufw --force disable || true")
+    # Expand-LabTextTemplate replaces tokens in one pass and never rescans inserted text,
+    # so any token inside the runcmd fragments must be resolved before they are joined in.
+    $hyperVIntegration = $hyperVIntegration.Replace('__USER__', $guestUser)
     $runYaml = ($baseRun -join "`n") + "`n" + $networkPrepare + "`n" + $hyperVIntegration
     if ($ExtraRunCmdYaml) { $runYaml += "`n$ExtraRunCmdYaml" }
 
+    # The password is set through chpasswd's users list, which names the account directly.
+    # The top-level 'password:' key applies to the distro DEFAULT user, and because this
+    # file replaces 'users:' without including 'default', no default user exists -- so that
+    # form silently applied the password to nobody. 'plain_text_passwd' is also deprecated.
     $userData = @'
 #cloud-config
-password: __PASSWORD__
-chpasswd:
-  expire: false
 ssh_pwauth: true
 users:
   - name: __USER__
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
-    plain_text_passwd: __PASSWORD__
+chpasswd:
+  expire: false
+  users:
+    - name: __USER__
+      password: __PASSWORD__
+      type: text
 packages:
 __PKGYAML__
 runcmd:
 __RUNYAML__
+power_state:
+  mode: reboot
+  message: Restarting to activate the Hyper-V guest daemons
+  timeout: 30
+  condition: true
 '@
     $passwordYaml = ConvertTo-Json -InputObject $guestAdminPwd -Compress
     $userData = Expand-LabTextTemplate $userData @{
@@ -1037,6 +1079,9 @@ Set-StrictMode -Version Latest
     throw "OnPrem-SQL workload setup failed: $_"
 }
 
+# The Linux guests reboot once at the end of cloud-init so the Hyper-V guest daemons start
+# against the udev rules their tools package installed. Validation already retries for 20
+# minutes, which absorbs that restart; a guest that is briefly unreachable here is normal.
 # Workload success must be observed, not inferred from VM heartbeat.
 Write-Log 'Validating sample applications...'
 $deadline = (Get-Date).AddMinutes(20)

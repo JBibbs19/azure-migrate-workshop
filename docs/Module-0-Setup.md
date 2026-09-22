@@ -125,9 +125,10 @@ You build the Azure Migrate appliance in Module 1, not here. Deployment leaves r
 
 | Requirement | Value |
 |---|---|
-| Host memory headroom | 16 GB, unallocated after the four guests take 12 GB |
-| Host vCPU | 8 virtual processors, oversubscribed against the host's 8 |
-| Appliance storage | A dedicated 100 GB partition on the first free drive letter — `E:` on the default host size — created during deployment and untouched by the guest VHDs |
+| Appliance memory | 16 GB, unallocated on the host after the four guests take 12 GB |
+| Appliance vCPU | 8 virtual processors, oversubscribed against the host's 8 |
+| Appliance VM disk | Roughly **80 GB**, per Microsoft's documented requirement. The published VHD arrives at about 40 GB, so Module 1 grows it before first boot |
+| Appliance storage on the host | A dedicated 100 GB partition on the first free drive letter — `E:` on the default host size — created during deployment and untouched by the guest VHDs. It holds the download, the extracted VHD and the running VM |
 | Staging folder | `E:\Appliance`, created and permissioned during deployment |
 | Network | Outbound HTTPS from the host for the appliance download, and from the appliance itself for Azure registration |
 
@@ -286,7 +287,15 @@ Test-NetConnection 192.168.0.11 -Port 1433
 
 > **Note:** A VM heartbeat or a successful ping does not prove an application works. That is why every workload check above targets an application-layer endpoint rather than ICMP.
 
-Sign in to the guests when you want to look inside them. Windows guests use `Administrator` with the lab password; Linux guests use `labadmin` with the same password.
+Sign in to the guests when you want to look inside them. The password is the same everywhere — the lab password you supplied at deployment — but the **username differs by platform**:
+
+| Machine | Account | Why |
+|---|---|---|
+| HyperVHost | your lab user, e.g. `labadmin` | The `-AdminUsername` you passed to `deploy-lab.ps1` |
+| `OnPrem-Web`, `OnPrem-SQL` | `Administrator` | The built-in Windows account; unattended setup sets its password rather than creating a second account |
+| `OnPrem-Linux-Web`, `OnPrem-Linux-App` | your lab user, e.g. `labadmin` | Created by cloud-init from the same `-AdminUsername`, so it matches the host |
+
+There is no separate Linux-only account: the Linux guests and the host share one username. If you deployed with a different `-AdminUsername`, `C:\AzMigrateLab\lab-traffic.settings.json` records the name actually used.
 
 To confirm the sample database, sign in to `OnPrem-SQL` through Hyper-V Manager and run:
 
@@ -457,11 +466,34 @@ Test-NetConnection -ComputerName 192.168.0.10 -TraceRoute
 Get-VM -Name "OnPrem-Web" | Get-VMNetworkAdapter | Select-Object IPAddresses
 ```
 
+### Cannot Sign In to a Linux Guest
+
+**Symptom:** The `labadmin` password is rejected at the console or over SSH.
+
+**Cause:** On a lab built before this was corrected, the cloud-config set the password through the top-level `password:` key. That key applies to the distro's **default user**, and because the file replaces `users:` without including `default`, no default user exists — so the password was applied to nobody.
+
+**Resolution:** Set it directly from the guest console, which does not need the password:
+
+```bash
+sudo passwd labadmin
+```
+
+Provisioning now records the outcome. Check it without opening a session:
+
+```powershell
+# On HyperVHost — expect LAB_GUEST_PASSWORD_SET for both Linux guests
+Get-Content C:\AzMigrateLab\setup-log.txt | Select-String 'LAB_GUEST_PASSWORD'
+```
+
+`LAB_GUEST_PASSWORD_LOCKED` or `LAB_GUEST_PASSWORD_MISSING` means the account has no usable password and both console and SSH sign-in will fail.
+
 ### Linux Workload Missing
 
 **Symptom:** Nginx or the Node API does not respond, though the guest is running.
 
-**Resolution:** From the guest, check `sudo cloud-init status --long`, `/var/log/cloud-init-output.log`, and `journalctl -u contoso-app`.
+**Cause:** Cloud-init may still be running, or the guest may be completing its scheduled reboot. Each Linux guest restarts once at the end of provisioning so the Hyper-V guest daemons start against the udev rules their tools package installed.
+
+**Resolution:** Wait for the guest to come back, then from the guest check `sudo cloud-init status --long`, `/var/log/cloud-init-output.log`, and `journalctl -u contoso-app`. Validation retries for 20 minutes, which absorbs the restart.
 
 ### SQL Not Listening
 
@@ -632,7 +664,7 @@ Estimate every resource listed in the [README](../README.md) for your own region
 | Azure VM provisioning | ~5–10 minutes | Resource group, networking, host VM creation |
 | Hyper-V role installation and reboot | ~5–10 minutes | Feature installation, mandatory restart |
 | Appliance store partition | ~1 minute | Size `C:`, create and format `E:` |
-| Guest VM creation and workload configuration | ~40–80 minutes | Image downloads, **fixed** VHD allocation of 140 GB, OS provisioning, application installation |
+| Guest VM creation and workload configuration | ~40–80 minutes | Image downloads, **fixed** VHD allocation of 140 GB, OS provisioning, application installation, one scheduled reboot of each Linux guest |
 | **Total** | **~50–100 minutes** | Fully automated — no manual steps required |
 
 ---

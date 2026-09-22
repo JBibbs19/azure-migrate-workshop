@@ -82,31 +82,31 @@ Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 `
     -ClientId '00-15-5D-00-00-14' -Name MigrateAppl
 ```
 
-The four workload VMs use fixed disks and static memory so the assessment observes stable machines. Give the appliance the same treatment before you start it. Convert its disk to fixed, which claims its full size on `E:` now rather than as the appliance writes:
+**Expand the disk before first boot.** Microsoft's appliance VHD is published at around 40 GB, but the documented requirement for a Hyper-V appliance is **16 GB memory, 8 vCPUs and roughly 80 GB of disk**. The VM must be grown to meet it, and growing the virtual disk is far simpler before Windows has booted from it.
 
 ```powershell
-# Check what the extracted VHD needs — MaxGB must fit in the free space on E:
+# What the published VHD provides — expect MaxGB around 40
 Get-VHD $vhd | Select-Object VhdType,@{N='CurrentGB';E={[math]::Round($_.FileSize/1GB,1)}},@{N='MaxGB';E={[math]::Round($_.Size/1GB,1)}}
 Get-Volume -DriveLetter E | Select-Object SizeRemaining
+
+# Grow it to the documented 80 GB
+Resize-VHD -Path $vhd -SizeBytes 80GB
+Get-VHD $vhd | Select-Object @{N='MaxGB';E={[math]::Round($_.Size/1GB,1)}}
 ```
 
-If `MaxGB` fits in the free space on `E:`, convert it and repoint the VM at the converted disk:
+**Expected result:** `MaxGB` is now 80.
 
-```powershell
-$fixed = 'E:\Appliance\MigrateAppl-Fixed.vhd'
-Convert-VHD -Path $vhd -DestinationPath $fixed -VHDType Fixed
-Get-VMHardDiskDrive -VMName MigrateAppl | Set-VMHardDiskDrive -Path $fixed
-Remove-Item $vhd -Force
-Start-VM -Name MigrateAppl
-```
-
-If it does not fit, leave the disk as it is and start the VM — the appliance still works, and `E:` is dedicated to it either way:
+Now start the VM:
 
 ```powershell
 Start-VM -Name MigrateAppl
 ```
 
 **Expected result:** `Get-VM MigrateAppl` shows the VM running, and `Get-VMHardDiskDrive -VMName MigrateAppl` shows its disk on `E:`.
+
+> **Note:** `Resize-VHD` grows the **virtual disk**, not the partition inside it. Windows still sees roughly 40 GB until the partition is extended, which you do at first boot in section 3.5.
+
+> **Note on the 100 GB partition.** `E:` is the host-side store that holds the download, the extracted VHD and the running VM — it is not the appliance's own disk. An 80 GB dynamic disk consumes only what the appliance actually writes, so it sits comfortably inside 100 GB alongside the archive. Leave this disk **dynamic**: unlike the four workload VMs, the appliance is lab infrastructure rather than an assessment subject, so its disk I/O profile does not affect the sizing data, and a fixed 80 GB disk plus the 40 GB source during conversion would not fit in the partition.
 
 The static MAC follows the same `00-15-5D-00-00-xx` scheme deployment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
 
@@ -121,10 +121,27 @@ Get-VMIntegrationService -VMName MigrateAppl -Name 'Time Synchronization'
 
 ### 3.5 — Complete first boot
 
-Open the VM console in Hyper-V Manager, accept the appliance's first-boot prompts, and set its administrator password when asked. Then confirm the appliance has:
+Open the VM console in Hyper-V Manager, accept the appliance's first-boot prompts, and set its administrator password when asked.
+
+**Extend the partition to use the space you added.** Section 3.4 grew the virtual disk to 80 GB; Windows inside the appliance still sees the original partition until you extend it. In an elevated PowerShell session **inside `MigrateAppl`**:
+
+```powershell
+# Free space available to grow into — expect roughly 40 GB of unallocated space
+Get-Disk | Select-Object Number,@{N='SizeGB';E={[math]::Round($_.Size/1GB)}},@{N='UnallocatedGB';E={[math]::Round($_.LargestFreeExtent/1GB)}}
+
+# Extend C: into it
+$max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+Resize-Partition -DriveLetter C -Size $max
+
+# Confirm — expect roughly 80 GB
+Get-Volume -DriveLetter C | Select-Object DriveLetter,@{N='SizeGB';E={[math]::Round($_.Size/1GB)}},@{N='FreeGB';E={[math]::Round($_.SizeRemaining/1GB)}}
+```
+
+Then confirm the appliance has:
 
 - Eight processors and 16 GB RAM, with dynamic memory off
-- Its virtual disk on `E:`, not `C:`
+- Roughly 80 GB on `C:`, matching Microsoft's documented requirement
+- Its virtual disk file on `E:`, not `C:`
 - Address `192.168.0.20`, gateway `192.168.0.1`
 - Working DNS and internet access
 - A correct clock, checked in UTC
@@ -184,16 +201,54 @@ Add these in the appliance configuration manager. One credential of each type co
 
 | Credential type | Username | Applies to | Enables |
 |---|---|---|---|
-| Windows (non-domain) | `HyperVHost\labadmin` | HyperVHost, as the **discovery source** | VM inventory, configuration and performance metadata |
+| Windows (non-domain) | `HyperVHost\<lab user>` | HyperVHost, as the **discovery source** | VM inventory, configuration and performance metadata |
 | Windows (non-domain) | `Administrator` | `OnPrem-Web`, `OnPrem-SQL` | Software inventory, ASP.NET web apps, agentless dependency analysis |
-| Linux (non-domain) | `labadmin` | `OnPrem-Linux-Web`, `OnPrem-Linux-App` | Software inventory, agentless dependency analysis |
+| Linux (non-domain) | `<lab user>` | `OnPrem-Linux-Web`, `OnPrem-Linux-App` | Software inventory, agentless dependency analysis |
 | SQL Server authentication *or* Windows authentication | see note | `OnPrem-SQL` only | SQL Server instance and database discovery |
 
-All four use the lab password you supplied at deployment.
+All four use the same lab password you supplied at deployment. The **usernames differ by platform**, which is worth being clear about before you start typing them in:
+
+| Machine | Account | Where it comes from |
+|---|---|---|
+| HyperVHost | your lab user, e.g. `labadmin` | The `-AdminUsername` you passed to `deploy-lab.ps1`; this is the Azure VM's administrator |
+| `OnPrem-Web`, `OnPrem-SQL` | `Administrator` | The **built-in** Windows account. Unattended setup sets its password to the lab password; no new account is created |
+| `OnPrem-Linux-Web`, `OnPrem-Linux-App` | your lab user, e.g. `labadmin` | Created by cloud-init using the same `-AdminUsername`, so it matches the host account |
+
+So there is no separate Linux-only account. The Linux guests and the host share one username; only the Windows guests differ, because they reuse the built-in `Administrator` rather than creating a second account.
+
+Deployment records the name it actually used, so you never have to guess:
+
+```powershell
+# On HyperVHost — the LinuxUsername field is the account on both Linux guests
+Get-Content C:\AzMigrateLab\lab-traffic.settings.json
+```
+
+> **Note:** If you deployed with `-AdminUsername` set to something other than `labadmin`, substitute that name everywhere this guide writes `labadmin` — including the SSH commands and the appliance credentials.
 
 > **Note on the SQL credential.** Software inventory finds the SQL instance; a **separate SQL credential** is what lets the appliance connect to it and read database detail. Use Windows authentication with the guest `Administrator` account, which is sysadmin on the Express instance. Do not use the `labapp` SQL login created by the optional traffic mesh — it holds only `db_datareader` and `db_datawriter` on `ContosoApp`, and SQL discovery needs server-level read permissions such as `VIEW SERVER STATE`.
 
 > **Note on privilege.** Microsoft's support matrix asks for different levels depending on the feature: software inventory needs only a guest user on Windows and a standard non-sudo user on Linux, while **agentless dependency analysis** needs a Windows account with administrator rights and a Linux sudo account with `NOPASSWD` for `ls` and `netstat`. This lab uses `Administrator` and `labadmin` — which already has passwordless sudo — so both levels are satisfied by one credential each. In a customer environment, prefer the lowest privilege that covers the features you are demonstrating.
+
+### Linux prerequisites for full visibility
+
+Deployment configures all of these. Confirm them on each Linux guest before blaming discovery for an empty result:
+
+| Requirement | Check | Expected |
+|---|---|---|
+| SSH reachable from the appliance | `Test-NetConnection 192.168.0.12 -Port 22` from `MigrateAppl` | `TcpTestSucceeded: True` |
+| Account has sudo, no password prompt | `sudo -n true && echo SUDO_OK` | `SUDO_OK` — cloud-init grants `labadmin` `ALL=(ALL) NOPASSWD:ALL` |
+| Commands dependency analysis runs | `for c in ls netstat ss getcap locate; do command -v $c >/dev/null \|\| echo "MISSING $c"; done` | no output |
+| Guest daemons running | `systemctl is-active hv-kvp-daemon` | `active` |
+| Distribution supported | `lsb_release -d` | Ubuntu 22.04, within the support matrix |
+
+Provisioning records the same facts, so you can check without opening a session:
+
+```powershell
+# On HyperVHost — expect LAB_SUDO_NOPASSWD_OK, LAB_DEPENDENCY_COMMANDS_OK, LAB_SSH_ACTIVE
+Get-Content C:\AzMigrateLab\setup-log.txt | Select-String 'LAB_SUDO|LAB_DEPENDENCY|LAB_SSH|LAB_KVP'
+```
+
+> **Note:** `netstat`, `ss`, `getcap` and `locate` come from `net-tools`, `iproute2`, `libcap2-bin` and `plocate`. Ubuntu cloud images ship none of them reliably, so deployment installs all four. A missing `getcap` is the easiest to overlook — it appears in Microsoft's dependency-analysis command list but not in most base images.
 
 Then open the **Software inventory** column on the Discovered servers page. You should see:
 
@@ -246,7 +301,9 @@ ssh labadmin@192.168.0.12 'systemctl is-active hv-kvp-daemon'
 ssh labadmin@192.168.0.13 'systemctl is-active hv-kvp-daemon'
 ```
 
-Deployment loads the required module and starts this daemon. If it reports anything other than `active`, work through the following on the affected guest, then restart discovery.
+Deployment installs the daemons, enables them and reboots each Linux guest once so they start. If one reports anything other than `active`, work through the following on the affected guest, then restart discovery.
+
+> **Note:** The reboot is deliberate. The tools package installs the udev rules that create `/dev/vmbus/hv_kvp`, and the daemon's systemd unit requires that device — so the service cannot start in the same boot that installed it. On a lab built before this was added, a single `sudo reboot` on each Linux guest starts the enabled services.
 
 First confirm the kernel module is loaded — the daemon's systemd unit requires the device node it creates:
 
