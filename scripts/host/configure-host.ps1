@@ -17,8 +17,12 @@ $labRoot = "C:\AzMigrateLab"
 $logFile = "$labRoot\setup-log.txt"
 New-Item -ItemType Directory -Path $labRoot -Force | Out-Null
 if (Test-Path "$labRoot\setup-complete.json") {
+    # A completed host is refused: replaying provisioning after migration has begun could
+    # recreate or restart retired source VMs. An INCOMPLETE host has no marker and is
+    # resumed instead, so a failed run does not cost a full rebuild.
     throw 'This host has already been provisioned. Use validation, not deployment, after migration starts.'
 }
+$labResuming = Test-Path "$labRoot\setup-log.txt"
 # This directory contains unattended setup material; limit it to local administrators and SYSTEM.
 & icacls.exe $labRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not restrict setup directory permissions.' }
@@ -76,6 +80,9 @@ New-Item -ItemType Directory -Path $vhdPath -Force | Out-Null
 # =============================================================
 # PHASE 1 — Virtual networking
 # =============================================================
+if ($labResuming) {
+    Write-Log 'Resuming an incomplete run. Existing switch, NAT, DHCP scope and base images are reused; partially built guests are rebuilt.'
+}
 Write-Log "PHASE 1: Configuring virtual networking..."
 
 $existingSwitch = Get-VMSwitch -Name $intSwitchName -ErrorAction SilentlyContinue
@@ -279,7 +286,17 @@ function Create-WindowsGuestVM {
     )
 
     $existingVM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
-    if ($existingVM) { throw "VM $VMName already exists. Use a fresh lab; do not replay guest provisioning." }
+    if ($existingVM) {
+        # Left behind by an interrupted run. Its provisioning never completed, so discard it
+        # and rebuild rather than adopting a guest in an unknown state.
+        Write-Log "VM '$VMName' exists from an incomplete run; removing it before rebuilding."
+        if ($existingVM.State -ne 'Off') { Stop-VM -Name $VMName -TurnOff -Force -ErrorAction Stop }
+        Remove-VM -Name $VMName -Force -ErrorAction Stop
+        Remove-Item "$vhdPath\$VMName.vhdx" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$labRoot\VMs\$VMName" -Recurse -Force -ErrorAction SilentlyContinue
+        Get-DhcpServerv4Reservation -ScopeId 192.168.0.0 -ErrorAction SilentlyContinue |
+            Where-Object Name -EQ $VMName | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+    }
 
     Write-Log "Creating Windows VM '$VMName'..."
 
@@ -385,7 +402,16 @@ function Create-LinuxGuestVM {
     )
 
     $existingVM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
-    if ($existingVM) { throw "VM $VMName already exists. Use a fresh lab; do not replay guest provisioning." }
+    if ($existingVM) {
+        Write-Log "VM '$VMName' exists from an incomplete run; removing it before rebuilding."
+        if ($existingVM.State -ne 'Off') { Stop-VM -Name $VMName -TurnOff -Force -ErrorAction Stop }
+        Remove-VM -Name $VMName -Force -ErrorAction Stop
+        Remove-Item "$vhdPath\$VMName.vhdx" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$vhdPath\$VMName-cidata.iso" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$labRoot\VMs\$VMName" -Recurse -Force -ErrorAction SilentlyContinue
+        Get-DhcpServerv4Reservation -ScopeId 192.168.0.0 -ErrorAction SilentlyContinue |
+            Where-Object Name -EQ $VMName | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+    }
 
     Write-Log "Creating Linux VM '$VMName'..."
 

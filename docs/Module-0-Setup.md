@@ -196,7 +196,7 @@ The `migrate-step` scripts take no subscription parameter at all. They use which
 
 Write all four decimal octets of the address without leading zeros; abbreviated, hexadecimal and integer forms are rejected. Because the value is masked as you type it, check it before pressing Enter — a typo surfaces as a validation error rather than as visibly wrong text. If your address changes later, update the existing NSG rule rather than redeploying.
 
-Before provisioning begins, deployment shrinks `C:` and creates the 100 GB `E:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
+Before provisioning begins, deployment sizes `C:` and creates the 100 GB `E:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. Azure creates the OS disk at 512 GB but leaves `C:` at the image's native size with the remainder unallocated, so in practice this **extends** `C:` into most of that free space and leaves exactly 100 GB for the appliance. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
 
 > ⏱️ **Estimated time: 50–100 minutes.** Progress is printed as each stage completes, and no interaction is needed once it starts. The guest disks are fixed rather than dynamic, so setup writes all 140 GB during provisioning instead of deferring it to first use. On a 512 GB Premium SSD that adds roughly 20–40 minutes over a dynamic-disk build — paid once, at deployment, rather than unpredictably during the workshop.
 >
@@ -386,7 +386,9 @@ Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database Con
 
 **Symptom:** Deployment stops at *Create appliance store partition*, reporting that it cannot free the requested space, or that the drive letter is in use.
 
-**Cause:** The OS disk cannot give up 100 GB while still leaving room for Windows and the 140 GB of fixed guest disks — or you supplied `-ApplianceStoreDriveLetter` and that letter is already taken.
+**Cause:** The OS disk cannot provide 100 GB for the store while still leaving room for Windows and the 140 GB of fixed guest disks — or you supplied `-ApplianceStoreDriveLetter` and that letter is already taken.
+
+The error reports the real numbers: the current size of `C:`, the range it can occupy on this disk, and the largest store that range allows.
 
 **Resolution:** Deploy with a larger OS disk, or reduce `-ApplianceStoreSizeGB`. If you named a letter explicitly, omit the parameter and let deployment pick the first free one. Do not reclaim the space by making the guest disks dynamic; the fixed allocation is what keeps host capacity and the Module 1 assessment predictable.
 
@@ -477,10 +479,41 @@ Get-VM -Name "OnPrem-Web" | Get-VMNetworkAdapter | Select-Object IPAddresses
 
 **Symptom:** The script fails after the host VM was created.
 
-**Resolution:**
+**Resolution:** Resolve the cause, then **run the same command again with the same resource group**. Deployment resumes: it reuses the network, public IP, NSG, NIC, host VM and image disk that already exist, and on the host it keeps the virtual switch, NAT, DHCP scope and downloaded base images. Only guests that were partly built are removed and recreated, because a half-provisioned guest cannot be trusted.
+
 1. Identify the failed phase from the script output and `C:\AzMigrateLab\setup-log.txt`.
-2. Retain the logs and revoke/remove `WinServerBase-temp` if it is still present.
-3. Use a fresh resource group after resolving the cause. Deployment refuses existing groups, and it is not a repair command.
+2. Fix the underlying cause.
+3. Rerun the same `deploy-lab.ps1` command.
+
+> **Note:** Once guest setup has completed successfully, deployment refuses the group and tells you so. That is deliberate — replaying provisioning after migration has begun could recreate or restart retired source VMs. Use a new group for a fresh lab.
+
+### Monitoring Stops but Setup Keeps Running
+
+**Symptom:** The client reports that Azure status is unavailable, or that your sign-in is no longer valid, and stops.
+
+**Cause:** Guest setup is submitted as an **asynchronous** Run Command. The client only watches it. An expired Azure token or a network interruption ends the watching, not the work.
+
+**Resolution:** The message is not a failure of the deployment. Reconnect and reattach:
+
+```powershell
+Connect-AzAccount
+Set-AzContext -SubscriptionId $subscriptionId
+
+# Expect ExecutionState Running, or Succeeded if it finished while you were away
+Get-AzVMRunCommand -ResourceGroupName $sourceRg -VMName HyperVHost `
+    -RunCommandName ConfigureWorkshop -Expand InstanceView |
+    Select-Object -ExpandProperty InstanceView | Select-Object ExecutionState, ExitCode
+```
+
+`C:\AzMigrateLab\setup-log.txt` on the host shows progress directly and is the authority. If setup did complete, finish the two steps the client would have done:
+
+```powershell
+Revoke-AzDiskAccess -ResourceGroupName $sourceRg -DiskName WinServerBase-temp
+Remove-AzDisk -ResourceGroupName $sourceRg -DiskName WinServerBase-temp -Force
+Remove-AzVMRunCommand -ResourceGroupName $sourceRg -VMName HyperVHost -RunCommandName ConfigureWorkshop
+```
+
+> **Warning:** Do not redeploy on this message alone. Confirm the run actually failed first — setup frequently completes after the client has stopped watching.
 
 ---
 
@@ -598,7 +631,7 @@ Estimate every resource listed in the [README](../README.md) for your own region
 |---|---|---|
 | Azure VM provisioning | ~5–10 minutes | Resource group, networking, host VM creation |
 | Hyper-V role installation and reboot | ~5–10 minutes | Feature installation, mandatory restart |
-| Appliance store partition | ~1 minute | Shrink `C:`, create and format `E:` |
+| Appliance store partition | ~1 minute | Size `C:`, create and format `E:` |
 | Guest VM creation and workload configuration | ~40–80 minutes | Image downloads, **fixed** VHD allocation of 140 GB, OS provisioning, application installation |
 | **Total** | **~50–100 minutes** | Fully automated — no manual steps required |
 

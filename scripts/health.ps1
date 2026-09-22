@@ -205,11 +205,12 @@ function Assert-LabManagedRunResult {
 function Wait-LabManagedSetup {
     param([Parameter(Mandatory)][scriptblock]$ReadStatus, [Parameter(Mandatory)][hashtable]$Observation,
         [ValidateRange(1,18000)][int]$TimeoutSeconds = 15000,
-        [ValidateRange(1,3600)][int]$StatusFailureSeconds = 300,
+        [ValidateRange(60,7200)][int]$StatusFailureSeconds = 900,
         [ValidateRange(1,3600)][int]$StartupSeconds = 900,
         [ValidateRange(1,60)][int]$PollSeconds = 30, [string]$HealthPath = '')
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $unavailableSince = $null
+    $readError = $null
     $started = $false
     $phase = 'Waiting for host phase information'
     $install = $null
@@ -220,7 +221,14 @@ function Wait-LabManagedSetup {
     try {
         while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $command = $null; $readFailed = $false
-            try { $command = & $ReadStatus } catch { $readFailed = $true }
+            try { $command = & $ReadStatus; $readError = $null }
+            catch {
+                $readFailed = $true
+                # Never discard why the read failed. An expired token, a throttle and a
+                # network fault all look identical without it, and only one of them is
+                # worth waiting out.
+                $readError = $_.Exception.Message
+            }
             $view = Get-LabProperty $command InstanceView
             $provisioning = [string](Get-LabProperty $command ProvisioningState '')
             $execution = [string](Get-LabProperty $view ExecutionState '')
@@ -237,10 +245,20 @@ function Wait-LabManagedSetup {
             }
             if ($readFailed -or $null -eq $command -or ($started -and $execution -ne 'Running')) {
                 if ($null -eq $unavailableSince) { $unavailableSince = $clock.Elapsed.TotalSeconds }
-                if ($clock.Elapsed.TotalSeconds - $unavailableSince -ge $StatusFailureSeconds) {
-                    throw "Setup status has been unavailable for $StatusFailureSeconds seconds. Monitoring stopped; the Azure script may still be running. Check sign-in, network, VM agent and ConfigureWorkshop before taking action."
+                # A sign-in failure does not heal by waiting: the token needs renewing, and
+                # setup runs asynchronously on the host regardless. Say so at once rather
+                # than after the full window.
+                $authFailure = $readError -and ($readError -match '(?i)token|expired|authentication|unauthorized|credential|re-?authenticate|AADSTS|Connect-AzAccount')
+                $reason = if ($readError) { " Azure reported: $readError" } else { '' }
+                if ($authFailure -or ($clock.Elapsed.TotalSeconds - $unavailableSince) -ge $StatusFailureSeconds) {
+                    $waited = if ($authFailure) { 'Azure sign-in is no longer valid' } else { "Setup status has been unavailable for $StatusFailureSeconds seconds" }
+                    throw ("$waited, so monitoring has stopped. Guest setup runs asynchronously on the host and is almost certainly still going: it is not cancelled by this message.$reason Reconnect with Connect-AzAccount and Set-AzContext, then reattach with:" +
+                        [Environment]::NewLine +
+                        '  Get-AzVMRunCommand -ResourceGroupName <rg> -VMName HyperVHost -RunCommandName ConfigureWorkshop -Expand InstanceView' +
+                        [Environment]::NewLine +
+                        'or read C:\AzMigrateLab\setup-log.txt on the host. Do not redeploy until you have confirmed the run actually failed.')
                 }
-                Write-LabHealth 'Guest setup' StatusUnavailable $clock.Elapsed.TotalSeconds "Unable to read Azure status; retrying within the $StatusFailureSeconds second monitoring limit." $HealthPath -TimeoutSeconds $TimeoutSeconds
+                Write-LabHealth 'Guest setup' StatusUnavailable $clock.Elapsed.TotalSeconds "Unable to read Azure status; retrying within the $StatusFailureSeconds second monitoring limit.$reason" $HealthPath -TimeoutSeconds $TimeoutSeconds
             } else {
                 $unavailableSince = $null
                 if ($execution -in @('Running','Succeeded')) { $started = $true }

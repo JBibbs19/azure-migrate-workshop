@@ -76,7 +76,28 @@ $passwordPlain = $credential.GetNetworkCredential().Password
 if ($passwordPlain.Length -lt 12 -or $passwordPlain.Length -gt 72 -or $passwordPlain -match '[\r\n\x00-\x1f]') { throw 'Use a 12-72 character lab password without control characters.' }
 $classes = @('[a-z]','[A-Z]','[0-9]','[^a-zA-Z0-9]') | Where-Object { $passwordPlain -cmatch $_ }
 if (@($classes).Count -lt 3) { throw 'The password must include at least three character categories: lower, upper, number, symbol.' }
-if (Get-LabResourceGroup -Name $ResourceGroupName -AllowMissing) { throw 'Use a new, dedicated source resource group. Deployment is not a post-migration repair command.' }
+$runNameProbe = 'ConfigureWorkshop'
+# An existing group is allowed only when it is this workshop's own and its host never
+# finished provisioning, so an interrupted run resumes instead of costing a full rebuild.
+# A group that is not tagged as this workshop, or whose host completed setup, is refused:
+# replaying provisioning after migration has begun could restart retired source VMs.
+$existingGroup = Get-LabResourceGroup -Name $ResourceGroupName -AllowMissing
+$resumeDeployment = $false
+if ($existingGroup) {
+    if (-not $existingGroup.Tags -or $existingGroup.Tags['Workshop'] -ne 'TD-SYNNEX-CES-HyperV') {
+        throw "Resource group '$ResourceGroupName' exists and is not tagged as this workshop. Use a new, dedicated source resource group."
+    }
+    $existingHost = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -ErrorAction SilentlyContinue
+    if (-not $existingHost) {
+        throw "Resource group '$ResourceGroupName' exists but has no HyperVHost. Inspect and remove it, then deploy into a clean group."
+    }
+    $completed = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runNameProbe -Expand InstanceView -ErrorAction SilentlyContinue
+    if ($completed -and [string]$completed.InstanceView.ExecutionState -eq 'Succeeded') {
+        throw "Guest setup already succeeded in '$ResourceGroupName'. Deployment is not a post-migration repair command; use a new group for a fresh lab."
+    }
+    $resumeDeployment = $true
+    Write-Host "Resuming the incomplete deployment in '$ResourceGroupName'. Existing resources are reused; unfinished guests are rebuilt."
+}
 $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
 $windowsImages = Get-LabWindowsImages -Location $Location
 $guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
@@ -103,18 +124,35 @@ $setupPassed = $false
 $setupObservation = @{ Terminal = $false }
 $deploymentClock = [Diagnostics.Stopwatch]::StartNew()
 try {
-    New-AzResourceGroup -Name $ResourceGroupName -Location $Location -Tag $tags | Out-Null
-    $subnet = New-AzVirtualNetworkSubnetConfig -Name default -AddressPrefix '10.0.0.0/24' -DefaultOutboundAccess $false
-    $job = New-AzVirtualNetwork -Name "$ResourceGroupName-vnet" -ResourceGroupName $ResourceGroupName -Location $Location -AddressPrefix '10.0.0.0/16' -Subnet $subnet -AsJob
-    $vnet = Wait-LabJob $job 'Create source network' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    if (-not $resumeDeployment) { New-AzResourceGroup -Name $ResourceGroupName -Location $Location -Tag $tags | Out-Null }
+    # Every resource below is created only when absent, so a resumed run continues from the
+    # point the previous attempt stopped instead of rebuilding what already exists.
+    $vnet = Get-AzVirtualNetwork -Name "$ResourceGroupName-vnet" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($vnet) { Write-Host 'Reusing the existing source network.' } else {
+        $subnet = New-AzVirtualNetworkSubnetConfig -Name default -AddressPrefix '10.0.0.0/24' -DefaultOutboundAccess $false
+        $job = New-AzVirtualNetwork -Name "$ResourceGroupName-vnet" -ResourceGroupName $ResourceGroupName -Location $Location -AddressPrefix '10.0.0.0/16' -Subnet $subnet -AsJob
+        $vnet = Wait-LabJob $job 'Create source network' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
     # The host's attached Standard public IP provides explicit outbound connectivity.
-    $job = New-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -Location $Location -AllocationMethod Static -Sku Standard -AsJob
-    $pip = Wait-LabJob $job 'Create host public IP' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
-    $rdp = New-AzNetworkSecurityRuleConfig -Name Allow-RDP -Access Allow -Protocol Tcp -Direction Inbound -Priority 100 -SourceAddressPrefix $adminSourceCidrPlain -SourcePortRange '*' -DestinationAddressPrefix '*' -DestinationPortRange 3389
-    $job = New-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -Location $Location -SecurityRules $rdp -AsJob
-    $nsg = Wait-LabJob $job 'Create host firewall rules' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
-    $job = New-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -Location $Location -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $pip.Id -NetworkSecurityGroupId $nsg.Id -EnableAcceleratedNetworking:$hostSku.AcceleratedNetworking -AsJob
-    $nic = Wait-LabJob $job 'Create host network interface' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    $pip = Get-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($pip) { Write-Host 'Reusing the existing host public IP.' } else {
+        $job = New-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -Location $Location -AllocationMethod Static -Sku Standard -AsJob
+        $pip = Wait-LabJob $job 'Create host public IP' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $nsg = Get-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($nsg) { Write-Host 'Reusing the existing host firewall rules.' } else {
+        $rdp = New-AzNetworkSecurityRuleConfig -Name Allow-RDP -Access Allow -Protocol Tcp -Direction Inbound -Priority 100 -SourceAddressPrefix $adminSourceCidrPlain -SourcePortRange '*' -DestinationAddressPrefix '*' -DestinationPortRange 3389
+        $job = New-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -Location $Location -SecurityRules $rdp -AsJob
+        $nsg = Wait-LabJob $job 'Create host firewall rules' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $nic = Get-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($nic) { Write-Host 'Reusing the existing host network interface.' } else {
+        $job = New-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -Location $Location -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $pip.Id -NetworkSecurityGroupId $nsg.Id -EnableAcceleratedNetworking:$hostSku.AcceleratedNetworking -AsJob
+        $nic = Wait-LabJob $job 'Create host network interface' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $existingHostVm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction SilentlyContinue
+    if ($existingHostVm) { Write-Host 'Reusing the existing Azure host; Hyper-V setup is re-verified below.' }
+    else {
     $vm = New-AzVMConfig -VMName $vmName -VMSize $VMSize -SecurityType Standard
     $vm = Set-AzVMOperatingSystem -VM $vm -Windows -ComputerName $vmName -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
     $vm = Set-AzVMSourceImage -VM $vm -PublisherName $windowsImages.Host.Publisher -Offer $windowsImages.Host.Offer -Skus $windowsImages.Host.Sku -Version $windowsImages.Host.Version
@@ -123,6 +161,8 @@ try {
     $vm = Set-AzVMBootDiagnostic -VM $vm -Enable
     $job = New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vm -Tag $tags -AsJob
     $null = Wait-LabJob $job 'Create Azure host' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    # Idempotent on the host: Install-WindowsFeature is a no-op when the role is present.
     $install = @'
 $ErrorActionPreference = 'Stop'
 $result = Install-WindowsFeature Hyper-V,DHCP -IncludeManagementTools
@@ -183,13 +223,27 @@ if ($existing) {
     }
     $system = Get-Partition -DriveLetter C -ErrorAction Stop
     $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
-    $targetSize = $system.Size - $storeBytes
+    # Azure creates the OS disk at the requested size but leaves C: at the image's native
+    # size, so most of the disk is normally unallocated. SizeMax is what C: could occupy --
+    # its current size plus the adjacent free space -- so sizing C: to SizeMax minus the
+    # store leaves exactly the store free, whether that means growing C: or shrinking it.
+    $targetSize = $supported.SizeMax - $storeBytes
+    $usedBytes = $system.Size - (Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
     # C: must still hold Windows, the base images and the 140 GB of fixed guest disks.
     $needed = $guestReserveBytes + 60GB
-    if ($targetSize -lt $supported.SizeMin -or ($targetSize - ($system.Size - (Get-Volume -DriveLetter C).SizeRemaining)) -lt $needed) {
-        throw "Cannot free __STOREGB__ GB for the appliance store and still leave room on C: for the 140 GB of fixed guest disks. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB."
+    $toGB = { param($b) [math]::Round($b / 1GB, 1) }
+    if ($targetSize -lt $supported.SizeMin) {
+        $maxStore = & $toGB ($supported.SizeMax - $supported.SizeMin)
+        throw ("Cannot reserve __STOREGB__ GB for the appliance store. C: is $(& $toGB $system.Size) GB and can range from $(& $toGB $supported.SizeMin) GB to $(& $toGB $supported.SizeMax) GB on this disk, so at most $maxStore GB can be set aside. Deploy with a larger OS disk, or pass -ApplianceStoreSizeGB with a value at or below $maxStore.")
     }
-    Resize-Partition -DriveLetter C -Size $targetSize -ErrorAction Stop
+    if (($targetSize - $usedBytes) -lt $needed) {
+        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140 GB of fixed guest disks and their base images require. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB.")
+    }
+    if ($targetSize -ne $system.Size) {
+        $action = if ($targetSize -gt $system.Size) { 'Extending' } else { 'Shrinking' }
+        Write-Output ("{0} C: from {1} GB to {2} GB to free space for the appliance store." -f $action, (& $toGB $system.Size), (& $toGB $targetSize))
+        Resize-Partition -DriveLetter C -Size $targetSize -ErrorAction Stop
+    }
     $partition = New-Partition -DiskNumber $system.DiskNumber -UseMaximumSize -DriveLetter $letter -ErrorAction Stop
     $null = Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force -ErrorAction Stop
 }
@@ -215,12 +269,22 @@ Write-Output 'APPLIANCE_STORE_READY'
     $appliancePath = "${storeDrive}:\Appliance"
     Write-Host "Appliance store created as ${storeDrive}: ($ApplianceStoreSizeGB GB)."
     $stagingSummary = @($storeOutput -split "`n" | Where-Object { $_ -match 'GB free' } | ForEach-Object { $_.Trim() })[0]
-    $job = New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Disk $guestDiskConfig -AsJob
-    $null = Wait-LabJob $job 'Create guest image disk' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    if (Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -ErrorAction SilentlyContinue) {
+        Write-Host 'Reusing the existing guest image disk.'
+    } else {
+        $job = New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Disk $guestDiskConfig -AsJob
+        $null = Wait-LabJob $job 'Create guest image disk' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
     $diskCreated = $true
     $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName -Access Read -DurationInSecond 18000
     $parameters = @(@{ Name = 'AdminUsername'; Value = $AdminUsername })
     $protected = @(@{ Name = 'AdminPassword'; Value = $passwordPlain }, @{ Name = 'WindowsVhdSasUrl'; Value = $access.AccessSAS })
+    # A Run Command left by an interrupted attempt would block the new submission.
+    $staleRun = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction SilentlyContinue
+    if ($staleRun) {
+        Write-Host 'Removing the Run Command left by the previous attempt before resubmitting.'
+        Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction Stop | Out-Null
+    }
     $runCreated = $true
     $job = Set-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -Location $Location -RunCommandName $runName `
         -SourceScript $hostScript -Parameter $parameters -ProtectedParameter $protected -TimeoutInSecond ($GuestSetupTimeoutMinutes * 60) -AsyncExecution -AsJob

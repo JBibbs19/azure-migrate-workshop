@@ -166,7 +166,7 @@ Work through the configuration manager in order:
 2. Paste the project key and sign in to the correct Azure tenant and subscription.
 3. Add the Hyper-V host credentials and the host address `192.168.0.1`. Use `HyperVHost\labadmin` — the guest Windows credentials are different.
 4. Validate the source, resolve every failed prerequisite, then start discovery.
-5. **Add guest credentials.** In *Manage credentials and discovery sources*, step 3, add credentials for the guests themselves — `Administrator` for the Windows guests and `labadmin` for the Linux guests, both with the lab password. These are separate from the Hyper-V host credentials in step 3 above, and without them the appliance discovers the VMs but never looks inside them.
+5. **Add guest credentials.** In *Manage credentials and discovery sources*, step 3, add credentials for the guests themselves. These are separate from the Hyper-V host credentials added in the previous step, and without them the appliance discovers the VMs but never looks inside them. The credential **type** you pick from the dropdown matters as much as the username — see the table below.
 6. Return to the project and confirm the four workloads appear:
 
 | Workload | Expected source OS | Expected address |
@@ -177,6 +177,23 @@ Work through the configuration manager in order:
 | OnPrem-Linux-App | Ubuntu 22.04 | 192.168.0.13 |
 
 Check the **names**, OS details, CPU and memory — not just the count. A raw total of four machines is not proof, because the appliance itself can appear in inventory.
+
+### Credentials this lab needs
+
+Add these in the appliance configuration manager. One credential of each type covers both guests of that kind — the appliance maps credentials to servers itself, so you do not assign them per machine.
+
+| Credential type | Username | Applies to | Enables |
+|---|---|---|---|
+| Windows (non-domain) | `HyperVHost\labadmin` | HyperVHost, as the **discovery source** | VM inventory, configuration and performance metadata |
+| Windows (non-domain) | `Administrator` | `OnPrem-Web`, `OnPrem-SQL` | Software inventory, ASP.NET web apps, agentless dependency analysis |
+| Linux (non-domain) | `labadmin` | `OnPrem-Linux-Web`, `OnPrem-Linux-App` | Software inventory, agentless dependency analysis |
+| SQL Server authentication *or* Windows authentication | see note | `OnPrem-SQL` only | SQL Server instance and database discovery |
+
+All four use the lab password you supplied at deployment.
+
+> **Note on the SQL credential.** Software inventory finds the SQL instance; a **separate SQL credential** is what lets the appliance connect to it and read database detail. Use Windows authentication with the guest `Administrator` account, which is sysadmin on the Express instance. Do not use the `labapp` SQL login created by the optional traffic mesh — it holds only `db_datareader` and `db_datawriter` on `ContosoApp`, and SQL discovery needs server-level read permissions such as `VIEW SERVER STATE`.
+
+> **Note on privilege.** Microsoft's support matrix asks for different levels depending on the feature: software inventory needs only a guest user on Windows and a standard non-sudo user on Linux, while **agentless dependency analysis** needs a Windows account with administrator rights and a Linux sudo account with `NOPASSWD` for `ls` and `netstat`. This lab uses `Administrator` and `labadmin` — which already has passwordless sudo — so both levels are satisfied by one credential each. In a customer environment, prefer the lowest privilege that covers the features you are demonstrating.
 
 Then open the **Software inventory** column on the Discovered servers page. You should see:
 
