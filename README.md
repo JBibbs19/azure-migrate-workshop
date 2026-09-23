@@ -14,11 +14,11 @@ Provision the environment before the teaching session. Budget a full working day
 
 | Module | Exercise | Completion evidence |
 |---|---|---|
-| 0 | [Setup](docs/Module-0-Setup.md) | Four nested VMs healthy; host staging space confirmed |
+| 0 | [Setup](docs/Module-0-Setup.md) | Four nested VMs healthy on fixed disks; `E:` appliance store present |
 | 1 | [Discovery and assessment](docs/Module-1-Discovery.md) | Four workload names discovered and an Azure VM assessment; optionally a populated dependency map via the [lab traffic mesh](docs/Lab-Traffic.md) |
-| 2 | [Hyper-V replication and test migration](docs/Module-2-HyperV-Migration.md) | Successful isolated tests for every workload |
-| 3 | [Cutover and stateful validation](docs/Module-3-Stateful-Migration.md) | Planned migration, SQL data comparison, application acceptance |
-| 4 | [Azure Migrate and Site Recovery](docs/Module-4-ASR-Comparison.md) | Explain migration versus ongoing disaster recovery |
+| 2 | [Agentless migration](docs/Module-2-Agentless-Migration.md) | OnPrem-Web and OnPrem-Linux-Web replicated and test-migrated with no agent installed |
+| 3 | [Agent-based migration](docs/Module-3-Agent-Based-Migration.md) | OnPrem-SQL and OnPrem-Linux-App replicated continuously, then cut over with SQL data compared |
+| 4 | [Azure Migrate vs. Site Recovery](docs/Module-4-ASR-Comparison.md) | Explain one-time migration versus ongoing disaster recovery |
 | 5 | [Post-migration operations](docs/Module-5-Post-Migration.md) | Monitoring evidence, optional backup/restore, cost and security review |
 | Finish | Cleanup | Test/replication artifacts and all workshop resources accounted for |
 
@@ -27,7 +27,7 @@ Provision the environment before the teaching session. Budget a full working day
 ```mermaid
 flowchart LR
   subgraph Source["Source resource group · 10.0.0.0/16"]
-    Host["HyperVHost · Windows Server 2022\nStandard_E8s_v7 · 8 vCPU / 64 GB\n512 GB OS disk · Standard security"]
+    Host["HyperVHost · Windows Server 2022\nStandard_E8s_v7 · 8 vCPU / 64 GB\n512 GB OS disk: C: guests · E: appliance store\nStandard security"]
     subgraph Nested["intSwitch · NAT + DHCP reservations · 192.168.0.0/24"]
       IIS["OnPrem-Web · .10 · IIS"]
       SQL["OnPrem-SQL · .11 · SQL Express 2022"]
@@ -67,19 +67,25 @@ The sites and Node API are independent samples. The IIS page is static; Nginx is
 
 ```powershell
 Connect-AzAccount
-$subscriptionId = Read-Host 'Workshop subscription ID'
+
+# Masked at the prompt so they are not readable over a shared screen
+$secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
+$secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
+$password = Read-Host 'Lab-only administrator password' -AsSecureString
+
+# The migrate-step scripts read the active context, so set it explicitly
+$subscriptionId = [pscredential]::new('subscription', $secureSubscriptionId).GetNetworkCredential().Password
 Set-AzContext -SubscriptionId $subscriptionId
+
 $sourceRg = 'rg-ces-source-01'
 $targetRg = 'rg-ces-target-01'
 $location = 'eastus'
-$adminCidr = Read-Host 'Your public IPv4 address followed by /32'
-$password = Read-Host 'Lab-only administrator password' -AsSecureString
 
-.\scripts\deploy-lab.ps1 -SubscriptionId $subscriptionId `
+.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId `
     -ResourceGroupName $sourceRg -Location $location `
-    -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $adminCidr
+    -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
 
-.\scripts\migrate-step1-setup-project.ps1 -SubscriptionId $subscriptionId `
+.\scripts\migrate-step1-setup-project.ps1 `
     -SourceResourceGroup $sourceRg -TargetResourceGroup $targetRg -Location $location
 ```
 
@@ -89,11 +95,13 @@ The deployment scripts require **new, dedicated resource groups**. They intentio
 
 | Script | Behavior |
 |---|---|
-| `deploy-lab.ps1` | Billable source host, nested guests, DHCP/NAT and samples; verifies appliance staging space; protected setup parameters; fails if readiness is not observed |
+| `deploy-lab.ps1` | Billable source host, nested guests on fixed disks, DHCP/NAT and samples; creates the `E:` appliance store partition; protected setup parameters; fails if readiness is not observed |
 | `host/configure-host.ps1` | Runs inside the Windows host; creates the four workload VMs and stages the optional traffic generator |
 | `migrate-step1-setup-project.ps1` | Billable target/test network preparation; portal project creation follows |
 | `enable-lab-traffic.ps1` | Optional; staged on HyperVHost by deployment and run there with its generated settings file. Wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` reverses it |
-| `migrate-step2` – `migrate-step5` | Discovery/assessment, replication, test migration and cutover helpers for Modules 1–3 |
+| `migrate-step2` – `migrate-step5` | Discovery/assessment, replication, test migration and cutover helpers for Modules 1–3. Steps 3–5 accept `-Workload All\|Agentless\|AgentBased` |
+| `migrate-step3a-agentless.ps1` | Bridges the lab to the end state of **Module 2** (OnPrem-Web, OnPrem-Linux-Web) in one run |
+| `migrate-step3b-agent-based.ps1` | Bridges the lab to the end state of **Module 3** (OnPrem-SQL, OnPrem-Linux-App). Reaches that state agentlessly — see CHANGES.md |
 | `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |
 | `cleanup-lab.ps1` | Preview/confirmed deletion of explicitly named, tagged groups; refuses vaults and locks |
 
@@ -102,11 +110,13 @@ The deployment scripts require **new, dedicated resource groups**. They intentio
 Estimate the host, OS disk, target/test VMs, replicated disks/storage, **two NAT gateways and their public IPs**, monitoring ingestion, optional Bastion and optional backup/DR. Use the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) for your region and agreement. There is no verified fixed daily price for this workshop. Deallocating VMs stops VM compute charges but does not remove billable disks, NAT gateways, IPs or retained backups.
 
 ```powershell
-.\scripts\cleanup-lab.ps1 -SubscriptionId $subscriptionId `
-    -ResourceGroupName $targetRg,$sourceRg -WhatIf
+.\scripts\cleanup-lab.ps1 -ResourceGroupName $targetRg
+.\scripts\cleanup-lab.ps1 -ResourceGroupName $sourceRg
 ```
 
-Review the preview output before running the deletion without `-WhatIf`.
+The script takes one resource group per run and confirms before deleting. Review what it lists before confirming; `-Force` skips the prompt.
+
+> The `migrate-step` and `cleanup-lab` scripts take no subscription parameter. They act on whichever subscription is active in your session, so confirm it with `Get-AzContext` first.
 
 ## A note from the author
 
