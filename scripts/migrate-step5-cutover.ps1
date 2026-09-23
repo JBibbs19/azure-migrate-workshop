@@ -37,10 +37,10 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
-    Azure region for resources. Default: eastus.
+    Azure region for resources. Prompted when not supplied (example: eastus).
 
 .PARAMETER TurnOffSourceVMs
-    Whether to shut down source VMs before cutover. Default: Yes.
+    Whether to shut down source VMs before cutover. Prompted when not supplied (example: Yes).
     Recommended to ensure no writes are lost during final sync.
 
 .EXAMPLE
@@ -52,25 +52,45 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$MigrateProjectName = "nazli-migrate-project",
+    [string]$MigrateProjectName,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [ValidateSet("Yes", "No")]
-    [string]$TurnOffSourceVMs = "Yes"
+    [ValidateSet("Yes","No")][string]$TurnOffSourceVMs,
+
+    # Which workload group to act on (prompted when not supplied).
+    #   Agentless  = OnPrem-Web, OnPrem-Linux-Web      (the Module 2 pair)
+    #   AgentBased = OnPrem-SQL, OnPrem-Linux-App      (the Module 3 pair)
+    #   All        = all four
+    [string]$Workload
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$MigrateProjectName = Read-LabParameter -Name 'MigrateProjectName' -Value $MigrateProjectName -Kind ProjectName -Prompt 'Azure Migrate project name' -Example 'ces-migrate-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$TurnOffSourceVMs = Read-LabChoice -Prompt 'Shut down the source VMs before the final sync (recommended: Yes)' -Value $TurnOffSourceVMs
+$Workload = Read-LabParameter -Name 'Workload' -Value $Workload -Kind Workload -Prompt 'Workload group: All (four VMs), Agentless (OnPrem-Web, OnPrem-Linux-Web) or AgentBased (OnPrem-SQL, OnPrem-Linux-App)' -Example 'All'
 
 # ================================================================
 # Helper Functions
@@ -102,6 +122,24 @@ function Wait-ForSection {
 
 # VM names matching the guest VMs discovered by Azure Migrate.
 $vmNames = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
+
+# ================================================================
+# WORKLOAD GROUP FILTER
+# ================================================================
+# Modules 2 and 3 are parallel branches off Module 1: Module 2 takes
+# OnPrem-Web and OnPrem-Linux-Web all the way through cutover, Module 3
+# does the same for OnPrem-SQL and OnPrem-Linux-App. -Workload narrows
+# this script to one of those branches so the lab state can be advanced
+# one module at a time. All is the original behaviour.
+$LabWorkloadGroups = @{
+    Agentless  = @("OnPrem-Web", "OnPrem-Linux-Web")
+    AgentBased = @("OnPrem-SQL", "OnPrem-Linux-App")
+}
+if ($Workload -ne "All") {
+    $selected = $LabWorkloadGroups[$Workload]
+    $vmNames = @($vmNames | Where-Object { $selected -contains $_ })
+    Write-Host "Workload filter: $Workload -> $($selected -join ', ')" -ForegroundColor Cyan
+}
 
 
 # ================================================================
@@ -530,7 +568,8 @@ if ($completeConfirm -ne "COMPLETE") {
             # Stop replication. This cleans up the replication infrastructure
             # (storage accounts, replication appliances) and marks the migration as complete.
             # After this, the source VM's replication data is no longer maintained.
-            Remove-AzMigrateServerReplication -InputObject $server
+            # Output discarded: the returned job carries the full subscription resource ID.
+            Remove-AzMigrateServerReplication -InputObject $server | Out-Null
 
             Write-StepInfo "  ✅ Replication stopped for '$vmName'. Migration complete."
 
@@ -694,7 +733,7 @@ Write-Host "╚═════════════════════�
 # Connection information for the participant.
 Write-Host "`n🔗 CONNECTION INFO:" -ForegroundColor White
 Write-Host "  Windows VMs -- RDP: mstsc /v:<Public-IP>" -ForegroundColor White
-Write-Host "  Linux VMs   -- SSH: ssh azureuser@<Public-IP>" -ForegroundColor White
+Write-Host "  Linux VMs   -- SSH: ssh labadmin@<Public-IP>" -ForegroundColor White
 Write-Host "  Web Apps    -- Browser: http://<Public-IP>" -ForegroundColor White
 
 # Guide to the final step.

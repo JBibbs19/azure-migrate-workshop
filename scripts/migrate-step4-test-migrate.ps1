@@ -33,7 +33,7 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
-    Azure region for test resources. Default: eastus.
+    Azure region for test resources. Prompted when not supplied (example: eastus).
 
 .PARAMETER TestVNetName
     Name of the isolated test virtual network.
@@ -50,30 +50,54 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$MigrateProjectName = "nazli-migrate-project",
+    [string]$MigrateProjectName,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TestVNetName = "test-migrate-vnet",
+    [string]$TestVNetName,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TestVNetAddressSpace = "10.2.0.0/16",
+    [string]$TestVNetAddressSpace,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TestSubnetPrefix = "10.2.0.0/24"
+    [string]$TestSubnetPrefix,
+
+    # Which workload group to act on (prompted when not supplied).
+    #   Agentless  = OnPrem-Web, OnPrem-Linux-Web      (the Module 2 pair)
+    #   AgentBased = OnPrem-SQL, OnPrem-Linux-App      (the Module 3 pair)
+    #   All        = all four
+    [string]$Workload
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$MigrateProjectName = Read-LabParameter -Name 'MigrateProjectName' -Value $MigrateProjectName -Kind ProjectName -Prompt 'Azure Migrate project name' -Example 'ces-migrate-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$TestVNetName = Read-LabParameter -Name 'TestVNetName' -Value $TestVNetName -Kind VMName -Prompt 'Isolated test VNet name' -Example 'test-migrate-vnet'
+$TestVNetAddressSpace = Read-LabParameter -Name 'TestVNetAddressSpace' -Value $TestVNetAddressSpace -Kind Cidr -Prompt 'Test VNet address space (must not overlap 10.0.0.0/16 or 10.1.0.0/16)' -Example '10.2.0.0/16'
+$TestSubnetPrefix = Read-LabParameter -Name 'TestSubnetPrefix' -Value $TestSubnetPrefix -Kind Cidr -Prompt 'Test subnet prefix (inside the test VNet)' -Example '10.2.0.0/24'
+$Workload = Read-LabParameter -Name 'Workload' -Value $Workload -Kind Workload -Prompt 'Workload group: All (four VMs), Agentless (OnPrem-Web, OnPrem-Linux-Web) or AgentBased (OnPrem-SQL, OnPrem-Linux-App)' -Example 'All'
+if (-not (Test-LabCidrContains -Outer $TestVNetAddressSpace -Inner $TestSubnetPrefix)) {
+    throw "Test subnet $TestSubnetPrefix is not inside the test VNet address space $TestVNetAddressSpace. Rerun and enter a subnet within the VNet."
+}
 
 # ================================================================
 # Helper Functions
@@ -118,6 +142,24 @@ function Wait-ForSection {
 $vmNames = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
 
 # ================================================================
+# WORKLOAD GROUP FILTER
+# ================================================================
+# Modules 2 and 3 are parallel branches off Module 1: Module 2 takes
+# OnPrem-Web and OnPrem-Linux-Web all the way through cutover, Module 3
+# does the same for OnPrem-SQL and OnPrem-Linux-App. -Workload narrows
+# this script to one of those branches so the lab state can be advanced
+# one module at a time. All is the original behaviour.
+$LabWorkloadGroups = @{
+    Agentless  = @("OnPrem-Web", "OnPrem-Linux-Web")
+    AgentBased = @("OnPrem-SQL", "OnPrem-Linux-App")
+}
+if ($Workload -ne "All") {
+    $selected = $LabWorkloadGroups[$Workload]
+    $vmNames = @($vmNames | Where-Object { $selected -contains $_ })
+    Write-Host "Workload filter: $Workload -> $($selected -join ', ')" -ForegroundColor Cyan
+}
+
+# ================================================================
 # SECTION 0: Prerequisites Check
 # ================================================================
 Write-SectionHeader "0" "Prerequisites Check"
@@ -138,7 +180,7 @@ foreach ($mod in $requiredModules) {
 try {
     $context = Get-AzContext
     if (-not $context) { throw "No Azure context found." }
-    Write-StepInfo "Logged in to subscription: $($context.Subscription.Name) `($($context.Subscription.Id)`)"
+    Write-StepInfo "Logged in to subscription: $($context.Subscription.Name) `($(Format-LabSubscriptionId $context.Subscription.Id)`)"
 } catch {
     throw "Azure authentication required. Run 'Connect-AzAccount' first. Error: $_"
 }
@@ -564,7 +606,8 @@ foreach ($vmName in $vmNames) {
         # Start-AzMigrateTestMigrationCleanup removes the test VM and its
         # associated resources (disks, NICs) while preserving replication state.
         # After cleanup, the VM returns to "Protected" state, ready for cutover.
-        Start-AzMigrateTestMigrationCleanup -InputObject $server
+        # Output discarded: the returned job carries the full subscription resource ID.
+        Start-AzMigrateTestMigrationCleanup -InputObject $server | Out-Null
 
         Write-StepInfo "  ✅ Test cleanup initiated for '$vmName'."
 

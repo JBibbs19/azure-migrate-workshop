@@ -1,46 +1,77 @@
 <#
 .SYNOPSIS
-    Step 2: Deploy the Azure Migrate appliance and discover VMs.
+    Step 2: Build or verify the Azure Migrate appliance, discover the four workloads and assess them.
 
 .DESCRIPTION
-    This script deploys the Azure Migrate appliance on the Hyper-V host,
-    initiates discovery of the 4 on-premises VMs, and creates an assessment.
+    Follows docs/Module-1-Discovery.md. The appliance is Microsoft's published VHD, kept
+    entirely on the ApplianceStore partition that deploy-lab.ps1 created (normally E:\Appliance):
+    the download, the extracted VHD and the running VM. Nothing is staged on C:.
 
-    IMPORTANT: Some steps require waiting for discovery to complete.
-    The script will pause and prompt you to continue when manual steps
-    are needed.
+    Every environment-specific value is prompted for when it is not passed on the command
+    line. The subscription and tenant IDs are truncated in all console output so the script
+    can be shown on a shared screen; the project key is never displayed in full.
 
     What this script does:
-    1. Retrieves the Hyper-V host connection info
-    2. Generates an Azure Migrate appliance registration key
-    3. Downloads and deploys the Azure Migrate appliance VHD on the Hyper-V host
-    4. Guides you through the appliance configuration (manual browser step)
-    5. Waits for discovery to complete and displays discovered servers
-    6. Creates a migration assessment
+    1. Retrieves the Hyper-V host connection info and lists its guest VMs
+    2. Generates the project key, or guides you through generating it in the portal (3.1)
+    3. Locates the ApplianceStore volume (3.2). Unless the appliance VM already exists, it
+       downloads the archive as a background task on the host, verifies its SHA256, extracts
+       it to <store>:\Appliance\Extracted and imports it as a VM exactly as section 3.4
+       describes. It then checks the VM against the Module 1 checklist.
+    4. Guides first boot, registration, credentials and discovery (3.5 and 4)
+    5. Waits for the four workloads BY NAME and lists them
+    6. Creates an Azure VM assessment for exactly those four workloads (5)
     7. Displays assessment results (readiness, sizing, cost)
+
+    Timing: the archive is roughly 11-12 GB. The download runs on the host independently of
+    this console and resumes if interrupted; you choose how long to wait before being asked
+    whether to keep waiting, and rerunning the script picks up where it left off.
 
     Prerequisites:
     - Step 1 (migrate-step1-setup-project.ps1) must be completed
-    - The Hyper-V host (HyperVHost) must be running
+    - The Hyper-V host (HyperVHost) must be running, with the ApplianceStore volume
     - You need RDP or browser access to complete appliance configuration
 
 .PARAMETER SourceResourceGroup
-    The on-premises simulation resource group. Default: nazli-onprem
+    The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
 
 .PARAMETER TargetResourceGroup
-    The target cloud resource group. Default: nazli-oncloud
+    The target cloud resource group. Prompted when not supplied (example: rg-ces-target-01).
 
 .PARAMETER Location
-    Azure region. Default: eastus
+    Target Azure region used by the assessment. Prompted when not supplied (example: eastus).
 
 .PARAMETER MigrateProjectName
-    Name of the Azure Migrate project (from Step 1). Default: MigrateProject-Workshop
+    Name of the Azure Migrate project (from Step 1). Prompted when not supplied (example: ces-migrate-01).
 
 .PARAMETER HyperVHostVMName
-    Name of the Hyper-V host Azure VM. Default: HyperVHost
+    Name of the Hyper-V host Azure VM. Prompted when not supplied (example: HyperVHost).
 
 .PARAMETER ApplianceVMName
-    Name for the Azure Migrate appliance VM inside Hyper-V. Default: AzMigrateAppliance
+    Name of the appliance VM inside Hyper-V; must match the name used for the project key.
+    Prompted when not supplied (example: MigrateAppl).
+
+.PARAMETER ApplianceDownloadUrl
+    Needed only when the appliance VM does not exist yet. The VHD download link shown in the project. Prompted when not supplied.
+
+.PARAMETER ApplianceSha256
+    Needed only when the appliance VM does not exist yet. The SHA256 Microsoft publishes for that archive, or SKIP (not recommended).
+
+.PARAMETER DownloadTimeoutMinutes
+    Needed only when the appliance VM does not exist yet. Minutes to wait for the download before asking whether to keep waiting.
+
+.PARAMETER ApplianceGeneration
+    Only needed for a .vhdx: 1 or 2, per the current Microsoft article.
+    A .vhd is always imported as Generation 1.
+
+.PARAMETER AssessmentCurrency
+    Currency for the assessment. Prompted when not supplied (example: USD).
+
+.PARAMETER AzureOfferCode
+    Pricing offer for the assessment. Prompted when not supplied (example: MS-AZR-0003P).
+
+.PARAMETER AzureHybridBenefit
+    Yes only if Windows Server licence entitlement has been confirmed. Prompted when not supplied.
 
 .EXAMPLE
     .\migrate-step2-discover-assess.ps1
@@ -51,27 +82,59 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [string]$MigrateProjectName = "MigrateProject-Workshop",
+    [string]$MigrateProjectName,
 
-    [Parameter(Mandatory = $false)]
-    [string]$HyperVHostVMName = "HyperVHost",
+    [string]$HyperVHostVMName,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ApplianceVMName = "AzMigrateAppliance"
+    [string]$ApplianceVMName,
+
+    [string]$ApplianceDownloadUrl,
+
+    [string]$ApplianceSha256,
+
+    [int]$DownloadTimeoutMinutes,
+
+    [ValidateSet('1', '2')][string]$ApplianceGeneration,
+
+    [string]$AssessmentCurrency,
+
+    [string]$AzureOfferCode,
+
+    [ValidateSet('Yes', 'No')][string]$AzureHybridBenefit
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$MigrateProjectName = Read-LabParameter -Name 'MigrateProjectName' -Value $MigrateProjectName -Kind ProjectName -Prompt 'Azure Migrate project name' -Example 'ces-migrate-01'
+$HyperVHostVMName = Read-LabParameter -Name 'HyperVHostVMName' -Value $HyperVHostVMName -Kind VMName -Prompt 'Hyper-V host Azure VM name' -Example 'HyperVHost'
+$ApplianceVMName = Read-LabParameter -Name 'ApplianceVMName' -Value $ApplianceVMName -Kind VMName -Prompt 'Appliance VM name inside Hyper-V (must match the name used for the project key)' -Example 'MigrateAppl'
+
+$AssessmentCurrency = Read-LabParameter -Name 'AssessmentCurrency' -Value $AssessmentCurrency -Kind Currency -Prompt 'Assessment currency' -Example 'USD'
+$AzureOfferCode = Read-LabParameter -Name 'AzureOfferCode' -Value $AzureOfferCode -Kind OfferCode -Prompt 'Azure offer (pricing agreement) for the assessment' -Example 'MS-AZR-0003P'
+$AzureHybridBenefit = Read-LabChoice -Prompt 'Apply Azure Hybrid Benefit? Answer Yes only if licence entitlement is confirmed' -Value $AzureHybridBenefit
 
 # ================================================================
 # Helper Functions
@@ -124,6 +187,23 @@ function Write-NextSteps {
     Write-Host ""
 }
 
+function Invoke-HostScript {
+    # Runs a short script on the Hyper-V host through VM Run Command and returns its output.
+    param([Parameter(Mandatory)][string]$Script, [Parameter(Mandatory)][string]$Stage)
+    # Progress and warning records would arrive as StdErr and be mistaken for failure.
+    $Script = "`$ProgressPreference = 'SilentlyContinue'`n`$WarningPreference = 'SilentlyContinue'`n" + $Script
+    $result = Invoke-AzVMRunCommand `
+        -ResourceGroupName $SourceResourceGroup `
+        -VMName $HyperVHostVMName `
+        -CommandId "RunPowerShellScript" `
+        -ScriptString $Script `
+        -ErrorAction Stop
+    $stdout = @($result.Value | Where-Object { $_.Code -match 'StdOut' } | ForEach-Object { $_.Message }) -join "`n"
+    $stderr = @($result.Value | Where-Object { $_.Code -match 'StdErr' } | ForEach-Object { $_.Message }) -join "`n"
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) { throw "$Stage failed on ${HyperVHostVMName}: $stderr" }
+    return $stdout
+}
+
 # ================================================================
 Write-Section "Step 2: Discover & Assess On-Premises VMs"
 # ================================================================
@@ -139,6 +219,7 @@ try {
     $context = Get-AzContext
     if (-not $context) { throw "Not logged in." }
     Write-Log "Authenticated as: $($context.Account.Id)"
+    Write-Log "Subscription    : $($context.Subscription.Name) `($(Format-LabSubscriptionId $context.Subscription.Id)`)"
 } catch {
     throw "Azure authentication required. Run Connect-AzAccount first."
 }
@@ -228,471 +309,467 @@ try {
 Read-Host "Press Enter to continue to Step 2..."
 
 # ================================================================
-# STEP 2: Generate Appliance Registration Key
+# STEP 2: Generate the Project Key (Module 1, section 3.1)
 # ================================================================
-# The Azure Migrate appliance needs a registration key to:
-# 1. Authenticate itself with the Azure Migrate project
-# 2. Establish a secure channel for sending discovery data
-# 3. Associate discovered machines with the correct project
+# The appliance registers with the project using a project key. Module 1 generates it in
+# the portal (Discover > Hyper-V > VHD download option) for the appliance name you entered.
+# The key is a credential: it is never written to the console in full, and it must stay
+# out of Git, screenshots and chat.
+
+Write-StepHeader -Step 2 -Title "Generate the Project Key (Module 1, section 3.1)"
+
+$applianceKeyReady = $false
+$keyCommand = Get-Command -Name 'New-AzMigrateHyperVSiteApplianceKey' -ErrorAction SilentlyContinue
+if ($keyCommand) {
+    try {
+        Write-Log "Generating the project key for appliance '$ApplianceVMName'..."
+        $keyResult = New-AzMigrateHyperVSiteApplianceKey `
+            -SiteName "${MigrateProjectName}HyperVSite" `
+            -ResourceGroupName $SourceResourceGroup `
+            -ProjectName $MigrateProjectName `
+            -KeyName 'HyperVKey1' `
+            -ErrorAction Stop
+        $applianceKey = [string]$keyResult.Key
+        if (-not [string]::IsNullOrWhiteSpace($applianceKey)) {
+            $maskedKey = if ($applianceKey.Length -gt 8) { $applianceKey.Substring(0, 4) + ('*' * 16) } else { '****' }
+            Write-Log "Project key generated ($maskedKey). It is not displayed in full."
+            if (Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue) {
+                $applianceKey | Set-Clipboard
+                Write-Log "The key is on your clipboard. Store it somewhere safe now; it is needed at registration."
+            }
+            $applianceKeyReady = $true
+        }
+        $applianceKey = $null
+        $keyResult = $null
+    } catch {
+        Write-Warning "Could not generate the key from PowerShell: $($_.Exception.Message)"
+    }
+}
+
+if (-not $applianceKeyReady) {
+    Write-ManualAction -Title "Generate the project key in the portal (Module 1, section 3.1)" -Instructions @(
+        "1. Azure portal > Azure Migrate > $MigrateProjectName > discovery, source: Hyper-V."
+        "2. Choose the VHD download option rather than the installer script."
+        "3. Enter the appliance name '$ApplianceVMName' and generate the project key."
+        "4. Copy the key and keep it somewhere safe -- out of Git, screenshots and chat."
+        "5. Copy the VHD download link shown on the same page if this script imports the appliance."
+    )
+}
+
+Read-Host "Press Enter once the project key is generated and stored safely..."
+
+# ================================================================
+# STEP 3: Appliance store, VHD download and import (Module 1, sections 3.2-3.4)
+# ================================================================
+# deploy-lab.ps1 created a dedicated partition labelled 'ApplianceStore' (normally E:)
+# with an \Appliance folder. The download, the extracted VHD and the running VM all stay
+# on it -- never on C:, which holds the four fixed workload disks.
 #
-# The key is generated from the Azure Migrate project and is valid
-# for a limited time. It's embedded in the appliance configuration
-# during setup. Without this key, the appliance cannot communicate
-# with Azure Migrate.
+# Timing: the archive is roughly 11-12 GB and expands to a ~40 GB VHD. A single VM Run
+# Command cannot be relied on for that (it has a hard time limit and gives no progress),
+# so the download runs as a scheduled task on the host and this script polls it with
+# short Run Commands. The task survives a closed console; rerunning this script with the
+# same answers resumes where it left off.
 
-Write-StepHeader -Step 2 -Title "Generate Appliance Registration Key"
+Write-StepHeader -Step 3 -Title "Appliance Store, VHD Download and Import (Module 1, sections 3.2-3.4)"
 
-$applianceKeyName = "HyperVKey1"
-$applianceKey = $null
+$storeScript = @'
+$ErrorActionPreference = 'Stop'
+$volumes = @(Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })
+if ($volumes.Count -ne 1) { throw 'The ApplianceStore volume created by deploy-lab.ps1 was not found on this host. Redeploy the lab or recreate the store as described in Module 0.' }
+$root = '{0}:\Appliance' -f $volumes[0].DriveLetter
+if (-not (Test-Path -LiteralPath $root)) { throw "The appliance folder $root is missing. deploy-lab.ps1 creates it; recreate it before continuing." }
+$inv = [Globalization.CultureInfo]::InvariantCulture
+Write-Output ('APPLIANCE_STORE|{0}|{1}|{2}' -f $root, [string]::Format($inv, '{0:0.0}', $volumes[0].Size / 1GB), [string]::Format($inv, '{0:0.0}', $volumes[0].SizeRemaining / 1GB))
+'@
 
+Write-Log "Locating the appliance store on $HyperVHostVMName (volume label 'ApplianceStore')..."
+$storeOutput = Invoke-HostScript -Script $storeScript -Stage 'Locate appliance store'
+$storeMatch = [regex]::Match($storeOutput, '(?m)^APPLIANCE_STORE\|([A-Z]:\\Appliance)\|([0-9.]+)\|([0-9.]+)\r?$')
+if (-not $storeMatch.Success) { throw "The host did not report the appliance store location." }
+$storeRoot = $storeMatch.Groups[1].Value
+$storeDrive = $storeRoot.Substring(0, 2)
+$storeFreeGB = [double]::Parse($storeMatch.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
+Write-Log "Appliance store: $storeRoot ($($storeMatch.Groups[2].Value) GB volume, $($storeMatch.Groups[3].Value) GB free)"
+if ($storeDrive -ne 'E:') {
+    Write-Log "Note: the store is on $storeDrive rather than E:. Substitute $storeDrive wherever Module 1 writes E:."
+}
+
+# The appliance is downloaded and imported unless a VM with that name is already on the host
+# (for example, imported by hand following Module 1). The download values are asked for here,
+# only when they are needed.
+$presenceScript = "if (Get-VM -Name '$($ApplianceVMName.Replace("'", "''"))' -ErrorAction SilentlyContinue) { 'APPLIANCE_PRESENT' } else { 'APPLIANCE_ABSENT' }"
+$doImport = (Invoke-HostScript -Script $presenceScript -Stage 'Check for appliance VM') -notmatch 'APPLIANCE_PRESENT'
+if ($doImport) {
+    Write-Log "No VM named '$ApplianceVMName' on the host yet: the VHD will be downloaded and imported into $storeRoot."
+    $ApplianceDownloadUrl = Read-LabParameter -Name 'ApplianceDownloadUrl' -Value $ApplianceDownloadUrl -Kind Url -Prompt 'VHD download link shown in the project (Discover > Hyper-V > VHD)' -Example 'https://aka.ms/migrate/appliance/hyperv'
+    $ApplianceSha256 = Read-LabParameter -Name 'ApplianceSha256' -Value $ApplianceSha256 -Kind Sha256 -Prompt "SHA256 Microsoft publishes for this archive (Hyper-V appliance article, 'Verify security'), or SKIP"
+    $DownloadTimeoutMinutes = Read-LabNumber -Name 'DownloadTimeoutMinutes' -Prompt 'Minutes to wait for the download before asking whether to keep waiting' -Value $DownloadTimeoutMinutes -Supplied:($PSBoundParameters.ContainsKey('DownloadTimeoutMinutes')) -Minimum 15 -Maximum 480 -Example '90'
+}
+
+if ($doImport) {
+    # --- 3.3: Download, verify and extract on the host --------------------------------
+    $worker = @'
+param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Sha256)
+$ErrorActionPreference = 'Stop'
+$statusPath = Join-Path $Root 'appliance-download.status'
+$archive = Join-Path $Root 'AzureMigrateAppliance.zip'
+$partial = "$archive.partial"
+$extracted = Join-Path $Root 'Extracted'
+function Set-Status([string]$State, [string]$Detail) {
+    $line = '{0}|{1}|{2}' -f $State, (Get-Date).ToUniversalTime().ToString('o'), ($Detail -replace '[\r\n|]+', ' ')
+    Set-Content -LiteralPath $statusPath -Value $line -Encoding UTF8
+}
+function Find-ApplianceVhd {
+    if (-not (Test-Path -LiteralPath $extracted)) { return $null }
+    return (Get-ChildItem -LiteralPath $extracted -Recurse -File | Where-Object { $_.Extension -in @('.vhd', '.vhdx') } | Select-Object -First 1)
+}
 try {
-    Write-Log "Generating appliance registration key '$applianceKeyName'..."
-    Write-Log "This key links the on-premises appliance to your Azure Migrate project."
-
-    # Generate the key via the Az.Migrate cmdlet
-    # The key is specific to the Hyper-V scenario (as opposed to VMware or physical)
-    $keyResult = New-AzMigrateHyperVSiteApplianceKey `
-        -SiteName "${MigrateProjectName}HyperVSite" `
-        -ResourceGroupName $SourceResourceGroup `
-        -ProjectName $MigrateProjectName `
-        -KeyName $applianceKeyName `
-        -ErrorAction Stop
-
-    $applianceKey = $keyResult.Key
-    Write-Log "Appliance registration key generated successfully."
-    Write-Host ""
-    Write-Host "  Registration Key (save this -- you'll need it during appliance setup):" -ForegroundColor White
-    Write-Host "  $applianceKey" -ForegroundColor Green
-    Write-Host ""
-
+    $vhd = Find-ApplianceVhd
+    if ($vhd) { Set-Status 'Ready' $vhd.FullName; exit 0 }
+    if (-not (Test-Path -LiteralPath $archive)) {
+        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        $attempt = 0
+        while ($true) {
+            $attempt++
+            Set-Status 'Downloading' "Attempt $attempt"
+            # --continue-at - resumes a partial file after a network drop or a host restart.
+            & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 --continue-at - --output $partial $Url
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
+            Start-Sleep -Seconds 30
+        }
+        Move-Item -LiteralPath $partial -Destination $archive -Force
+    }
+    if ($Sha256 -ne 'SKIP') {
+        Set-Status 'Verifying' 'Computing SHA256'
+        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+        if ($actual -ne $Sha256.ToUpperInvariant()) {
+            Remove-Item -LiteralPath $archive -Force
+            throw "SHA256 mismatch (expected $Sha256, got $actual). The archive was deleted; do not import it."
+        }
+    }
+    Set-Status 'Extracting' "Extracting to $extracted"
+    if (Test-Path -LiteralPath $extracted) { Remove-Item -LiteralPath $extracted -Recurse -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $extracted)
+    $vhd = Find-ApplianceVhd
+    if (-not $vhd) { throw 'The archive did not contain a .vhd or .vhdx file.' }
+    Set-Status 'Ready' $vhd.FullName
 } catch {
-    Write-Host ""
-    Write-Host "NOTE: Could not generate key via PowerShell." -ForegroundColor Yellow
-    Write-Host "This is normal if the Hyper-V site hasn't been created yet." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "MANUAL ALTERNATIVE -- Generate the key from the Azure portal:" -ForegroundColor Yellow
-    Write-Host "  1. Go to: https://portal.azure.com" -ForegroundColor White
-    Write-Host "  2. Navigate to: Azure Migrate > $MigrateProjectName" -ForegroundColor White
-    Write-Host "  3. Under 'Servers, databases, and web apps', click 'Discover'" -ForegroundColor White
-    Write-Host "  4. Select: 'Yes, with Hyper-V' for virtualization type" -ForegroundColor White
-    Write-Host "  5. Name the appliance: $ApplianceVMName" -ForegroundColor White
-    Write-Host "  6. Click 'Generate key' and copy the key" -ForegroundColor White
-    Write-Host ""
-    Write-Warning "Error details: $_"
-    Write-Host ""
-    $applianceKey = Read-Host "Paste the registration key here (or press Enter to skip)"
+    Set-Status 'Failed' $_.Exception.Message
+    exit 1
 }
+'@
 
-Read-Host "Press Enter to continue to Step 3..."
+    $startScript = @'
+$ErrorActionPreference = 'Stop'
+$root = '__ROOT__'
+$taskName = 'AzMigrateApplianceDownload'
+$workerPath = Join-Path $root 'appliance-download.ps1'
+$statusPath = Join-Path $root 'appliance-download.status'
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($task -and [string]$task.State -eq 'Running') { Write-Output 'DOWNLOAD_ALREADY_RUNNING'; return }
+[IO.File]::WriteAllText($workerPath, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__WORKER__')), (New-Object Text.UTF8Encoding($false)))
+Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+$arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -Url "{2}" -Sha256 "{3}"' -f $workerPath, $root, '__URL__', '__SHA__'
+$action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument $arguments
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 8) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName $taskName
+Write-Output 'DOWNLOAD_STARTED'
+'@
 
-# ================================================================
-# STEP 3: Download and Deploy Azure Migrate Appliance
-# ================================================================
-# The Azure Migrate appliance is a lightweight VM that runs on your
-# Hyper-V host. It performs:
-# - Agentless discovery of VMs (no agent installation needed on guests)
-# - Performance data collection (CPU, memory, disk, network)
-# - Dependency analysis (optional, agent-based)
-# - Software inventory (installed applications, roles, features)
-#
-# The appliance is provided as a VHD that Microsoft publishes. We:
-# 1. Download the VHD to the Hyper-V host
-# 2. Create a Hyper-V VM from the VHD
-# 3. Connect it to the internal switch (so it can discover guest VMs)
-#    AND give it external connectivity (so it can communicate with Azure)
-#
-# Why TWO network connections?
-# - Internal (intSwitch): The appliance must be on the same network as
-#   the VMs it discovers (192.168.0.0/24). This is how it finds and
-#   communicates with guest VMs via WMI/WinRM/SSH.
-# - External: The appliance needs internet access to:
-#   a) Register with Azure Migrate using the registration key
-#   b) Upload discovery data to the Azure Migrate service
-#   c) Download updates and configuration from Azure
+    $pollScript = @'
+$root = '__ROOT__'
+$statusPath = Join-Path $root 'appliance-download.status'
+$archive = Join-Path $root 'AzureMigrateAppliance.zip'
+$bytes = [long]0
+foreach ($p in @("$archive.partial", $archive)) { if (Test-Path -LiteralPath $p) { $bytes = [math]::Max($bytes, (Get-Item -LiteralPath $p).Length) } }
+$status = if (Test-Path -LiteralPath $statusPath) { (Get-Content -LiteralPath $statusPath -Raw).Trim() } else { 'Pending||Waiting for the download task to start' }
+$task = Get-ScheduledTask -TaskName 'AzMigrateApplianceDownload' -ErrorAction SilentlyContinue
+$taskState = if ($task) { [string]$task.State } else { 'Missing' }
+Write-Output ('DOWNLOAD_STATUS|{0}|{1}|{2}' -f $taskState, [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.00}', $bytes / 1GB), $status)
+'@
 
-Write-StepHeader -Step 3 -Title "Download and Deploy Azure Migrate Appliance"
-
-Write-Log "This step deploys the Azure Migrate appliance VHD on the Hyper-V host."
-Write-Log "This may take 15-30 minutes depending on download speed."
-Write-Host ""
-
-try {
-    # The Azure Migrate appliance VHD URL for Hyper-V
-    # This is the official Microsoft download link for the appliance
-    $applianceVhdUrl = "https://aka.ms/migrate/appliance/hyperv"
-
-    # Step 3a: Download the appliance VHD to the Hyper-V host
-    # We use Invoke-AzVMRunCommand to run commands directly on the host VM.
-    # This is equivalent to RDP-ing in and running commands manually.
-    Write-Log "Step 3a: Downloading Azure Migrate appliance VHD to Hyper-V host..."
-    Write-Log "This downloads a ~12GB compressed file. Please be patient."
-
-    $downloadScript = @"
-`$ErrorActionPreference = 'Stop'
-
-# Create directory for the appliance
-`$appDir = 'C:\AzMigrateAppliance'
-if (-not (Test-Path `$appDir)) { New-Item -ItemType Directory -Path `$appDir -Force | Out-Null }
-
-# Download the appliance ZIP file
-# The URL redirects to a ZIP containing the VHD
-`$zipPath = "`$appDir\AzMigrateAppliance.zip"
-if (-not (Test-Path `$zipPath)) {
-    Write-Output "Downloading Azure Migrate appliance from $applianceVhdUrl..."
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    
-    # Use BITS for reliable large file downloads (supports resume on failure)
-    Start-BitsTransfer -Source '$applianceVhdUrl' -Destination `$zipPath -ErrorAction Stop
-    Write-Output "Download complete: `$zipPath"
-} else {
-    Write-Output "Appliance ZIP already exists at `$zipPath"
-}
-
-# Extract the VHD from the ZIP
-`$vhdDir = "`$appDir\VHD"
-if (-not (Test-Path `$vhdDir)) {
-    Write-Output "Extracting VHD from ZIP file..."
-    Expand-Archive -Path `$zipPath -DestinationPath `$vhdDir -Force
-    Write-Output "Extraction complete."
-} else {
-    Write-Output "VHD directory already exists."
-}
-
-# Find the VHD/VHDX file
-`$vhdFile = Get-ChildItem -Path `$vhdDir -Recurse -Include *.vhdx,*.vhd | Select-Object -First 1
-if (`$vhdFile) {
-    Write-Output "VHD file found: `$(`$vhdFile.FullName)"
-    Write-Output "VHD size: `$([math]::Round(`$vhdFile.Length / 1GB, 2)) GB"
-} else {
-    throw "No VHD/VHDX file found in extracted archive."
-}
-"@
-
-    $downloadResult = Invoke-AzVMRunCommand `
-        -ResourceGroupName $SourceResourceGroup `
-        -VMName $HyperVHostVMName `
-        -CommandId "RunPowerShellScript" `
-        -ScriptString $downloadScript `
-        -ErrorAction Stop
-
-    Write-Host $downloadResult.Value[0].Message -ForegroundColor Gray
-    if ($downloadResult.Value[1].Message) {
-        Write-Host $downloadResult.Value[1].Message -ForegroundColor Yellow
+    $existingOutput = Invoke-HostScript -Script ($pollScript.Replace('__ROOT__', $storeRoot)) -Stage 'Check existing download'
+    $alreadyReady = $existingOutput -match '(?m)^DOWNLOAD_STATUS\|[^|]*\|[^|]*\|Ready\|'
+    $partialGB = 0.0
+    $partialMatch = [regex]::Match($existingOutput, '(?m)^DOWNLOAD_STATUS\|[^|]*\|([0-9.]+)\|')
+    if ($partialMatch.Success) { $partialGB = [double]::Parse($partialMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) }
+    if (-not $alreadyReady -and ($storeFreeGB + $partialGB) -lt 55) {
+        throw "The appliance store has $storeFreeGB GB free; the archive plus the extracted VHD need about 55 GB. Free space on $storeDrive (do not stage on C:) and rerun."
     }
 
-} catch {
-    Write-Host ""
-    Write-Host "WARNING: Automated download may have timed out or failed." -ForegroundColor Yellow
-    Write-Host "This is common for large file downloads via Invoke-AzVMRunCommand." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "MANUAL ALTERNATIVE:" -ForegroundColor Yellow
-    Write-Host "  1. RDP to the Hyper-V host: mstsc /v:$hyperVHostIP" -ForegroundColor White
-    Write-Host "  2. Open a browser and download: $applianceVhdUrl" -ForegroundColor White
-    Write-Host "  3. Extract the ZIP to C:\AzMigrateAppliance\VHD\" -ForegroundColor White
-    Write-Host ""
-    Write-Warning "Error: $_"
-}
-
-Read-Host "Press Enter once the VHD is downloaded and extracted..."
-
-# Step 3b: Create the Hyper-V VM from the appliance VHD
-Write-Log "Step 3b: Creating Hyper-V VM '$ApplianceVMName' from the appliance VHD..."
-
-try {
-    $createVmScript = @"
-`$ErrorActionPreference = 'Stop'
-
-`$vmName = '$ApplianceVMName'
-`$appDir = 'C:\AzMigrateAppliance'
-`$vmDir  = "`$appDir\VM"
-
-# Check if the VM already exists
-`$existingVM = Get-VM -Name `$vmName -ErrorAction SilentlyContinue
-if (`$existingVM) {
-    Write-Output "VM '`$vmName' already exists (State: `$(`$existingVM.State))."
-    if (`$existingVM.State -ne 'Running') {
-        Start-VM -Name `$vmName
-        Write-Output "VM started."
-    }
-    # Get IP address
-    Start-Sleep -Seconds 10
-    `$vmIp = (Get-VMNetworkAdapter -VMName `$vmName | Select-Object -ExpandProperty IPAddresses | Where-Object { `$_ -match '^\d+\.\d+' }) -join ', '
-    Write-Output "VM IP addresses: `$vmIp"
-    return
-}
-
-# Find the extracted VHD file
-`$vhdFile = Get-ChildItem -Path "`$appDir\VHD" -Recurse -Include *.vhdx,*.vhd | Select-Object -First 1
-if (-not `$vhdFile) { throw "No VHD file found in `$appDir\VHD" }
-
-# Copy VHD to the VM directory to avoid modifying the original
-if (-not (Test-Path `$vmDir)) { New-Item -ItemType Directory -Path `$vmDir -Force | Out-Null }
-`$targetVhd = "`$vmDir\`$vmName.vhdx"
-
-if (-not (Test-Path `$targetVhd)) {
-    Write-Output "Copying VHD to `$targetVhd..."
-    Copy-Item -Path `$vhdFile.FullName -Destination `$targetVhd -Force
-    Write-Output "VHD copied."
-}
-
-# Create the VM with sufficient resources for the appliance
-# The appliance needs at least 8GB RAM and 4 vCPUs for smooth operation
-Write-Output "Creating VM '`$vmName'..."
-New-VM -Name `$vmName ``
-    -MemoryStartupBytes 8GB ``
-    -VHDPath `$targetVhd ``
-    -Generation 2 ``
-    -Path `$vmDir ``
-    -ErrorAction Stop | Out-Null
-
-# Configure VM settings
-Set-VM -Name `$vmName ``
-    -ProcessorCount 4 ``
-    -DynamicMemory ``
-    -MemoryMinimumBytes 4GB ``
-    -MemoryMaximumBytes 8GB ``
-    -ErrorAction Stop
-
-# Connect to the internal switch (intSwitch) for guest VM discovery
-# This puts the appliance on the same 192.168.0.0/24 network as the guest VMs
-Write-Output "Connecting VM to internal switch 'intSwitch'..."
-Get-VMNetworkAdapter -VMName `$vmName | Connect-VMNetworkAdapter -SwitchName "intSwitch" -ErrorAction Stop
-
-# Add a second NIC connected to the external/default switch for internet access
-# The appliance needs internet to register with Azure Migrate and upload data
-Write-Output "Adding external network adapter for internet connectivity..."
-`$extSwitch = Get-VMSwitch | Where-Object { `$_.SwitchType -eq 'External' } | Select-Object -First 1
-if (`$extSwitch) {
-    Add-VMNetworkAdapter -VMName `$vmName -SwitchName `$extSwitch.Name -ErrorAction Stop
-    Write-Output "Connected to external switch: `$(`$extSwitch.Name)"
-} else {
-    # Fall back to Default Switch if no external switch exists
-    `$defaultSwitch = Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue
-    if (`$defaultSwitch) {
-        Add-VMNetworkAdapter -VMName `$vmName -SwitchName "Default Switch" -ErrorAction Stop
-        Write-Output "Connected to Default Switch for internet access."
+    $quote = { param([string]$Text) $Text.Replace("'", "''") }
+    $workerB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($worker))
+    $startBody = $startScript.Replace('__ROOT__', (& $quote $storeRoot)).Replace('__WORKER__', $workerB64)
+    $startBody = $startBody.Replace('__URL__', (& $quote $ApplianceDownloadUrl)).Replace('__SHA__', (& $quote $ApplianceSha256))
+    $startOutput = Invoke-HostScript -Script $startBody -Stage 'Start appliance download'
+    if ($startOutput -match '(?m)^DOWNLOAD_ALREADY_RUNNING') {
+        Write-Log "A download is already running on the host; following its progress."
     } else {
-        Write-Output "WARNING: No external/default switch found. The appliance may not have internet access."
-        Write-Output "You will need to manually configure networking after the VM starts."
+        Write-Log "Download task started on $HyperVHostVMName. Files go to $storeRoot."
     }
-}
-
-# Disable Secure Boot to allow the appliance VHD to boot
-# (The Microsoft-signed appliance VHD may not be compatible with Secure Boot in nested Hyper-V)
-Set-VMFirmware -VMName `$vmName -EnableSecureBoot Off -ErrorAction SilentlyContinue
-
-# Start the VM
-Write-Output "Starting VM '`$vmName'..."
-Start-VM -Name `$vmName -ErrorAction Stop
-Write-Output "VM started. Waiting for boot..."
-
-# Wait for the VM to get an IP address
-Start-Sleep -Seconds 30
-`$vmIp = (Get-VMNetworkAdapter -VMName `$vmName | Select-Object -ExpandProperty IPAddresses | Where-Object { `$_ -match '^\d+\.\d+' }) -join ', '
-Write-Output "VM '`$vmName' is running."
-Write-Output "VM IP addresses: `$vmIp"
-"@
-
-    $createResult = Invoke-AzVMRunCommand `
-        -ResourceGroupName $SourceResourceGroup `
-        -VMName $HyperVHostVMName `
-        -CommandId "RunPowerShellScript" `
-        -ScriptString $createVmScript `
-        -ErrorAction Stop
-
-    Write-Host $createResult.Value[0].Message -ForegroundColor Gray
-    if ($createResult.Value[1].Message) {
-        Write-Host $createResult.Value[1].Message -ForegroundColor Yellow
+    if ($ApplianceSha256 -eq 'SKIP') {
+        Write-Warning "Hash verification was skipped. Module 1 requires checking the archive against Microsoft's published SHA256 before import."
     }
 
-} catch {
-    Write-Host ""
-    Write-Host "WARNING: Automated VM creation may have failed." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "MANUAL ALTERNATIVE (via RDP to Hyper-V host):" -ForegroundColor Yellow
-    Write-Host "  1. RDP to: mstsc /v:$hyperVHostIP" -ForegroundColor White
-    Write-Host "  2. Open Hyper-V Manager" -ForegroundColor White
-    Write-Host "  3. Click 'Import Virtual Machine' or create a new VM from the VHD" -ForegroundColor White
-    Write-Host "  4. Assign 8GB RAM, 4 vCPUs" -ForegroundColor White
-    Write-Host "  5. Connect NIC 1 to 'intSwitch' (for discovery)" -ForegroundColor White
-    Write-Host "  6. Connect NIC 2 to external/Default Switch (for internet)" -ForegroundColor White
-    Write-Host "  7. Start the VM" -ForegroundColor White
-    Write-Host ""
-    Write-Warning "Error: $_"
+    Write-Log "Polling every 60 seconds. The archive is roughly 11-12 GB; allow $DownloadTimeoutMinutes minutes before you are asked whether to keep waiting."
+    $deadline = (Get-Date).AddMinutes($DownloadTimeoutMinutes)
+    $pollBody = $pollScript.Replace('__ROOT__', (& $quote $storeRoot))
+    $downloadState = 'Pending'
+    $extractedVhd = $null
+    $stalledChecks = 0
+    while ($true) {
+        $pollOutput = Invoke-HostScript -Script $pollBody -Stage 'Check appliance download'
+        $line = @($pollOutput -split "`r?`n" | Where-Object { $_ -like 'DOWNLOAD_STATUS|*' }) | Select-Object -Last 1
+        if (-not $line) { throw 'The host did not report download progress.' }
+        $fields = $line.Split([char[]]'|', 6)
+        $taskState = $fields[1]; $sizeGB = $fields[2]; $downloadState = $fields[3]
+        $detail = if ($fields.Count -ge 6) { $fields[5] } else { '' }
+        Write-Log ("  {0,-11} {1,6} GB   {2}" -f $downloadState, $sizeGB, $detail)
+
+        if ($downloadState -eq 'Ready') { $extractedVhd = $detail; break }
+        if ($downloadState -eq 'Failed') { throw "The appliance download failed on the host: $detail" }
+        if ($taskState -ne 'Running' -and $downloadState -ne 'Pending') {
+            $stalledChecks++
+            if ($stalledChecks -ge 3) { throw "The host download task stopped while '$downloadState'. Rerun this script to resume." }
+        } else { $stalledChecks = 0 }
+
+        if ((Get-Date) -ge $deadline) {
+            $keepWaiting = Read-LabChoice -Prompt "The download has not finished within $DownloadTimeoutMinutes minutes. It continues on the host either way. Keep waiting another $DownloadTimeoutMinutes minutes"
+            if ($keepWaiting -eq 'No') { $downloadState = 'Waiting'; break }
+            $deadline = (Get-Date).AddMinutes($DownloadTimeoutMinutes)
+        }
+        Start-Sleep -Seconds 60
+    }
+
+    if ($downloadState -ne 'Ready') {
+        Write-NextSteps @(
+            "The download is still running on $HyperVHostVMName into $storeRoot."
+            "Rerun this script with the same answers; it resumes and imports once the VHD is ready."
+        )
+        return
+    }
+    Write-Log "Extracted VHD: $extractedVhd"
+
+    # --- 3.4: Import the VHD as a VM, grow the disk to 80 GB before first boot ------------
+    $importScript = @'
+$ErrorActionPreference = 'Stop'
+$root = '__ROOT__'; $vmName = '__VMNAME__'; $vhdPath = '__VHD__'; $generationToken = '__GEN__'
+$drive = $root.Substring(0, 2)
+if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) { Write-Output 'APPLIANCE_EXISTS'; return }
+if (-not $vhdPath.StartsWith($drive, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $vhdPath)) {
+    throw "The extracted VHD '$vhdPath' is not on the appliance store $drive."
+}
+$extension = [IO.Path]::GetExtension($vhdPath).ToLowerInvariant()
+if ($extension -eq '.vhd') {
+    if ($generationToken -eq '2') { throw 'A .vhd disk can only boot as a Generation 1 VM.' }
+    $generation = 1
+} elseif ($generationToken -in @('1', '2')) {
+    $generation = [int]$generationToken
+} else {
+    Write-Output 'APPLIANCE_NEEDS_GENERATION'; return
+}
+# The VM runs from the extracted VHD in place on the store. The disk stays dynamic.
+$disk = Get-VHD -Path $vhdPath
+if ($disk.Size -lt 80GB) { Resize-VHD -Path $vhdPath -SizeBytes 80GB }
+$vmPath = Join-Path $root 'VMs'
+New-Item -ItemType Directory -Path $vmPath -Force | Out-Null
+New-VM -Name $vmName -MemoryStartupBytes 16GB -VHDPath $vhdPath -SwitchName 'intSwitch' -Path $vmPath -Generation $generation | Out-Null
+Set-VMProcessor -VMName $vmName -Count 8
+Set-VMMemory -VMName $vmName -DynamicMemoryEnabled $false
+Set-VM -Name $vmName -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
+Set-VMNetworkAdapter -VMName $vmName -StaticMacAddress '00155D000014'
+Enable-VMIntegrationService -VMName $vmName -Name 'Time Synchronization'
+$reservation = @(Get-DhcpServerv4Reservation -ScopeId 192.168.0.0 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress.IPAddressToString -eq '192.168.0.20' })
+if (-not $reservation.Count) {
+    Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 -ClientId '00-15-5D-00-00-14' -Name $vmName
+} elseif ($reservation[0].ClientId -ne '00-15-5d-00-00-14') {
+    throw "192.168.0.20 is already reserved for another client ($($reservation[0].ClientId))."
+}
+Start-VM -Name $vmName
+# Module 1, section 3.3: keep the archive until the import succeeds, then delete it.
+Remove-Item -LiteralPath (Join-Path $root 'AzureMigrateAppliance.zip') -Force -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'AzMigrateApplianceDownload' -Confirm:$false -ErrorAction SilentlyContinue
+Write-Output ('APPLIANCE_IMPORTED|{0}' -f $generation)
+'@
+
+    $generationChoice = $ApplianceGeneration
+    while ($true) {
+        $importBody = $importScript.Replace('__ROOT__', (& $quote $storeRoot)).Replace('__VMNAME__', (& $quote $ApplianceVMName))
+        $importBody = $importBody.Replace('__VHD__', (& $quote $extractedVhd)).Replace('__GEN__', [string]$generationChoice)
+        Write-Log "Importing '$ApplianceVMName' from $extractedVhd (16 GB static memory, 8 vCPUs, intSwitch, 80 GB disk)..."
+        $importOutput = Invoke-HostScript -Script $importBody -Stage 'Import appliance VM'
+        if ($importOutput -match '(?m)^APPLIANCE_NEEDS_GENERATION') {
+            Write-Log "The extracted disk is a .vhdx, which can be Generation 1 or 2."
+            $generationChoice = Read-LabParameter -Name 'ApplianceGeneration' -Value '' -Kind Generation `
+                -Prompt 'VM generation stated in the current Microsoft article for this VHD (1 or 2)'
+            continue
+        }
+        break
+    }
+    if ($importOutput -match '(?m)^APPLIANCE_EXISTS') {
+        Write-Log "VM '$ApplianceVMName' already exists on the host; it was not recreated."
+    } elseif ($importOutput -match '(?m)^APPLIANCE_IMPORTED\|(\d)') {
+        Write-Log "Appliance imported as a Generation $($Matches[1]) VM and started. The archive was deleted to reclaim space."
+    } else {
+        throw 'The host did not confirm the appliance import.'
+    }
+} else {
+    Write-Log "VM '$ApplianceVMName' already exists on the host; the download and import are skipped."
+    Write-Log "This script checks it against Module 1 below."
 }
 
-Read-Host "Press Enter once the appliance VM is running..."
+# --- Confirm the appliance VM matches Module 1 (section 3.5 checklist) -------------------
+$verifyScript = @'
+$vmName = '__VMNAME__'; $drive = '__DRIVE__'
+$vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+if (-not $vm) { Write-Output 'APPLIANCE_CHECK|Missing'; return }
+$paths = @(Get-VMHardDiskDrive -VMName $vmName | ForEach-Object { $_.Path })
+$onStore = ($paths.Count -gt 0 -and @($paths | Where-Object { $_ -like "$drive*" }).Count -eq $paths.Count)
+$maxGB = 0
+if ($paths.Count) { $maxGB = [math]::Round((Get-VHD -Path $paths[0]).Size / 1GB) }
+$memory = Get-VMMemory -VMName $vmName
+$nic = Get-VMNetworkAdapter -VMName $vmName | Select-Object -First 1
+$ips = @($nic.IPAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) -join ' '
+Write-Output ('APPLIANCE_CHECK|{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}' -f $vm.State, $vm.ProcessorCount, [math]::Round($memory.Startup / 1GB), $memory.DynamicMemoryEnabled, $onStore, $maxGB, $nic.SwitchName, $ips)
+'@
 
-# ================================================================
-# STEP 4: Configure the Azure Migrate Appliance (Manual Browser Step)
-# ================================================================
-# The Azure Migrate appliance has a web-based configuration portal
-# that runs on port 44368. You access it from a browser on the
-# Hyper-V host (via RDP) to complete the initial setup.
-#
-# Why is this a manual step?
-# The appliance configuration wizard handles:
-# - Accepting license terms
-# - Setting up auto-updates
-# - Registering with Azure (using the key from Step 2)
-# - Configuring Hyper-V host credentials for discovery
-# - Starting the discovery process
-#
-# These steps involve interactive web forms with authentication flows
-# that cannot be easily automated via PowerShell.
-
-Write-StepHeader -Step 4 -Title "Configure Azure Migrate Appliance (Manual Step)"
-
-# Get the appliance IP from the Hyper-V host
-try {
-    $ipResult = Invoke-AzVMRunCommand `
-        -ResourceGroupName $SourceResourceGroup `
-        -VMName $HyperVHostVMName `
-        -CommandId "RunPowerShellScript" `
-        -ScriptString "Get-VMNetworkAdapter -VMName '$ApplianceVMName' | Select-Object -ExpandProperty IPAddresses" `
-        -ErrorAction Stop
-
-    $applianceIPs = $ipResult.Value[0].Message.Trim()
-    Write-Log "Appliance VM IP addresses: $applianceIPs"
-} catch {
-    $applianceIPs = "(could not determine -- check Hyper-V Manager)"
-    Write-Warning "Could not retrieve appliance IP: $_"
+Write-Log "Checking '$ApplianceVMName' against Module 1..."
+$checkBody = $verifyScript.Replace('__VMNAME__', $ApplianceVMName.Replace("'", "''")).Replace('__DRIVE__', $storeDrive)
+$checkOutput = Invoke-HostScript -Script $checkBody -Stage 'Check appliance VM'
+$checkLine = @($checkOutput -split "`r?`n" | Where-Object { $_ -like 'APPLIANCE_CHECK|*' }) | Select-Object -Last 1
+if (-not $checkLine -or $checkLine -eq 'APPLIANCE_CHECK|Missing') {
+    Write-Warning "VM '$ApplianceVMName' was not found on $HyperVHostVMName. Rerun this script, or complete Module 1 sections 3.3-3.4 by hand, before continuing."
+    Read-Host "Press Enter once the appliance VM exists and is running..."
+} else {
+    $c = $checkLine.Split([char[]]'|')
+    $checks = @(
+        @{ Item = 'State';                  Actual = $c[1]; Expected = 'Running' }
+        @{ Item = 'vCPUs';                  Actual = $c[2]; Expected = '8' }
+        @{ Item = 'Memory (GB)';            Actual = $c[3]; Expected = '16' }
+        @{ Item = 'Dynamic memory';         Actual = $c[4]; Expected = 'False' }
+        @{ Item = "Disk on $storeDrive";    Actual = $c[5]; Expected = 'True' }
+        @{ Item = 'Virtual disk size (GB)'; Actual = $c[6]; Expected = '80' }
+        @{ Item = 'Switch';                 Actual = $c[7]; Expected = 'intSwitch' }
+    )
+    foreach ($check in $checks) {
+        $ok = [string]$check.Actual -eq [string]$check.Expected
+        $colour = if ($ok) { 'Green' } else { 'Yellow' }
+        $mark = if ($ok) { '[OK]  ' } else { '[CHECK]' }
+        Write-Host ("  {0} {1,-24} {2}  (expected {3})" -f $mark, $check.Item, $check.Actual, $check.Expected) -ForegroundColor $colour
+    }
+    $ipText = if ($c.Count -ge 9 -and $c[8]) { $c[8] } else { '(not reported yet)' }
+    Write-Host ("         {0,-24} {1}  (expected 192.168.0.20)" -f 'Address', $ipText) -ForegroundColor Gray
 }
 
-Write-ManualAction -Title "Configure the appliance via browser" -Instructions @(
-    ""
-    "1. RDP into the Hyper-V host:"
-    "   mstsc /v:$hyperVHostIP"
-    ""
-    "2. Open a browser on the Hyper-V host and navigate to:"
-    "   https://<appliance-ip>:44368"
-    "   `(Appliance IPs detected: $applianceIPs`)"
-    ""
-    "3. In the appliance configuration wizard, complete these steps:"
-    ""
-    "   a) Accept license terms and read the privacy statement"
-    ""
-    "   b) Set up prerequisites:"
-    "      - The wizard checks internet connectivity, time sync, and updates"
-    "      - Allow auto-updates if prompted"
-    ""
-    "   c) Register with Azure Migrate:"
-    "      - Paste the registration key from Step 2:"
-    "        $applianceKey"
-    "      - Log in with your Azure credentials when prompted"
-    ""
-    "   d) Add Hyper-V host credentials:"
-    "      - Click 'Add credentials'"
-    "      - Type: Hyper-V host / Cluster"
-    "      - Friendly name: HyperVHostCreds"
-    "      - Username: (the admin username you used in deploy-lab.ps1)"
-    "      - Password: (the admin password you used in deploy-lab.ps1)"
-    ""
-    "   e) Add the Hyper-V host for discovery:"
-    "      - Click 'Add discovery source'"
-    "      - Select 'Hyper-V host / Cluster'"
-    "      - IP address: 192.168.0.1 (the host's internal IP)"
-    "        OR use the host's actual hostname"
-    "      - Select the credentials you just added"
-    "      - Click 'Validate' and wait for success"
-    ""
-    "   f) Start discovery:"
-    "      - Click 'Start discovery'"
-    "      - Discovery takes 5-15 minutes for 4 VMs"
-    ""
-    "4. Wait for the discovery to show all 4 VMs in the portal:"
-    "   - OnPrem-Web"
-    "   - OnPrem-SQL"
-    "   - OnPrem-Linux-Web"
-    "   - OnPrem-Linux-App"
-    ""
+Read-Host "Press Enter to continue to Step 4..."
+
+# ================================================================
+# STEP 4: First boot, registration and discovery (Module 1, sections 3.5 and 4)
+# ================================================================
+# The configuration manager steps involve interactive sign-in, so they stay manual.
+# The order below follows Module 1.
+
+Write-StepHeader -Step 4 -Title "First Boot, Register and Discover (Manual, Module 1 sections 3.5 and 4)"
+
+Write-ManualAction -Title "Complete first boot and register the appliance" -Instructions @(
+    "1. RDP to the Hyper-V host: mstsc /v:$hyperVHostIP"
+    "2. Hyper-V Manager > $ApplianceVMName > Connect. Accept the first-boot prompts and set its password."
+    "3. Inside $ApplianceVMName (elevated PowerShell), extend C: into the space added to the disk:"
+    "     `$max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax; Resize-Partition -DriveLetter C -Size `$max"
+    "4. Check the clock inside $ApplianceVMName: [DateTime]::UtcNow and Get-TimeZone (expect UTC)."
+    "     If wrong: Set-TimeZone -Id 'UTC'; w32tm /resync /force"
+    "5. Open https://192.168.0.20:44368 (HTTPS only) and confirm it is your own appliance."
+    "6. Complete the connectivity, time and update checks."
+    "7. Paste the project key; sign in to the correct tenant and subscription."
+    "8. Hyper-V host credentials: HyperVHost\<lab user>; discovery source address 192.168.0.1."
+    "9. Validate the source, resolve every failed prerequisite, then start discovery."
+    "10. Guest credentials (Manage credentials and discovery sources, step 3):"
+    "     - Windows (non-domain): Administrator -> OnPrem-Web, OnPrem-SQL"
+    "     - Linux (non-domain):   <lab user>    -> OnPrem-Linux-Web, OnPrem-Linux-App"
+    "     - SQL: Windows authentication with Administrator (not the labapp login)"
+    "   All use the lab password. The Linux user name is in C:\AzMigrateLab\lab-traffic.settings.json."
 )
 
-Read-Host "Press Enter AFTER you have completed the appliance configuration and discovery has started..."
+Read-Host "Press Enter AFTER host validation succeeded and discovery has started..."
 
 # ================================================================
 # STEP 5: Wait for Discovery and List Discovered Servers
 # ================================================================
-# After starting discovery from the appliance web UI, the appliance
-# begins collecting information about VMs on the Hyper-V host:
-# - VM names, IPs, OS details
-# - CPU, memory, disk configuration
-# - Running processes and network connections (if dependency analysis is enabled)
-#
-# Discovery data is uploaded to Azure Migrate every few minutes.
-# We poll the Azure Migrate service to check when all 4 VMs appear.
-#
-# In production migrations with hundreds of VMs, discovery can take
-# hours. For our 4-VM lab, it typically completes in 5-15 minutes.
+# Module 1 checks the four workload NAMES, not a count: the appliance itself can appear in
+# inventory, so four machines is not proof. Discovery runs continuously; the wait can be
+# extended as often as needed.
 
 Write-StepHeader -Step 5 -Title "Wait for Discovery to Complete"
 
 $expectedVMs = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
 $discoveryComplete = $false
-$maxAttempts = 30  # Poll for up to 15 minutes (30 x 30 seconds)
+$discoveredServers = @()
+$workloadServers = @()
+$discoveryWaitMinutes = 15
+$discoveryDeadline = (Get-Date).AddMinutes($discoveryWaitMinutes)
 $attempt = 0
 
-Write-Log "Polling Azure Migrate for discovered servers..."
-Write-Log "Looking for $($expectedVMs.Count) VMs: $($expectedVMs -join ', ')"
-Write-Log "This may take 5-15 minutes. Polling every 30 seconds."
+Write-Log "Polling Azure Migrate every 30 seconds for: $($expectedVMs -join ', ')"
 Write-Host ""
 
-while (-not $discoveryComplete -and $attempt -lt $maxAttempts) {
+while (-not $discoveryComplete) {
     $attempt++
     try {
-        # Query Azure Migrate for discovered servers
-        # The discovered servers are stored in the Hyper-V site associated
-        # with the Azure Migrate project
-        $discoveredServers = Get-AzMigrateDiscoveredServer `
+        $discoveredServers = @(Get-AzMigrateDiscoveredServer `
             -ProjectName $MigrateProjectName `
             -ResourceGroupName $SourceResourceGroup `
-            -ErrorAction Stop
-
-        $discoveredCount = 0
-        if ($discoveredServers) {
-            $discoveredCount = @($discoveredServers).Count
-        }
-
-        Write-Log "  Attempt $attempt/$maxAttempts -- Discovered $discoveredCount server`(s`) so far..."
-
-        if ($discoveredCount -ge $expectedVMs.Count) {
+            -ErrorAction Stop)
+        $workloadServers = @($discoveredServers | Where-Object { $_.DisplayName -in $expectedVMs })
+        $foundNames = @($workloadServers | ForEach-Object { $_.DisplayName } | Select-Object -Unique)
+        $missing = @($expectedVMs | Where-Object { $_ -notin $foundNames })
+        Write-Log "  Attempt $attempt -- $($foundNames.Count)/$($expectedVMs.Count) workloads found$(if ($missing.Count) { '; waiting for ' + ($missing -join ', ') })"
+        if (-not $missing.Count) {
             $discoveryComplete = $true
-            Write-Log "All expected VMs discovered!"
-        } else {
-            Start-Sleep -Seconds 30
+            Write-Log "All four workloads discovered."
+            break
         }
     } catch {
-        Write-Log "  Attempt $attempt -- Waiting for discovery data... `($($_.Exception.Message)`)"
-        Start-Sleep -Seconds 30
+        Write-Log "  Attempt $attempt -- waiting for discovery data ($($_.Exception.Message))"
     }
+    if ((Get-Date) -ge $discoveryDeadline) {
+        Write-Host ""
+        Write-Host "  Not all workloads have appeared yet. If host validation is failing, waiting will not fix it:" -ForegroundColor Yellow
+        Write-Host "  check the appliance clock (UTC), Test-NetConnection 192.168.0.1 -Port 5985 and the validation panel." -ForegroundColor Yellow
+        $keepWaiting = Read-LabChoice -Prompt "Keep polling for another $discoveryWaitMinutes minutes"
+        if ($keepWaiting -eq 'No') { break }
+        $discoveryDeadline = (Get-Date).AddMinutes($discoveryWaitMinutes)
+    }
+    Start-Sleep -Seconds 30
 }
 
-if ($discoveryComplete) {
+if ($workloadServers.Count) {
     Write-Host ""
-    Write-Host "  Discovered Servers:" -ForegroundColor White
-    Write-Host "  ==================" -ForegroundColor White
-
-    foreach ($server in $discoveredServers) {
+    Write-Host "  Discovered workloads (check names, OS, CPU and memory):" -ForegroundColor White
+    Write-Host "  =======================================================" -ForegroundColor White
+    foreach ($server in $workloadServers) {
         $osType = if ($server.OperatingSystemDetailOSType) { $server.OperatingSystemDetailOSType } else { "Unknown" }
         $osName = if ($server.OperatingSystemDetailOSName) { $server.OperatingSystemDetailOSName } else { "Unknown" }
         $cores  = if ($server.NumberOfProcessorCore) { $server.NumberOfProcessorCore } else { "?" }
         $memMB  = if ($server.AllocatedMemoryInMb) { $server.AllocatedMemoryInMb } else { "?" }
-
         Write-Host "  Name    : $($server.DisplayName)" -ForegroundColor Green
         Write-Host "  OS      : $osName `($osType`)" -ForegroundColor Gray
         Write-Host "  Cores   : $cores" -ForegroundColor Gray
         Write-Host "  Memory  : ${memMB} MB" -ForegroundColor Gray
         Write-Host "  ---" -ForegroundColor Gray
     }
-} else {
+    $others = @($discoveredServers | Where-Object { $_.DisplayName -notin $expectedVMs } | ForEach-Object { $_.DisplayName })
+    if ($others.Count) { Write-Log "Also in inventory (excluded from assessment and migration): $($others -join ', ')" }
+}
+if (-not $discoveryComplete) {
     Write-Host ""
-    Write-Host "Discovery has not completed yet." -ForegroundColor Yellow
-    Write-Host "This is normal -- you can check progress in the Azure portal:" -ForegroundColor Yellow
+    Write-Host "Discovery has not found all four workloads yet." -ForegroundColor Yellow
     Write-Host "  Azure Migrate > $MigrateProjectName > Discovered servers" -ForegroundColor White
-    Write-Host ""
-    Write-Host "You can re-run this script later, or continue and create the assessment" -ForegroundColor Yellow
-    Write-Host "manually in the portal once discovery completes." -ForegroundColor Yellow
-    Write-Host ""
+    Write-Host "Rerun this script later, or create the assessment in the portal once discovery completes." -ForegroundColor Yellow
     Read-Host "Press Enter to continue anyway..."
 }
 
@@ -712,8 +789,9 @@ Read-Host "Press Enter to continue to Step 6..."
 #
 # Assessments use the performance data collected by the appliance. For
 # the most accurate sizing, let the appliance collect data for at least
-# 24 hours. For this workshop, we use "as on-premises" sizing which
-# maps VMs 1:1 to equivalent Azure VM sizes.
+# 24 hours. Module 1 starts with "as on-premises" sizing on a fresh lab, then a second,
+# performance-based assessment once data has accumulated. The group contains exactly the
+# four workloads -- never the appliance, which is lab infrastructure.
 
 Write-StepHeader -Step 6 -Title "Create Migration Assessment"
 
@@ -724,7 +802,7 @@ try {
     Write-Log "Assessment type: Azure VM (IaaS) -- for lift-and-shift migration"
 
     # The assessment needs a group of servers to evaluate.
-    # We create a group containing all discovered VMs.
+    # Module 1: a group containing exactly the four workload VMs.
     $groupName = "AllServers-Group"
 
     # Attempt to create assessment via REST API since the PowerShell cmdlet
@@ -733,9 +811,9 @@ try {
     $apiVersion = "2023-03-15"
 
     # Build the assessment group with all discovered machines
-    if ($discoveredServers) {
+    if ($workloadServers.Count) {
         $machineIds = @()
-        foreach ($server in $discoveredServers) {
+        foreach ($server in $workloadServers) {
             if ($server.Id) {
                 $machineIds += $server.Id
             }
@@ -775,11 +853,11 @@ try {
                 # "PerformanceBased" would use actual utilization data for right-sizing
                 sizingCriterion     = "AsOnPremises"
                 azureLocation       = $Location
-                currency            = "USD"
+                currency            = $AssessmentCurrency
                 # Reserved instances can reduce costs by 30-72% for 1-3 year commitments
                 reservedInstance    = "None"
-                azureOfferCode      = "MS-AZR-0003P"  # Pay-As-You-Go
-                azureHybridUseBenefit = "No"
+                azureOfferCode      = $AzureOfferCode
+                azureHybridUseBenefit = $AzureHybridBenefit
             }
         } | ConvertTo-Json -Depth 5
 
@@ -803,8 +881,8 @@ try {
     Write-Host "     - Target location: $Location" -ForegroundColor White
     Write-Host "     - Sizing criterion: As on-premises" -ForegroundColor White
     Write-Host "     - VM series: Include all" -ForegroundColor White
-    Write-Host "     - Pricing: Pay-As-You-Go" -ForegroundColor White
-    Write-Host "  4. Select all 4 discovered servers" -ForegroundColor White
+    Write-Host "     - Currency: $AssessmentCurrency; offer: $AzureOfferCode; Azure Hybrid Benefit: $AzureHybridBenefit" -ForegroundColor White
+    Write-Host "  4. Select exactly the 4 workload servers (not $ApplianceVMName)" -ForegroundColor White
     Write-Host "  5. Create the assessment and wait for it to complete" -ForegroundColor White
     Write-Host ""
     Write-Warning "Error details: $_"
@@ -900,8 +978,8 @@ Write-Section "STEP 2 COMPLETE -- Summary"
 
 Write-Host "  What was accomplished:" -ForegroundColor White
 Write-Host "  [+] Hyper-V host connection verified" -ForegroundColor Green
-Write-Host "  [+] Azure Migrate appliance registration key generated" -ForegroundColor Green
-Write-Host "  [+] Azure Migrate appliance deployed on Hyper-V host" -ForegroundColor Green
+Write-Host "  [+] Project key generated (never displayed in full)" -ForegroundColor Green
+Write-Host "  [+] Appliance '$ApplianceVMName' checked on $storeRoot$(if ($doImport) { ' (downloaded, verified and imported by this script)' })" -ForegroundColor Green
 Write-Host "  [+] Appliance configured and discovery initiated" -ForegroundColor Green
 Write-Host "  [+] Discovered servers listed" -ForegroundColor Green
 Write-Host "  [+] Migration assessment created" -ForegroundColor Green
@@ -914,6 +992,8 @@ Write-Host "  - OnPrem-Linux-App (192.168.0.13) -- Ubuntu 22.04 + Node.js" -Fore
 
 Write-NextSteps @(
     "Review the assessment results in the Azure portal"
+    "Record the collection period and confidence rating; this is idle-lab telemetry"
+    "Create a second, performance-based assessment once data has accumulated"
     "Note any readiness issues or warnings for each VM"
     "Run Step 3: .\migrate-step3-replicate.ps1"
     "Step 3 will enable replication for all 4 VMs and begin migration"

@@ -454,20 +454,16 @@ A **Recovery Services Vault** is the management entity for ASR. It stores replic
 1. Open the [Azure portal](https://portal.azure.com)
 2. Search for **"Recovery Services vaults"** and select it
 
-![Recovery Services Vault Search](../images/module-4-step-2-1.png)
-
 3. Click **+ Create** and configure:
 
    | Setting | Value |
    |---|---|
    | Subscription | *Your workshop subscription* |
-   | Resource Group | `rg-migrate-workshop` |
+   | Resource Group | `rg-ces-target-01` |
    | Vault name | `MigrateWorkshop-ASR-Vault` |
    | Region | *Same region as your workshop resources* |
 
 4. Click **Review + create**, then **Create**
-
-![Create Recovery Services Vault](../images/module-4-step-2-2.png)
 
 > **Architect's Note:** In production, vault placement matters. The vault must be in the *target* region for on-premises-to-Azure DR, and in a *different* region than your primary workloads for Azure-to-Azure DR. Plan your vault topology as part of your landing zone design.
 
@@ -480,8 +476,6 @@ A **Recovery Services Vault** is the management entity for ASR. It stores replic
 **Step 1 — Prepare Infrastructure:**
 1. In the vault, navigate to **Site Recovery** → **Getting Started**
 2. Under **Hyper-V machines to Azure**, click **Prepare infrastructure**
-
-![Prepare Infrastructure](../images/module-4-step-3-1.png)
 
 **Step 2 — Create a Hyper-V Site:**
 1. Under **Source settings**, click **+ Hyper-V Site**
@@ -500,8 +494,6 @@ A **Recovery Services Vault** is the management entity for ASR. It stores replic
 Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Azure Site Recovery" | Select-Object -Property *
 ```
 
-![Install ASR Provider](../images/module-4-step-3-3.png)
-
 **Step 4 — Create a Replication Policy:**
 
 Navigate to **Site Recovery Infrastructure** → **Replication Policies** → **+ Create**:
@@ -512,8 +504,6 @@ Navigate to **Site Recovery Infrastructure** → **Replication Policies** → **
 | Copy frequency | 5 minutes | Determines RPO — 30 sec / 5 min / 15 min options |
 | Recovery point retention | 24 hours | Balance between protection and storage cost |
 | App-consistent snapshot frequency | 4 hours | Essential for database VMs; adds VSS overhead |
-
-![Replication Policy](../images/module-4-step-3-5.png)
 
 > **Key Design Decision:** Copy frequency directly maps to RPO. A 30-second copy frequency requires more bandwidth and storage IOPS than a 15-minute frequency. Model the bandwidth requirement: `(Daily change rate × Churn factor) / Replication window`.
 

@@ -107,7 +107,7 @@ Your local network must allow **outbound TCP 3389** to Azure public IPs. If you 
 - **Option B:** Configure a site-to-site or point-to-site VPN.
 - **Option C:** Ask your network team to allow outbound 3389 for the duration of the workshop.
 
-You also need your current internet-facing IPv4 address as a `/32`, including any VPN or corporate egress address. Deployment opens RDP to that address alone.
+You also need your current internet-facing IPv4 address, including any VPN or corporate egress address. Deployment opens RDP to that address alone; the `/32` suffix is optional when you supply it.
 
 ### 3.6 — Downloads and Package Sources
 
@@ -176,7 +176,7 @@ $targetRg = 'rg-ces-target-01'
 $location = 'eastus'
 
 # Both masked at the prompt, like the password below
-$secureAdminCidr = Read-Host 'Your public IPv4 address followed by /32' -AsSecureString
+$secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
 $password = Read-Host 'Lab-only administrator password' -AsSecureString
 
 .\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId `
@@ -195,7 +195,11 @@ The `migrate-step` scripts take no subscription parameter at all. They use which
 
 > ⚠️ **Password requirements.** Use 12–72 characters with at least three of: lowercase, uppercase, digit, symbol. This password is used for the host and for every guest VM. Use approved lab-only credentials — Windows unattended setup and Linux cloud-init both handle it in plaintext during first boot, and any administrator of the host can read guest setup data. **Never use a corporate password here.**
 
-Write all four decimal octets of the address without leading zeros; abbreviated, hexadecimal and integer forms are rejected. Because the value is masked as you type it, check it before pressing Enter — a typo surfaces as a validation error rather than as visibly wrong text. If your address changes later, update the existing NSG rule rather than redeploying.
+Write the address as four decimal octets without leading zeros — for example `203.0.113.14`. The `/32` suffix is optional: the lab only ever permits a single address, so it is added for you when absent. An explicit prefix other than `/32` is refused rather than narrowed, so a range cannot be turned into one address you did not choose.
+
+Abbreviated, hexadecimal and integer forms are rejected. Those notations resolve to a different address than they appear to, and silently opening RDP to the wrong one is worse than failing. Because the value is masked as you type it, check it before pressing Enter — a typo surfaces as a validation error rather than as visibly wrong text.
+
+If your address changes later, update the existing NSG rule rather than redeploying.
 
 Before provisioning begins, deployment sizes `C:` and creates the 100 GB `E:` appliance partition, so a capacity problem surfaces in minutes rather than an hour into setup. Azure creates the OS disk at 512 GB but leaves `C:` at the image's native size with the remainder unallocated, so in practice this **extends** `C:` into most of that free space and leaves exactly 100 GB for the appliance. It also stages the optional traffic generator at `C:\AzMigrateLab\enable-lab-traffic.ps1` for section 6; nothing starts it.
 

@@ -34,16 +34,16 @@
     - The target landing zone (VNet, NSG) must exist
 
 .PARAMETER SourceResourceGroup
-    The on-premises simulation resource group. Default: nazli-onprem
+    The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
 
 .PARAMETER TargetResourceGroup
-    The target cloud resource group. Default: nazli-oncloud
+    The target cloud resource group. Prompted when not supplied (example: rg-ces-target-01).
 
 .PARAMETER Location
-    Azure region. Default: eastus
+    Azure region. Prompted when not supplied (example: eastus).
 
 .PARAMETER MigrateProjectName
-    Name of the Azure Migrate project. Default: MigrateProject-Workshop
+    Name of the Azure Migrate project. Prompted when not supplied (example: ces-migrate-01).
 
 .EXAMPLE
     .\migrate-step3-replicate.ps1
@@ -54,21 +54,42 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [string]$MigrateProjectName = "MigrateProject-Workshop"
+    [string]$MigrateProjectName,
+
+    # Which workload group to act on (prompted when not supplied).
+    #   Agentless  = OnPrem-Web, OnPrem-Linux-Web      (the Module 2 pair)
+    #   AgentBased = OnPrem-SQL, OnPrem-Linux-App      (the Module 3 pair)
+    #   All        = all four
+    [string]$Workload
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$MigrateProjectName = Read-LabParameter -Name 'MigrateProjectName' -Value $MigrateProjectName -Kind ProjectName -Prompt 'Azure Migrate project name' -Example 'ces-migrate-01'
+$Workload = Read-LabParameter -Name 'Workload' -Value $Workload -Kind Workload -Prompt 'Workload group: All (four VMs), Agentless (OnPrem-Web, OnPrem-Linux-Web) or AgentBased (OnPrem-SQL, OnPrem-Linux-App)' -Example 'All'
 
 # ================================================================
 # Helper Functions
@@ -168,6 +189,24 @@ $vmConfigurations = @(
         IPAddress      = "192.168.0.13"
     }
 )
+
+# ================================================================
+# WORKLOAD GROUP FILTER
+# ================================================================
+# Modules 2 and 3 are parallel branches off Module 1: Module 2 takes
+# OnPrem-Web and OnPrem-Linux-Web all the way through cutover, Module 3
+# does the same for OnPrem-SQL and OnPrem-Linux-App. -Workload narrows
+# this script to one of those branches so the lab state can be advanced
+# one module at a time. All is the original behaviour.
+$LabWorkloadGroups = @{
+    Agentless  = @("OnPrem-Web", "OnPrem-Linux-Web")
+    AgentBased = @("OnPrem-SQL", "OnPrem-Linux-App")
+}
+if ($Workload -ne "All") {
+    $selected = $LabWorkloadGroups[$Workload]
+    $vmConfigurations = @($vmConfigurations | Where-Object { $selected -contains $_.DisplayName })
+    Write-Host "Workload filter: $Workload -> $($selected -join ', ')" -ForegroundColor Cyan
+}
 
 # ================================================================
 Write-Section "Step 3: Enable Replication for Migration"

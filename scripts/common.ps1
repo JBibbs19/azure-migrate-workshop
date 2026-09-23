@@ -70,17 +70,39 @@ function Get-LabResourceGroup {
     return [pscustomobject]@{ ResourceGroupName=$body.name; ResourceId=$body.id; Tags=$tags }
 }
 
+function Resolve-LabAdminSource {
+    param([Parameter(Mandatory)][string]$Cidr)
+    # The lab only ever permits a single host, so /32 carries no information and is optional:
+    # a bare address is accepted and normalised. An explicitly supplied prefix is still
+    # checked rather than overridden, so a range is refused instead of being silently
+    # narrowed to one address the caller did not choose.
+    $value = $Cidr.Trim()
+    $parts = $value.Split('/')
+    if ($parts.Count -eq 1) {
+        $address = $parts[0]
+    } elseif ($parts.Count -eq 2) {
+        $address = $parts[0]
+        if ($parts[1] -ne '32') {
+            throw "AdminSourceCidr must identify a single address. '$value' has a /$($parts[1]) prefix; supply one public IPv4 address, optionally followed by /32."
+        }
+    } else {
+        throw 'AdminSourceCidr must be one public IPv4 address, optionally followed by /32.'
+    }
+    # Dotted-quad only, no leading zeros. Abbreviated, hexadecimal and integer forms parse to
+    # a different address than they appear to, so they are refused rather than interpreted.
+    $ip = $null
+    if ($address -notmatch '^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$' -or
+        -not [System.Net.IPAddress]::TryParse($address, [ref]$ip) -or
+        $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+        $address -eq '0.0.0.0') {
+        throw 'AdminSourceCidr must be your current public IPv4 address, written as four decimal octets without leading zeros. The /32 suffix is optional.'
+    }
+    return "$address/32"
+}
+
 function Assert-LabAdminSource {
     param([Parameter(Mandatory)][string]$Cidr)
-    $ip = $null
-    $parts = $Cidr.Split('/')
-    if ($parts.Count -ne 2 -or $parts[1] -ne '32' -or
-        $parts[0] -notmatch '^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$' -or
-        -not [System.Net.IPAddress]::TryParse($parts[0], [ref]$ip) -or
-        $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
-        $parts[0] -eq '0.0.0.0') {
-        throw 'AdminSourceCidr must be your current public IPv4 address followed by /32.'
-    }
+    $null = Resolve-LabAdminSource $Cidr
 }
 
 function Assert-LabHostSizeName {

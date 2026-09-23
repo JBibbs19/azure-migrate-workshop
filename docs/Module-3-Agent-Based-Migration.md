@@ -197,7 +197,7 @@ Agent-based migration supports **application-consistent snapshots** via VSS (Win
 
 | VM Name              | OS                    | Role                   | IP Address    |
 |----------------------|-----------------------|------------------------|---------------|
-| OnPrem-SQL           | Windows Server 2022   | SQL Server 2019 Express| 192.168.0.11  |
+| OnPrem-SQL           | Windows Server 2022   | SQL Server 2022 Express| 192.168.0.11  |
 | OnPrem-Linux-App     | Ubuntu 22.04          | Node.js Express app    | 192.168.0.13  |
 
 - ✅ RDP access to OnPrem-SQL and SSH access to OnPrem-Linux-App
@@ -218,8 +218,6 @@ The replication appliance is a dedicated Windows Server that manages all replica
 4. Select your **Target region**.
 5. Click **Create resources** — this provisions the required Azure resources (Recovery Services vault, cache storage accounts).
 6. Under **Install the replication appliance**, click **Download** to get the appliance installer.
-
-![Download Replication Appliance](../images/module-3-step-1-1.png)
 
 > **Note:** Also download the **registration key** — you will need it to register the appliance with your Azure Migrate project. The key expires after 5 days.
 
@@ -260,8 +258,6 @@ cd C:\ASR_Setup
 2. Add an account for push installation (or use manual installation as described in Steps 2 and 3).
 3. Under **Vault Registration**, paste the registration key.
 4. Verify the appliance appears in the Azure Portal under **Azure Migrate** → **Discovered items**.
-
-![Replication Appliance Registered](../images/module-3-step-1-3.png)
 
 > **Tip:** If the appliance management tool doesn't open automatically, launch it from the desktop shortcut `cspsconfigtool.exe`.
 
@@ -341,8 +337,6 @@ Get-Service -Name "svagents" | Select-Object Name, Status
 You can also verify in the Azure Portal:
 1. Navigate to **Azure Migrate** → **Discovered items**.
 2. Confirm OnPrem-SQL shows the Mobility Service agent as **Connected**.
-
-![Agent Status Connected](../images/module-3-step-2-5.png)
 
 > **🏗️ In Production — Agent Monitoring:**
 > Set up Azure Monitor alerts for agent health status changes. An agent going offline during replication means data is not being captured — you lose RPO protection until it reconnects. Monitor the `svagents` service on every protected VM.
@@ -430,8 +424,6 @@ sudo /usr/local/ASR/Vx/bin/UnifiedAgentConfigurator.sh -S
    - This enables the agent-based replication workflow
 3. Click **Next**.
 
-![Source Settings - Physical](../images/module-3-step-4-1.png)
-
 ### 8.2 Select Virtual Machines
 
 1. In the **Virtual machines** tab, both VMs with the Mobility Service installed should appear.
@@ -441,7 +433,7 @@ sudo /usr/local/ASR/Vx/bin/UnifiedAgentConfigurator.sh -S
 ### 8.3 Configure Target Settings
 
 1. **Subscription** — Select your Azure subscription.
-2. **Resource Group** — Select `rg-migrate-workshop` (or your resource group).
+2. **Resource Group** — Select `rg-ces-target-01` (or your resource group).
 3. **Replication Storage Account** — Select a storage account for cache data.
 4. **Virtual Network** — Select the target VNet.
 5. **Subnet** — Select the appropriate subnet.
@@ -511,7 +503,7 @@ For **OnPrem-Linux-App**:
 ```powershell
 # Check replication status via PowerShell
 Get-AzMigrateServerReplication `
-    -ResourceGroupName "rg-migrate-workshop" `
+    -ResourceGroupName "rg-ces-target-01" `
     -ProjectName "your-migrate-project-name" | `
     Select-Object MachineName, MigrationState, ReplicationProgressPercentage
 ```
@@ -546,8 +538,6 @@ Get-AzMigrateServerReplication `
 2. Click **Test migration**.
 3. Select the test VNet (e.g., `vnet-migrate-test` from Module 2).
 4. Click **Test migration** and wait for the job to complete.
-
-![Test Migration - SQL VM](../images/module-3-step-6-1.png)
 
 ### 10.2 Validate SQL Server on Test VM — Deep Validation
 
@@ -727,8 +717,6 @@ stateDiagram-v2
 3. In the migration dialog:
    - **Shut down source VMs before migration?** → **Yes** (mandatory for database consistency)
 4. Click **Migrate** to begin the cutover.
-
-![Production Migration](../images/module-3-step-7-2.png)
 
 > **Note:** For SQL Server, shutting down the source VM ensures all pending transactions are flushed and the database is in a clean, consistent state. This is not optional for database workloads.
 

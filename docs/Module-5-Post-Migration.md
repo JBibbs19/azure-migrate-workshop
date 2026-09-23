@@ -130,7 +130,7 @@ Deploy AMA to all migrated VMs. This is the foundation for all observability.
 $windowsVMs = @("OnPrem-Web", "OnPrem-SQL")
 foreach ($vmName in $windowsVMs) {
     Set-AzVMExtension `
-      -ResourceGroupName "rg-migrate-workshop" `
+      -ResourceGroupName "rg-ces-target-01" `
       -VMName $vmName `
       -Name "AzureMonitorWindowsAgent" `
       -Publisher "Microsoft.Azure.Monitor" `
@@ -148,7 +148,7 @@ foreach ($vmName in $windowsVMs) {
 $linuxVMs = @("OnPrem-Linux-Web", "OnPrem-Linux-App")
 foreach ($vmName in $linuxVMs) {
     Set-AzVMExtension `
-      -ResourceGroupName "rg-migrate-workshop" `
+      -ResourceGroupName "rg-ces-target-01" `
       -VMName $vmName `
       -Name "AzureMonitorLinuxAgent" `
       -Publisher "Microsoft.Azure.Monitor" `
@@ -159,15 +159,13 @@ foreach ($vmName in $linuxVMs) {
 }
 ```
 
-![Install Azure Monitor Agent - Windows](../images/module-5-step-1-1.png)
-
 > **Verify:** Check each VM's **Extensions + applications** blade to confirm AMA is installed and provisioning succeeded.
 
 ### 2.3 Create a Log Analytics Workspace
 
 ```powershell
 New-AzOperationalInsightsWorkspace `
-  -ResourceGroupName "rg-migrate-workshop" `
+  -ResourceGroupName "rg-ces-target-01" `
   -Name "law-migrate-workshop" `
   -Location "eastus" `
   -Sku "PerGB2018"
@@ -178,11 +176,9 @@ Or via the portal: search **"Log Analytics workspaces"** → **+ Create** → co
 | Setting | Value |
 |---|---|
 | Subscription | *Your workshop subscription* |
-| Resource Group | `rg-migrate-workshop` |
+| Resource Group | `rg-ces-target-01` |
 | Name | `law-migrate-workshop` |
 | Region | *Same region as your VMs* |
-
-![Create Log Analytics Workspace](../images/module-5-step-1-3.png)
 
 ### 2.4 Configure Data Collection Rules (DCRs)
 
@@ -195,7 +191,7 @@ DCRs are the modern, declarative way to define what telemetry to collect. They r
    |---|---|
    | Rule Name | `dcr-migrate-workshop` |
    | Subscription | *Your workshop subscription* |
-   | Resource Group | `rg-migrate-workshop` |
+   | Resource Group | `rg-ces-target-01` |
    | Region | *Same region as your VMs* |
    | Platform Type | **All** (Windows and Linux) |
 
@@ -216,8 +212,6 @@ DCRs are the modern, declarative way to define what telemetry to collect. They r
 
 5. Under **Destination**, select `law-migrate-workshop`
 6. Click **Review + create** → **Create**
-
-![Data Collection Rules](../images/module-5-step-1-4.png)
 
 > **Metrics vs. Logs — When to Use Each:**
 > - **Metrics** (numeric time-series): Use for real-time dashboards, autoscale triggers, and threshold-based alerts. Cheap to store, fast to query. Example: CPU percentage over time.
@@ -294,7 +288,7 @@ Before configuring backup, ask the business question: **How much data can you af
 ```powershell
 # Create or reuse a Recovery Services Vault
 New-AzRecoveryServicesVault `
-  -ResourceGroupName "rg-migrate-workshop" `
+  -ResourceGroupName "rg-ces-target-01" `
   -Name "MigrateWorkshop-Backup-Vault" `
   -Location "eastus"
 ```
@@ -317,12 +311,10 @@ Configure the backup policy:
 
 4. Click **Create**
 
-![Backup Policy](../images/module-5-step-2-2.png)
-
 **PowerShell alternative:**
 
 ```powershell
-$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-migrate-workshop"
+$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-ces-target-01"
 Set-AzRecoveryServicesVaultContext -Vault $vault
 
 $schedulePolicy = Get-AzRecoveryServicesBackupSchedulePolicyObject -WorkloadType "AzureVM"
@@ -353,17 +345,15 @@ New-AzRecoveryServicesBackupProtectionPolicy `
 3. Select policy: `DailyBackup-30DayRetention`
 4. Add all four VMs and click **Enable Backup**
 
-![Enable Backup](../images/module-5-step-2-3.png)
-
 ```powershell
-$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-migrate-workshop"
+$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-ces-target-01"
 $policy = Get-AzRecoveryServicesBackupProtectionPolicy -Name "DailyBackup-30DayRetention" -VaultId $vault.ID
 
 $vmNames = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
 
 foreach ($vmName in $vmNames) {
     Enable-AzRecoveryServicesBackupProtection `
-      -ResourceGroupName "rg-migrate-workshop" `
+      -ResourceGroupName "rg-ces-target-01" `
       -Policy $policy `
       -Name $vmName `
       -VaultId $vault.ID
@@ -379,7 +369,7 @@ foreach ($vmName in $vmNames) {
 2. Click **Backup now** → set retention → **OK**
 
 ```powershell
-$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-migrate-workshop"
+$vault = Get-AzRecoveryServicesVault -Name "MigrateWorkshop-ASR-Vault" -ResourceGroupName "rg-ces-target-01"
 $backupItem = Get-AzRecoveryServicesBackupItem `
   -BackupManagementType "AzureVM" `
   -WorkloadType "AzureVM" `
@@ -395,8 +385,6 @@ Verify the job:
 ```powershell
 Get-AzRecoveryServicesBackupJob -VaultId $vault.ID -Status "InProgress" | Format-Table Operation, Status, StartTime
 ```
-
-![Verify Backup](../images/module-5-step-2-5.png)
 
 > **Note:** The first backup (snapshot + transfer) can take 30+ minutes. The snapshot phase is fast; vault transfer takes longer depending on disk size.
 
@@ -458,7 +446,7 @@ flowchart TD
 
 ```powershell
 # Audit current NSG rules — identify overly permissive configurations
-Get-AzNetworkSecurityGroup -ResourceGroupName "rg-migrate-workshop" |
+Get-AzNetworkSecurityGroup -ResourceGroupName "rg-ces-target-01" |
   ForEach-Object {
     Write-Host "`n=== $($_.Name) ===" -ForegroundColor Cyan
     $_.SecurityRules | Format-Table Name, Direction, Access, Protocol, SourceAddressPrefix, DestinationPortRange, Priority
@@ -471,7 +459,7 @@ Get-AzNetworkSecurityGroup -ResourceGroupName "rg-migrate-workshop" |
 
 ```powershell
 # Example: Remove a dangerous "allow all" rule
-$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName "rg-migrate-workshop"
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName "rg-ces-target-01"
 Remove-AzNetworkSecurityRuleConfig -Name "AllowAllInbound" -NetworkSecurityGroup $nsg
 Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 ```
@@ -490,7 +478,7 @@ Design NSG rules based on **application architecture tiers**: web → app → da
 | 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
 
 ```powershell
-$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName "rg-migrate-workshop"
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName "rg-ces-target-01"
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
   -Name "Allow-HTTP" -Priority 100 -Direction Inbound -Access Allow `
@@ -521,7 +509,7 @@ Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 | 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
 
 ```powershell
-$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-SQL-nsg" -ResourceGroupName "rg-migrate-workshop"
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-SQL-nsg" -ResourceGroupName "rg-ces-target-01"
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
   -Name "Allow-SQL-FromWeb" -Priority 100 -Direction Inbound -Access Allow `
@@ -555,8 +543,6 @@ Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 | 200 | Allow-SSH-MyIP | Inbound | Allow | TCP | *Your IP* | 22 |
 | 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
 
-![NSG Rules](../images/module-5-step-3-3.png)
-
 > **Application Security Groups (ASGs):** In production, create ASGs (e.g., `asg-web-tier`, `asg-app-tier`, `asg-data-tier`) and reference them in NSG rules instead of IP addresses. ASGs make rules self-documenting and automatically adapt when VMs are added or replaced.
 
 ### 4.4 NSG Flow Logs + Traffic Analytics
@@ -576,8 +562,6 @@ NSG Flow Logs provide network visibility — essential for security auditing, fo
    | Traffic Analytics Workspace | `law-migrate-workshop` |
 
 4. Click **Create**
-
-![NSG Flow Logs](../images/module-5-step-3-4.png)
 
 > **Traffic Analytics** processes flow log data and presents it in visual dashboards — showing traffic patterns, blocked flows, top talkers, and geographic distribution. This is invaluable for identifying unexpected traffic and validating that NSG rules are working as intended.
 
@@ -673,8 +657,6 @@ flowchart TD
 1. Navigate to **Azure Advisor** → **Cost** tab
 2. Look for "Right-size or shutdown underutilized virtual machines"
 
-![Azure Advisor](../images/module-5-step-4-1.png)
-
 ```powershell
 Get-AzAdvisorRecommendation -Category Cost |
   Where-Object { $_.ImpactedField -eq "Microsoft.Compute/virtualMachines" } |
@@ -697,19 +679,17 @@ Get-AzAdvisorRecommendation -Category Cost |
 | Average > 60% | Correctly sized or needs scale-up |
 | Average < 5% (all hours) | Candidate for shutdown or decommission |
 
-![VM Metrics](../images/module-5-step-4-2.png)
-
 **Step 3 — Resize When Justified:**
 
 ```powershell
 # Resize requires VM stop — schedule during maintenance window
-Stop-AzVM -ResourceGroupName "rg-migrate-workshop" -Name "OnPrem-Web" -Force
+Stop-AzVM -ResourceGroupName "rg-ces-target-01" -Name "OnPrem-Web" -Force
 
-$vm = Get-AzVM -ResourceGroupName "rg-migrate-workshop" -Name "OnPrem-Web"
+$vm = Get-AzVM -ResourceGroupName "rg-ces-target-01" -Name "OnPrem-Web"
 $vm.HardwareProfile.VmSize = "Standard_B1s"
-Update-AzVM -ResourceGroupName "rg-migrate-workshop" -VM $vm
+Update-AzVM -ResourceGroupName "rg-ces-target-01" -VM $vm
 
-Start-AzVM -ResourceGroupName "rg-migrate-workshop" -Name "OnPrem-Web"
+Start-AzVM -ResourceGroupName "rg-ces-target-01" -Name "OnPrem-Web"
 ```
 
 > **B-series (burstable) VMs** are ideal for workloads with variable CPU patterns — web servers, development environments, small databases. They accumulate CPU credits during idle periods and burst when needed. Significantly cheaper than fixed-performance VMs.
@@ -742,7 +722,7 @@ Once workloads are stable (typically T+60 to T+90 days post-migration), evaluate
 Implement tagging on Day 1. It is nearly impossible to retroactively tag a large environment accurately.
 
 ```powershell
-$resourceGroup = "rg-migrate-workshop"
+$resourceGroup = "rg-ces-target-01"
 $tags = @{
     "CostCenter"   = "IT-Infrastructure"
     "Environment"  = "Lab"
@@ -806,7 +786,7 @@ In production, enforce cost controls via Azure Policy:
 
 ```powershell
 # Find unattached managed disks (orphaned from migration)
-Get-AzDisk -ResourceGroupName "rg-migrate-workshop" |
+Get-AzDisk -ResourceGroupName "rg-ces-target-01" |
   Where-Object { $_.DiskState -eq "Unattached" } |
   Select-Object Name, DiskSizeGB, Sku |
   Format-Table
@@ -814,7 +794,7 @@ Get-AzDisk -ResourceGroupName "rg-migrate-workshop" |
 
 ```powershell
 # Find unused public IPs
-Get-AzPublicIpAddress -ResourceGroupName "rg-migrate-workshop" |
+Get-AzPublicIpAddress -ResourceGroupName "rg-ces-target-01" |
   Where-Object { -not $_.IpConfiguration } |
   Select-Object Name, IpAddress |
   Format-Table
@@ -828,7 +808,7 @@ $shutdownTime = "1900"   # 7:00 PM
 $timeZone = "Eastern Standard Time"
 
 foreach ($vmName in $vmNames) {
-    $vm = Get-AzVM -ResourceGroupName "rg-migrate-workshop" -Name $vmName
+    $vm = Get-AzVM -ResourceGroupName "rg-ces-target-01" -Name $vmName
 
     $properties = @{
         status           = "Enabled"
@@ -839,7 +819,7 @@ foreach ($vmName in $vmNames) {
     }
 
     New-AzResource `
-      -ResourceId "/subscriptions/$((Get-AzContext).Subscription.Id)/resourceGroups/rg-migrate-workshop/providers/microsoft.devtestlab/schedules/shutdown-computevm-$vmName" `
+      -ResourceId "/subscriptions/$((Get-AzContext).Subscription.Id)/resourceGroups/rg-ces-target-01/providers/microsoft.devtestlab/schedules/shutdown-computevm-$vmName" `
       -Location $vm.Location `
       -Properties $properties `
       -Force
@@ -847,8 +827,6 @@ foreach ($vmName in $vmNames) {
     Write-Host "Auto-shutdown enabled for $vmName at $shutdownTime $timeZone"
 }
 ```
-
-![Auto-Shutdown](../images/module-5-step-6-5.png)
 
 > **Production Consideration:** Auto-shutdown is for non-production only. For production savings, evaluate Reserved Instances and consider scale-down schedules (resize to smaller SKU during off-hours) if supported by the workload.
 
@@ -868,8 +846,6 @@ Unpatched systems are the most common attack vector. Update management is not op
 2. Select all four migrated VMs
 3. Click **Check for updates** to assess current patch status
 
-![Azure Update Manager](../images/module-5-step-5-1.png)
-
 ### 6.2 Schedule Maintenance Windows
 
 1. In Update Manager, navigate to **Maintenance configurations** → **+ Create**
@@ -878,7 +854,7 @@ Unpatched systems are the most common attack vector. Update management is not op
    | Setting | Value |
    |---|---|
    | Name | `maint-weekly-sunday` |
-   | Resource Group | `rg-migrate-workshop` |
+   | Resource Group | `rg-ces-target-01` |
    | Region | *Your region* |
    | Maintenance scope | **Guest (Azure VM)** |
    | Schedule | Weekly, Sunday, 2:00 AM UTC |

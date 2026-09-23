@@ -212,11 +212,15 @@ function Wait-LabManagedSetup {
     $unavailableSince = $null
     $readError = $null
     $started = $false
-    $phase = 'Waiting for host phase information'
+    $phase = 'Guest setup starting'
     $install = $null
     $Observation.Terminal = $false
+    # These names are also entries in the deployment step list, so reporting the current phase
+    # as the stage advances the step counter through the host payload instead of parking the
+    # whole 40-80 minute run on one step.
     $phaseNames = @{network='Host networking';images='Downloading and converting images';guests='Creating nested VMs';
-        boot='Guest first boot';workloads='Installing workloads';iis='Installing IIS';sql='Installing SQL';validation='Validating sample applications'}
+        boot='Guest first boot';workloads='Installing workloads';iis='Installing IIS';sql='Installing SQL';
+        validation='Validating sample applications';traffic='Staging the traffic generator'}
     $installNames = Get-LabInstallStageNames
     try {
         while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -240,7 +244,7 @@ function Wait-LabManagedSetup {
                 $Observation.Terminal = $true
                 if ($execution -ne 'Succeeded') { throw "Guest setup reported $execution (exit code $(Get-LabProperty $view ExitCode 'unknown')). Inspect ConfigureWorkshop and C:\AzMigrateLab\setup-log.txt." }
                 Assert-LabManagedRunResult $view
-                Write-LabHealth 'Guest setup' Succeeded $clock.Elapsed.TotalSeconds 'All required workload evidence was returned.' $HealthPath
+                Write-LabHealth 'Guest setup complete' Succeeded $clock.Elapsed.TotalSeconds 'All required workload evidence was returned.' $HealthPath
                 return $view
             }
             if ($readFailed -or $null -eq $command -or ($started -and $execution -ne 'Running')) {
@@ -258,7 +262,7 @@ function Wait-LabManagedSetup {
                         [Environment]::NewLine +
                         'or read C:\AzMigrateLab\setup-log.txt on the host. Do not redeploy until you have confirmed the run actually failed.')
                 }
-                Write-LabHealth 'Guest setup' StatusUnavailable $clock.Elapsed.TotalSeconds "Unable to read Azure status; retrying within the $StatusFailureSeconds second monitoring limit.$reason" $HealthPath -TimeoutSeconds $TimeoutSeconds
+                Write-LabHealth $phase StatusUnavailable $clock.Elapsed.TotalSeconds "Unable to read Azure status; retrying within the $StatusFailureSeconds second monitoring limit.$reason" $HealthPath -TimeoutSeconds $TimeoutSeconds
             } else {
                 $unavailableSince = $null
                 if ($execution -in @('Running','Succeeded')) { $started = $true }
@@ -291,13 +295,14 @@ function Wait-LabManagedSetup {
                     $event = "$($install.Name)|$($install.State)"
                     if ($install.State -in @('TransientError','NeedsReview')) { $tone = 'Warning' }
                 }
-                Write-LabHealth 'Guest setup' $state $clock.Elapsed.TotalSeconds "$detail. Azure output may be delayed." $HealthPath -TimeoutSeconds $TimeoutSeconds -EventKey $event -Tone $tone
+                Write-LabHealth $phase $state $clock.Elapsed.TotalSeconds "$detail. Azure output may be delayed." $HealthPath -TimeoutSeconds $TimeoutSeconds -EventKey $event -Tone $tone
             }
             Wait-LabProgressDelay -Seconds $PollSeconds -Clock $clock
         }
         throw "Guest setup exceeded its $TimeoutSeconds second monitoring limit. Inspect ConfigureWorkshop before retrying; the remote operation may still be running."
     } catch {
-        Write-LabHealth 'Guest setup' NeedsReview $clock.Elapsed.TotalSeconds "$phase. Inspect ConfigureWorkshop instance view and the host setup log; no later stage will run." $HealthPath
+        # Report against the phase that was running, so the failure names where it stopped.
+        Write-LabHealth $phase NeedsReview $clock.Elapsed.TotalSeconds "Stopped during: $phase. Inspect ConfigureWorkshop instance view and the host setup log; no later stage will run." $HealthPath
         throw
     } finally { Complete-LabProgress }
 }

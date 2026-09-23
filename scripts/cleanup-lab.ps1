@@ -13,10 +13,10 @@
     Skip the confirmation prompt and delete immediately.
 
 .EXAMPLE
-    .\cleanup-lab.ps1 -ResourceGroupName "rg-migrate-workshop"
+    .\cleanup-lab.ps1 -ResourceGroupName "rg-ces-source-01"
 
 .EXAMPLE
-    .\cleanup-lab.ps1 -ResourceGroupName "rg-migrate-workshop" -Force
+    .\cleanup-lab.ps1 -ResourceGroupName "rg-ces-source-01" -Force
 #>
 
 [CmdletBinding()]

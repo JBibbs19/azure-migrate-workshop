@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     This script sets up the Azure Migrate project and creates the target
-    resource group (nazli-oncloud) with networking infrastructure for migrated VMs.
+    resource group (rg-ces-target-01) with networking infrastructure for migrated VMs.
 
     Run this script ONCE before starting discovery.
 
@@ -31,16 +31,16 @@
       and migration. It tracks all servers and their migration status.
 
 .PARAMETER SourceResourceGroup
-    The on-premises simulation resource group. Default: nazli-onprem
+    The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
 
 .PARAMETER TargetResourceGroup
-    The target cloud resource group. Default: nazli-oncloud
+    The target cloud resource group. Prompted when not supplied (example: rg-ces-target-01).
 
 .PARAMETER Location
-    Azure region for all resources. Default: eastus
+    Azure region for all resources. Prompted when not supplied (example: eastus).
 
 .PARAMETER MigrateProjectName
-    Name for the Azure Migrate project. Default: MigrateProject-Workshop
+    Name for the Azure Migrate project. Prompted when not supplied (example: ces-migrate-01).
 
 .EXAMPLE
     .\migrate-step1-setup-project.ps1
@@ -51,21 +51,35 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [string]$MigrateProjectName = "MigrateProject-Workshop"
+    [string]$MigrateProjectName
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$MigrateProjectName = Read-LabParameter -Name 'MigrateProjectName' -Value $MigrateProjectName -Kind ProjectName -Prompt 'Azure Migrate project name' -Example 'ces-migrate-01'
 
 # ================================================================
 # Helper Functions
@@ -154,7 +168,7 @@ try {
         throw "Not logged in."
     }
     Write-Log "Authenticated as: $($context.Account.Id)"
-    Write-Log "Subscription   : $($context.Subscription.Name) `($($context.Subscription.Id)`)"
+    Write-Log "Subscription   : $($context.Subscription.Name) `($(Format-LabSubscriptionId $context.Subscription.Id)`)"
 } catch {
     Write-Host "ERROR: You must be logged in to Azure before running this script." -ForegroundColor Red
     Write-Host "Run:  Connect-AzAccount" -ForegroundColor Red

@@ -37,6 +37,7 @@ function Write-Log {
         '^PHASE 3:' { 'guests'; break }; '^PHASE 4:' { 'boot'; break }
         '^PHASE 5:' { 'workloads'; break }; '^--- Configuring OnPrem-Web' { 'iis'; break }
         '^--- Configuring OnPrem-SQL' { 'sql'; break }; '^Validating sample applications' { 'validation'; break }
+        '^PHASE 6:' { 'traffic'; break }
     }
     if ($stage) { Write-Host "LAB_STAGE|$stage" }
 }

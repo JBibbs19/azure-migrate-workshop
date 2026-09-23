@@ -33,16 +33,16 @@
     Resource group containing the migrated Azure VMs.
 
 .PARAMETER Location
-    Azure region. Default: eastus.
+    Azure region. Prompted when not supplied (example: eastus).
 
 .PARAMETER AutoShutdownTime
-    Daily auto-shutdown time in HHmm format (24-hour). Default: 1900 (7 PM).
+    Daily auto-shutdown time in HHmm format (24-hour). Prompted when not supplied (example: 1900 (7 PM)).
 
 .PARAMETER AutoShutdownTimezone
-    Timezone for auto-shutdown. Default: Eastern Standard Time.
+    Timezone for auto-shutdown. Prompted when not supplied (example: Eastern Standard Time).
 
 .PARAMETER BackupRetentionDays
-    Number of days to retain backups. Default: 30.
+    Number of days to retain backups. Prompted when not supplied (example: 30).
 
 .PARAMETER ParticipantName
     Name of the workshop participant (used for resource tagging).
@@ -56,30 +56,44 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$SourceResourceGroup = "nazli-onprem",
+    [string]$SourceResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$TargetResourceGroup = "nazli-oncloud",
+    [string]$TargetResourceGroup,
 
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
+    [string]$Location,
 
-    [Parameter(Mandatory = $false)]
-    [string]$AutoShutdownTime = "1900",
+    [string]$AutoShutdownTime,
 
-    [Parameter(Mandatory = $false)]
-    [string]$AutoShutdownTimezone = "Eastern Standard Time",
+    [string]$AutoShutdownTimezone,
 
-    [Parameter(Mandatory = $false)]
-    [int]$BackupRetentionDays = 30,
+    [int]$BackupRetentionDays,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ParticipantName = "workshop-participant"
+    [string]$ParticipantName
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# ================================================================
+# Shared helpers, masked console output and parameter entry
+# ================================================================
+# Every environment-specific value is entered by the learner when it is not passed on
+# the command line; no value is taken silently from a default. The subscription and
+# tenant IDs are truncated wherever this script writes to the console.
+. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'migrate-common.ps1')
+$null = Enable-LabOutputMasking
+trap { Write-LabTerminatingError $_; exit 1 }
+
+Write-Host ""
+Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
+$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
+$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+$AutoShutdownTime = Read-LabParameter -Name 'AutoShutdownTime' -Value $AutoShutdownTime -Kind Time24h -Prompt 'Daily auto-shutdown time, 24-hour HHmm' -Example '1900'
+$AutoShutdownTimezone = Read-LabParameter -Name 'AutoShutdownTimezone' -Value $AutoShutdownTimezone -Kind TimeZone -Prompt 'Auto-shutdown time zone (Windows time zone ID)' -Example 'Eastern Standard Time'
+$BackupRetentionDays = Read-LabNumber -Name 'BackupRetentionDays' -Prompt 'Backup retention in days' -Value $BackupRetentionDays -Supplied:($PSBoundParameters.ContainsKey('BackupRetentionDays')) -Minimum 7 -Maximum 9999 -Example '30'
+$ParticipantName = Read-LabParameter -Name 'ParticipantName' -Value $ParticipantName -Kind Text -Prompt 'Participant name for the Owner tag' -Example 'jdoe'
 
 # ================================================================
 # Helper Functions
@@ -143,7 +157,7 @@ foreach ($mod in $requiredModules) {
 try {
     $context = Get-AzContext
     if (-not $context) { throw "No Azure context." }
-    Write-StepInfo "Subscription: $($context.Subscription.Name) `($($context.Subscription.Id)`)"
+    Write-StepInfo "Subscription: $($context.Subscription.Name) `($(Format-LabSubscriptionId $context.Subscription.Id)`)"
     $subscriptionId = $context.Subscription.Id
 } catch {
     throw "Azure authentication required. Run 'Connect-AzAccount' first. Error: $_"
@@ -328,7 +342,7 @@ try {
     }
 
     # Set the vault context -- all subsequent backup commands use this context.
-    Set-AzRecoveryServicesVaultContext -Vault $vault
+    Set-AzRecoveryServicesVaultContext -Vault $vault | Out-Null
     Write-StepInfo "  Vault context set."
 } catch {
     Write-Host "  ❌ Failed to create Recovery Services Vault: $_" -ForegroundColor Red
@@ -540,7 +554,8 @@ try {
     # Enable the "VirtualMachines" pricing tier on the subscription.
     # This turns on Defender for all VMs in the subscription.
     # In production, you might scope this to specific resource groups.
-    Set-AzSecurityPricing -Name "VirtualMachines" -PricingTier "Standard"
+    # Output discarded: the returned object carries the full subscription resource ID.
+    Set-AzSecurityPricing -Name "VirtualMachines" -PricingTier "Standard" | Out-Null
     Write-StepInfo "  ✅ Microsoft Defender for Servers enabled (Standard tier)."
     Write-StepInfo "  This provides:"
     Write-StepInfo "    - Threat detection and alerts"

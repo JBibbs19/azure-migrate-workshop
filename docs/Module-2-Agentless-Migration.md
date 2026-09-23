@@ -188,8 +188,6 @@ Define "done" before you start:
 2. Search for **Azure Migrate** in the top search bar and select it.
 3. Click **Servers, databases and web apps** in the left menu.
 
-![Azure Migrate Dashboard](../images/module-2-step-1-1.png)
-
 ### 4.2 Open the Migration Tool
 
 1. In the **Migration tools** tile, locate **Azure Migrate: Server Migration**.
@@ -200,8 +198,6 @@ Define "done" before you start:
 1. In the **Discover** dialog, for **Are your machines virtualized?**, select **Yes, with Hyper-V**.
 2. Select the **Target region** where you want to migrate VMs.
 3. Confirm that the Azure Migrate appliance you deployed in Module 1 appears as registered.
-
-![Discover Machines for Migration](../images/module-2-step-1-3.png)
 
 > **Note:** If the appliance does not appear, verify it is powered on and has network connectivity to Azure. You may need to wait a few minutes for registration to propagate.
 
@@ -221,8 +217,6 @@ Define "done" before you start:
    - **Azure Migrate Appliance** → Select your appliance from the dropdown
 3. Click **Next**.
 
-![Replication Source Settings](../images/module-2-step-2-1.png)
-
 ### 5.2 Select the Virtual Machine
 
 1. In the **Virtual machines** tab, select **Yes** for **Import migration settings from an assessment** if you ran an assessment in Module 1, or select **No** to configure manually.
@@ -232,7 +226,7 @@ Define "done" before you start:
 ### 5.3 Configure Target Settings
 
 1. **Subscription** — Select your Azure subscription.
-2. **Resource Group** — Select or create a resource group (e.g., `rg-migrate-workshop`).
+2. **Resource Group** — Select or create a resource group (e.g., `rg-ces-target-01`).
 3. **Replication Storage Account** — Select or create a storage account for replication data.
 4. **Virtual Network** — Select the target VNet for the migrated VM.
 5. **Subnet** — Select the appropriate subnet.
@@ -261,8 +255,6 @@ Recommended VM Size: Standard_B2s
 ```
 
 5. Click **Next**.
-
-![Compute Settings](../images/module-2-step-2-4.png)
 
 > **🏗️ In Production — Naming Conventions:**
 > Post-migration VM names should follow your organization's naming standard. Example: `vm-web-prod-001` rather than carrying over the on-premises name. Rename during this step, not after migration.
@@ -323,8 +315,6 @@ Repeat the replication process for the Linux web server.
 2. Choose **Standard SSD** for disk type.
 3. Review and click **Replicate**.
 
-![Linux VM Replication](../images/module-2-step-3-5.png)
-
 **Expected Outcome:** Both OnPrem-Web and OnPrem-Linux-Web now show replication jobs in progress.
 
 ---
@@ -335,8 +325,6 @@ Repeat the replication process for the Linux web server.
 
 1. In **Azure Migrate: Server Migration**, click **Replicating servers** (or the count displayed in the tile).
 2. You will see both VMs listed with their current replication status.
-
-![Replication Status Overview](../images/module-2-step-4-1.png)
 
 ### 7.2 Understand Replication States
 
@@ -365,7 +353,7 @@ Connect-AzAccount
 
 # List all replicating servers in the Azure Migrate project
 Get-AzMigrateServerReplication `
-    -ResourceGroupName "rg-migrate-workshop" `
+    -ResourceGroupName "rg-ces-target-01" `
     -ProjectName "your-migrate-project-name"
 ```
 
@@ -393,12 +381,12 @@ The test VNet must be **completely isolated** — no peering to production VNets
 # Create a test VNet for test migrations
 New-AzVirtualNetwork `
     -Name "vnet-migrate-test" `
-    -ResourceGroupName "rg-migrate-workshop" `
+    -ResourceGroupName "rg-ces-target-01" `
     -Location "your-azure-region" `
     -AddressPrefix "10.100.0.0/16"
 
 # Add a subnet to the test VNet
-$vnet = Get-AzVirtualNetwork -Name "vnet-migrate-test" -ResourceGroupName "rg-migrate-workshop"
+$vnet = Get-AzVirtualNetwork -Name "vnet-migrate-test" -ResourceGroupName "rg-ces-target-01"
 Add-AzVirtualNetworkSubnetConfig `
     -Name "subnet-test" `
     -VirtualNetwork $vnet `
@@ -412,8 +400,6 @@ $vnet | Set-AzVirtualNetwork
 2. Click **Test migration** in the toolbar.
 3. Select **vnet-migrate-test** as the virtual network.
 4. Click **Test migration** to start.
-
-![Test Migration Dialog](../images/module-2-step-5-2.png)
 
 5. Wait for the test migration job to complete (approximately 10–15 minutes).
 
@@ -571,8 +557,6 @@ A CSA's cutover checklist goes beyond "click Migrate":
 1. Click **Jobs** in the left menu of Azure Migrate to see migration job status.
 2. Wait for both migrations to show **Completed**.
 
-![Migration Jobs Progress](../images/module-2-step-6-4.png)
-
 The migration engine executes these steps automatically:
 
 1. **Final delta replication** — Captures all changes since last sync
@@ -590,7 +574,7 @@ The migration engine executes these steps automatically:
 
 ```powershell
 # List migrated VMs
-Get-AzVM -ResourceGroupName "rg-migrate-workshop" -Status | `
+Get-AzVM -ResourceGroupName "rg-ces-target-01" -Status | `
     Select-Object Name, PowerState, Location
 ```
 

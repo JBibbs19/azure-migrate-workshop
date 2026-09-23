@@ -11,7 +11,8 @@ Use a new dedicated resource group. Existing groups are refused intentionally.
 The workshop subscription GUID, supplied as a SecureString so it is masked at the prompt
 rather than displayed on a shared screen. It is not treated as a stored secret.
 .PARAMETER AdminSourceCidr
-Your public IPv4 address as a /32, supplied as a SecureString for the same reason.
+Your public IPv4 address, supplied as a SecureString for the same reason. The /32 suffix
+is optional and is added when absent; the lab only ever permits a single address.
 Required for the host RDP rule.
 .PARAMETER AzureOperationTimeoutMinutes
 Maximum monitored wait for each Azure host, network or disk creation operation.
@@ -28,7 +29,7 @@ the virtual DVD drive. Supply a letter only to override that choice.
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
 $secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
-$secureAdminCidr = Read-Host 'Your public IPv4 address followed by /32' -AsSecureString
+$secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
 $password = Read-Host 'Lab password' -AsSecureString
 .\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
 #>
@@ -55,14 +56,20 @@ Assert-LabSubscriptionId $subscriptionIdPlain
 $adminSourceCidrPlain = ConvertFrom-LabSecureString -Secure $AdminSourceCidr -Name 'AdminSourceCidr'
 $hostScript = Read-LabHostConfiguration "$PSScriptRoot/host/configure-host.ps1"
 . "$PSScriptRoot/health.ps1"
+# The steps after 'Submit guest setup' run on the host, not here. Their names match the phase
+# markers the host payload emits, so the counter keeps advancing through the longest part of
+# the deployment instead of resting on a single step for 40-80 minutes.
 Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
     'Source deployment', 'Create source network', 'Create host public IP', 'Create host firewall rules',
     'Create host network interface', 'Create Azure host', 'Install Hyper-V and DHCP', 'Restart Azure host',
     'Check Hyper-V readiness', 'Create appliance store partition', 'Create guest image disk',
-    'Submit guest setup', 'Guest setup'
+    'Submit guest setup', 'Guest setup starting',
+    'Host networking', 'Downloading and converting images', 'Creating nested VMs', 'Guest first boot',
+    'Installing workloads', 'Installing IIS', 'Installing SQL', 'Validating sample applications',
+    'Staging the traffic generator', 'Guest setup complete'
 )
 if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
-Assert-LabAdminSource $adminSourceCidrPlain
+$adminSourceCidrPlain = Resolve-LabAdminSource $adminSourceCidrPlain
 Assert-LabHostSizeName $VMSize
 foreach ($module in @('Az.Accounts','Az.Resources','Az.Network','Az.Compute')) {
     Import-Module $module -ErrorAction Stop
