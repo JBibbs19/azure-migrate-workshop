@@ -52,6 +52,19 @@
 
 .EXAMPLE
     .\migrate-step6-post-migration.ps1 -ParticipantName "John" -AutoShutdownTime "2200"
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 5, section 2   Observability Strategy - Azure Monitor agent, workspace, DCRs.
+      Module 5, section 3   Data Protection Strategy - recovery services vault, policy, backup.
+      Module 5, section 4   Security Hardening - NSG rules and microsegmentation.
+      Module 5, section 5   Cost Optimization - right-sizing, auto-shutdown, tags.
+
+    Not covered: section 1 (concepts), section 6 (Update Management), section 7 (Day 2
+    Operations Runbook) and section 8 (Workshop Summary). Those are discussion and reading.
+
+    It tolerates a partial estate: the VM list is built from what actually exists in the target
+    resource group, so it works after only Module 2 or only Module 3 has been completed.
 #>
 
 [CmdletBinding()]

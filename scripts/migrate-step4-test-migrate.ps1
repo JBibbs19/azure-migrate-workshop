@@ -46,6 +46,16 @@
 
 .EXAMPLE
     .\migrate-step4-test-migrate.ps1 -TargetResourceGroup "mycloud-rg" -MigrateProjectName "my-migrate"
+MODULE COVERAGE
+    The scripts and the modules are run separately. What this completes depends on -Workload:
+
+      -Workload Agentless   Module 2, section 8 (Test Migration), including the cleanup in 8.6.
+      -Workload AgentBased  Module 3, section 10 (Test Migration), including the cleanup in 10.5.
+      -Workload All         Both, in one pass. The default.
+
+    The in-guest validation in those sections - browsing the IIS site, querying SQL, calling the
+    Node.js API on the test VM - is not performed. The script confirms the test VMs exist and
+    reach a healthy state; whether the application works is yours to check.
 #>
 
 [CmdletBinding()]

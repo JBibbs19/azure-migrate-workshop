@@ -50,6 +50,18 @@
 
 .EXAMPLE
     .\migrate-step3-replicate.ps1 -TargetResourceGroup "mycloud-rg" -Location "westus2"
+MODULE COVERAGE
+    The scripts and the modules are run separately. What this completes depends on -Workload:
+
+      -Workload Agentless   Module 2, sections 5 and 6 (Configure Replication for OnPrem-Web
+                            and OnPrem-Linux-Web) and section 7 (Monitor Replication).
+      -Workload AgentBased  Module 3, section 8 (Configure Replication) and section 9
+                            (Monitor Replication).
+      -Workload All         Both of the above, in one pass. The default.
+
+    IMPORTANT: replication here is always AGENTLESS. Module 3 sections 5 to 7 - deploy the
+    replication appliance, install Mobility Service on each guest - are NOT performed. The end
+    state matches; the method does not. See CHANGES.md section 11.
 #>
 
 [CmdletBinding()]

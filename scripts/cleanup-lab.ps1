@@ -17,6 +17,14 @@
 
 .EXAMPLE
     .\cleanup-lab.ps1 -ResourceGroupName "rg-ces-source-01" -Force
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 0, section 4   The teardown at the end of the workshop, and the Finish/Cleanup
+                            row of the README module table.
+
+    It does not touch the Azure Migrate project, its key vault or its recovery services vault.
+    Remove those from the portal, or they will hold their names against a future lab.
 #>
 
 [CmdletBinding()]

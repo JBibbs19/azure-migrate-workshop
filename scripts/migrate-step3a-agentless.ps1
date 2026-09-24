@@ -73,6 +73,16 @@
 .EXAMPLE
     .\migrate-step3a-agentless.ps1 -SkipTestMigration
 
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 2, sections 5 to 9   Configure replication, monitor it, test migrate, clean up the
+                                  test, and cut over. The whole practical body of Module 2.
+
+    Not covered: sections 1 to 4 (concepts, runbook, prerequisites), section 10
+    (Post-Migration Validation) and section 11 (Rollback Strategy) - all reading and
+    verification you should still do.
+
 .NOTES
     Reaches Module 2's END STATE. Module 2 is agentless throughout, so this script's method matches the module exactly.
 #>

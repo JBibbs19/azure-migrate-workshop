@@ -73,23 +73,49 @@ $secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
 $secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
 $password = Read-Host 'Lab-only administrator password' -AsSecureString
 
-# The migrate-step scripts read the active context, so set it explicitly
-$subscriptionId = [pscredential]::new('subscription', $secureSubscriptionId).GetNetworkCredential().Password
-Set-AzContext -SubscriptionId $subscriptionId
-
 $sourceRg = 'rg-ces-source-01'
-$targetRg = 'rg-ces-target-01'
 $location = 'eastus'
 
 .\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId `
     -ResourceGroupName $sourceRg -Location $location `
     -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
+```
 
-.\scripts\migrate-step1-setup-project.ps1 `
-    -SourceResourceGroup $sourceRg -TargetResourceGroup $targetRg -Location $location
+Every `migrate-step` script then runs on its own, with no arguments:
+
+```powershell
+.\scripts\migrate-step1-setup-project.ps1
+```
+
+Each one loads the Az modules it needs, signs you in if the session is not signed in, offers a choice of subscription when none is current, and then lists the resource groups, projects and VMs it finds so you pick from what exists rather than typing names. Passing values on the command line still works and skips the matching question:
+
+```powershell
+.\scripts\migrate-step2-discover-assess.ps1 -SourceResourceGroup $sourceRg
 ```
 
 The deployment scripts require **new, dedicated resource groups**. They intentionally refuse existing groups: replaying setup after cutover could restart the retired source VMs. They do not register the appliance or start replication. Complete Module 1 next.
+
+## Which script completes which module step
+
+The scripts and the modules are run separately. Each script also carries this in its own
+`MODULE COVERAGE` block — `Get-Help .\scripts\<script>.ps1 -Full` shows it.
+
+| Script | Completes |
+|---|---|
+| `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract |
+| `migrate-step1-setup-project.ps1` | Target landing zone. Module 1 §1 is **not** automated — it prints the portal steps |
+| `migrate-step2-discover-assess.ps1` | Module 1 §3.2–3.5, §4 and §5. §3.1 (project key) stops for you |
+| `migrate-step3-replicate.ps1` | Module 2 §5–§7, or Module 3 §8–§9, per `-Workload` |
+| `migrate-step3a-agentless.ps1` | Module 2 §5–§9 in one run |
+| `migrate-step3b-agent-based.ps1` | Module 3 §8–§11 end state — **not** §5–§7 (Mobility Service) |
+| `migrate-step4-test-migrate.ps1` | Module 2 §8, or Module 3 §10, per `-Workload` |
+| `migrate-step5-cutover.ps1` | Module 2 §9, or Module 3 §11, per `-Workload` |
+| `migrate-step6-post-migration.ps1` | Module 5 §2–§5 |
+| `enable-lab-traffic.ps1` | Module 0 §6; supplies what Module 1 §6 needs to show anything |
+| `cleanup-lab.ps1` | Teardown. Leaves the Migrate project, key vault and recovery vault |
+| `check-lab-scripts.ps1` | Nothing — maintenance tool |
+
+Nothing automates Module 4: it is analysis, with no lab state to reach.
 
 ## Script responsibilities
 
@@ -103,6 +129,7 @@ The deployment scripts require **new, dedicated resource groups**. They intentio
 | `migrate-step3a-agentless.ps1` | Bridges the lab to the end state of **Module 2** (OnPrem-Web, OnPrem-Linux-Web) in one run |
 | `migrate-step3b-agent-based.ps1` | Bridges the lab to the end state of **Module 3** (OnPrem-SQL, OnPrem-Linux-App). Reaches that state agentlessly — see CHANGES.md |
 | `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |
+| `check-lab-scripts.ps1` | Parses every lab script without running any of them; reports file, line and column for anything that will not parse |
 | `cleanup-lab.ps1` | Preview/confirmed deletion of explicitly named, tagged groups; refuses vaults and locks |
 
 ## Costs and teardown

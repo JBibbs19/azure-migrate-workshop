@@ -48,6 +48,16 @@
 
 .EXAMPLE
     .\migrate-step5-cutover.ps1 -TurnOffSourceVMs "No"
+MODULE COVERAGE
+    The scripts and the modules are run separately. What this completes depends on -Workload:
+
+      -Workload Agentless   Module 2, section 9 (Cutover Planning and Execution).
+      -Workload AgentBased  Module 3, section 11 (Cutover for Stateful Workloads).
+      -Workload All         Both, in one pass. The default.
+
+    Not covered: Module 2 section 10 and Module 3 sections 11.5 to 11.8 - post-cutover
+    validation, connection strings, end-to-end checks. Those confirm the migration actually
+    worked and are the point of the exercise.
 #>
 
 [CmdletBinding()]

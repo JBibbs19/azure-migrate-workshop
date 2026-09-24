@@ -32,6 +32,18 @@ $secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
 $secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
 $password = Read-Host 'Lab password' -AsSecureString
 .\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 0, section 4   Deployment Steps - the whole of it.
+      Module 1, section 2   Prepare the Hyper-V host - applied in full (PHASE 7 of the
+                            host payload). Nothing is left to do there on a script-deployed lab.
+      Module 1, section 3.3 Download and verify the archive - the download and extract are
+                            started during deployment. You still compare the recorded SHA256
+                            against Microsoft's published value.
+
+    Left for you: Module 0 section 5 (verify inside HyperVHost), section 6 (start the sample
+    traffic, optional), and all of Module 1 from section 1 onward.
 #>
 [CmdletBinding()]
 param(
@@ -356,7 +368,7 @@ Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
     'Submit guest setup', 'Guest setup starting',
     'Host networking', 'Downloading and converting images', 'Creating nested VMs', 'Guest first boot',
     'Installing workloads', 'Installing IIS', 'Installing SQL', 'Validating sample applications',
-    'Staging the traffic generator', 'Guest setup complete'
+    'Staging the traffic generator', 'Preparing the host for discovery', 'Guest setup complete'
 )
 if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
 $adminSourceCidrPlain = Resolve-LabAdminSource $adminSourceCidrPlain

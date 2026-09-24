@@ -220,7 +220,8 @@ function Wait-LabManagedSetup {
     # whole 40-80 minute run on one step.
     $phaseNames = @{network='Host networking';images='Downloading and converting images';guests='Creating nested VMs';
         boot='Guest first boot';workloads='Installing workloads';iis='Installing IIS';sql='Installing SQL';
-        validation='Validating sample applications';traffic='Staging the traffic generator'}
+        validation='Validating sample applications';traffic='Staging the traffic generator';
+        hostprep='Preparing the host for discovery'}
     $installNames = Get-LabInstallStageNames
     try {
         while ($clock.Elapsed.TotalSeconds -lt $TimeoutSeconds) {

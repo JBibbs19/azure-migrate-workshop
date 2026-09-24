@@ -89,6 +89,17 @@
 .EXAMPLE
     .\migrate-step3b-agent-based.ps1 -SkipTestMigration
 
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script reaches:
+
+      Module 3, sections 8 to 11  Configure replication, monitor it, test migrate, and cut over
+                                  OnPrem-SQL and OnPrem-Linux-App.
+
+    It does NOT perform Module 3 sections 5 to 7 - deploy the replication appliance, install
+    Mobility Service on the Windows guest, install it on the Linux guest. Those are the method
+    Module 3 teaches, and this script reaches the same end state agentlessly instead. Use it to
+    get to Module 5, not to reproduce a Mobility Service problem.
+
 .NOTES
     Reaches Module 3's END STATE. It does so AGENTLESSLY, not agent-based -- see the note above.
 #>

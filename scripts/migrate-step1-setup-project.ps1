@@ -47,6 +47,17 @@
 
 .EXAMPLE
     .\migrate-step1-setup-project.ps1 -TargetResourceGroup "mycloud-rg" -Location "westus2"
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 1, section 1   Create the project - NOT created here. This script checks for the
+                            project and prints the portal steps when it is absent. A project
+                            made with New-AzMigrateProject has no tool solutions registered and
+                            cannot generate an appliance key. See CHANGES.md section 26.
+
+    It also prepares the target landing zone - resource group, VNet, subnet and NSG - which the
+    modules assume already exists when you reach Module 2 section 5.3 (Configure Target
+    Settings). No module step covers that; it is groundwork the modules expect.
 #>
 
 [CmdletBinding()]
@@ -818,6 +829,19 @@ function Write-StepHeader {
     Write-Host ""
 }
 
+function Write-ManualAction {
+    param([string]$Title, [string[]]$Instructions)
+    Write-Host ""
+    Write-Host ("*" * 70) -ForegroundColor Red
+    Write-Host "  MANUAL ACTION REQUIRED: $Title" -ForegroundColor Red
+    Write-Host ("*" * 70) -ForegroundColor Red
+    foreach ($instruction in $Instructions) {
+        Write-Host "  $instruction" -ForegroundColor White
+    }
+    Write-Host ("*" * 70) -ForegroundColor Red
+    Write-Host ""
+}
+
 function Write-NextSteps {
     param([string[]]$Steps)
     Write-Host ""
@@ -1257,21 +1281,54 @@ try {
         Write-Log "Azure Migrate project '$MigrateProjectName' already exists."
         $migrateProject = $existingProject
     } else {
-        $migrateProject = New-AzMigrateProject `
-            -Name $MigrateProjectName `
-            -ResourceGroupName $SourceResourceGroup `
-            -Location $migrateLocation `
-            -ErrorAction Stop
-
-        Write-Log "Azure Migrate project created successfully."
+        # ----------------------------------------------------------------------------------
+        # WHY THIS IS NOT CREATED HERE
+        #
+        # New-AzMigrateProject creates a bare Microsoft.Migrate/migrateProjects resource and
+        # nothing else. Creating the project in the portal ALSO registers the tool solutions
+        # the project needs -- Servers-Discovery-ServerDiscovery, Servers-Assessment-
+        # ServerAssessment and Servers-Migration-ServerMigration.
+        #
+        # Without those solutions the project exists but is not usable. The portal's
+        # "Generate key" blade reads the discovery solution, finds nothing, and fails in the
+        # browser with:
+        #
+        #   TypeError: Cannot read properties of undefined (reading 'properties')
+        #
+        # There is no error in the Azure activity log, because nothing was ever submitted to
+        # Azure. The same gap breaks migrate-step2's assessment stage, which writes to
+        # Microsoft.Migrate/assessmentProjects/<name> -- a resource created as part of the
+        # tool registration, not by New-AzMigrateProject.
+        #
+        # Creating a project that looks right and cannot be used is worse than not creating
+        # one, so this step stops here and points at the portal, which is what Module 1
+        # section 1 already instructs.
+        # ----------------------------------------------------------------------------------
+        $migrateProject = $null
+        Write-Host ""
+        Write-Warning "Azure Migrate project '$MigrateProjectName' does not exist, and this script will not create it."
+        Write-ManualAction -Title "Create the Azure Migrate project in the portal (Module 1, section 1)" -Instructions @(
+            "1. Azure portal > search for 'Azure Migrate' > Create project."
+            "2. Subscription: the one you are signed in to here."
+            "3. Resource group: $SourceResourceGroup"
+            "4. Project name: $MigrateProjectName"
+            "5. Geography: a permitted project geography for your region ('$migrateLocation' matches this deployment)."
+            "6. Create, and wait for the deployment to finish."
+            "Creating it this way registers the discovery, assessment and migration tools. A project"
+            "created with New-AzMigrateProject has none of them, and the portal's Generate key step"
+            "then fails in the browser with a 'Cannot read properties of undefined' error."
+        )
+        Write-Host "  Rerun this script afterwards, or continue to Module 1 by hand." -ForegroundColor White
     }
 
     # Display project details
-    Write-Host ""
-    Write-Host "  Azure Migrate Project Details:" -ForegroundColor White
-    Write-Host "  Name          : $MigrateProjectName" -ForegroundColor Gray
-    Write-Host "  Resource Group: $SourceResourceGroup" -ForegroundColor Gray
-    Write-Host "  Location      : $migrateLocation" -ForegroundColor Gray
+    if ($migrateProject) {
+        Write-Host ""
+        Write-Host "  Azure Migrate Project Details:" -ForegroundColor White
+        Write-Host "  Name          : $MigrateProjectName" -ForegroundColor Gray
+        Write-Host "  Resource Group: $SourceResourceGroup" -ForegroundColor Gray
+        Write-Host "  Location      : $($migrateProject.Location)" -ForegroundColor Gray
+    }
 
 } catch {
     Write-Host ""

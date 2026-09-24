@@ -50,6 +50,13 @@ $password = Read-Host 'Lab password' -AsSecureString
 C:\AzMigrateLab\enable-lab-traffic.ps1 -AdminPassword $password -IntervalSeconds 30
 .EXAMPLE
 C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 0, section 6   Start the sample business traffic.
+
+    It also supplies what Module 1 section 6 (Interpret the dependency view) needs: without
+    traffic between the four workloads, the dependency map is drawn but stays empty.
 #>
 [CmdletBinding()]
 param(

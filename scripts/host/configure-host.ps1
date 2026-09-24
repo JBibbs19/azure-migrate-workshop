@@ -37,7 +37,7 @@ function Write-Log {
         '^PHASE 3:' { 'guests'; break }; '^PHASE 4:' { 'boot'; break }
         '^PHASE 5:' { 'workloads'; break }; '^--- Configuring OnPrem-Web' { 'iis'; break }
         '^--- Configuring OnPrem-SQL' { 'sql'; break }; '^Validating sample applications' { 'validation'; break }
-        '^PHASE 6:' { 'traffic'; break }
+        '^PHASE 6:' { 'traffic'; break }; '^PHASE 7:' { 'hostprep'; break }
     }
     if ($stage) { Write-Host "LAB_STAGE|$stage" }
 }
@@ -157,6 +157,73 @@ function Set-LabReservation {
 # PHASE 2 — Download OS images
 # =============================================================
 Write-Log "PHASE 2: Downloading OS images..."
+
+# --- Start the Azure Migrate appliance download in the background -------------------
+# The appliance VHD is ~11 GB and is published at a static link, so it does not depend on
+# the project key: only REGISTERING the appliance does. Starting it here means it downloads
+# alongside the OS images instead of costing the instructor a separate wait in Module 1.
+# The store partition is created by deploy-lab.ps1 before this script runs, so it already
+# exists; it is found by its volume label rather than by assuming a drive letter.
+# This is best-effort. Nothing later in this script depends on it, and Module 1 section 3.3
+# still works unchanged if it did not run.
+$applianceJob = $null
+$applianceRoot = $null
+try {
+    $storeVolume = Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue |
+                   Where-Object { $_.DriveLetter } | Select-Object -First 1
+    if (-not $storeVolume) {
+        Write-Log "No ApplianceStore volume found; the appliance VHD will not be pre-staged."
+    } else {
+        $applianceRoot = "$($storeVolume.DriveLetter):\Appliance"
+        New-Item -ItemType Directory -Path $applianceRoot -Force | Out-Null
+        $applianceJob = Start-Job -Name 'LabApplianceDownload' -ScriptBlock {
+            param($Root)
+            $ErrorActionPreference = 'Stop'
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $zip = Join-Path $Root 'MigrateAppl.zip'
+            $done = Join-Path $Root 'download-complete.json'
+            if (Test-Path $done) { return 'ALREADY_PRESENT' }
+            # curl.exe, not Start-BitsTransfer: BITS fails in a non-interactive SYSTEM
+            # context, which is what this script runs as. --continue-at - resumes a partial
+            # file after a drop. This matches what migrate-step2 already does for the same
+            # archive.
+            $partial = "$zip.partial"
+            $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+            if (-not (Test-Path $curl)) { throw 'curl.exe was not found on this host.' }
+            $attempt = 0
+            while ($true) {
+                $attempt++
+                & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 `
+                        --continue-at - --output $partial 'https://aka.ms/migrate/appliance/hyperv'
+                if ($LASTEXITCODE -eq 0) { break }
+                if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
+                Start-Sleep -Seconds 30
+            }
+            Move-Item -LiteralPath $partial -Destination $zip -Force
+            if (-not (Test-Path $zip)) { throw 'The appliance archive did not download.' }
+            $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+            $extract = Join-Path $Root 'Extracted'
+            New-Item -ItemType Directory -Path $extract -Force | Out-Null
+            Expand-Archive -Path $zip -DestinationPath $extract -Force
+            $vhd = Get-ChildItem $extract -Recurse -Include *.vhd,*.vhdx -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if (-not $vhd) { throw 'No VHD was found inside the appliance archive.' }
+            [ordered]@{
+                CompletedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                Archive      = $zip
+                ArchiveSha256 = $hash
+                ExtractedVhd = $vhd.FullName
+                Source       = 'https://aka.ms/migrate/appliance/hyperv'
+            } | ConvertTo-Json | Set-Content $done -Encoding UTF8
+            return "READY|$($vhd.FullName)|$hash"
+        } -ArgumentList $applianceRoot
+        Write-Log "Azure Migrate appliance download started in the background into $applianceRoot."
+    }
+} catch {
+    Write-Log "WARNING: could not start the appliance download ($($_.Exception.Message)). Module 1 section 3.3 still applies."
+    $applianceJob = $null
+}
+
 
 # Install Windows ADK Deployment Tools (provides oscdimg.exe for cloud-init ISO creation)
 $oscdimgPath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
@@ -1143,6 +1210,144 @@ if ([string]::IsNullOrWhiteSpace($trafficScript)) { throw 'The staged lab traffi
     IntervalSeconds  = 20
 } | ConvertTo-Json -Depth 4 | Set-Content $trafficSettingsPath -Encoding UTF8
 Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
+
+# =============================================================
+# PHASE 7 - Prepare this host for Azure Migrate discovery
+# =============================================================
+# This is Module 1 section 2 applied automatically. Microsoft's table of what the
+# host-preparation script does maps to four things the appliance needs, and one it does not:
+#
+#   WinRM service, ports 5985/5986   - the appliance pulls metadata over a CIM session.
+#   PowerShell remoting              - the appliance runs PowerShell on this host over WinRM.
+#   A discovery account              - must be a host administrator, or hold Remote Management
+#                                      Users + Hyper-V Administrators + Performance Monitor Users.
+#   Hyper-V Integration Services     - supplies each guest's OS detail and IP to the host.
+#   CredSSP                          - only for guest disks on remote SMB shares. NOT used here;
+#                                      these disks are local, and CredSSP relays credentials to
+#                                      the host, so it is left off deliberately.
+#
+# Each step is applied directly and idempotently rather than by driving the interactive script,
+# because a Run Command session has no console to answer prompts on. Microsoft's script is then
+# run as a verifier if it can be fetched. The whole phase is best-effort: a failure is recorded
+# and setup continues, because the instructor can complete Module 1 section 2 by hand.
+Write-Log "PHASE 7: Preparing the host for Azure Migrate discovery..."
+
+$hostPrep = [ordered]@{}
+
+try {
+    if ((Get-WindowsFeature -Name Hyper-V -ErrorAction Stop).InstallState -eq 'Installed') {
+        $hostPrep['HyperVRole'] = 'Installed'
+    } else {
+        $hostPrep['HyperVRole'] = 'NOT INSTALLED'
+    }
+} catch { $hostPrep['HyperVRole'] = "Unchecked: $($_.Exception.Message)" }
+
+try {
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop | Out-Null
+    if ((Get-Service WinRM).Status -ne 'Running') { Start-Service WinRM }
+    Set-Service -Name WinRM -StartupType Automatic -ErrorAction SilentlyContinue
+    $hostPrep['PowerShellRemoting'] = 'Enabled'
+} catch { $hostPrep['PowerShellRemoting'] = "Failed: $($_.Exception.Message)" }
+
+# The WinRM firewall openings were already created in PHASE 1, scoped to the nested lab
+# subnet. Microsoft's script opens 5985/5986 without a scope; the existing scoped rules are
+# confirmed here instead so the host is not widened to the whole VNet.
+try {
+    $winrmRule = Get-NetFirewallRule -DisplayName 'Lab host WinRM from nested' -ErrorAction SilentlyContinue
+    $hostPrep['WinRmFirewall'] = if ($winrmRule) { "Allowed from $hostLabRange only (ports 5985, 5986)" } else { 'NOT FOUND - check PHASE 1' }
+} catch { $hostPrep['WinRmFirewall'] = "Unchecked: $($_.Exception.Message)" }
+
+# The lab administrator is already a host administrator, which satisfies Microsoft's option 1.
+# The three groups from option 2 are added as well where they exist, so a least-privilege
+# account works too and the instructor can demonstrate either path.
+try {
+    $added = @()
+    foreach ($group in @('Remote Management Users', 'Hyper-V Administrators', 'Performance Monitor Users')) {
+        if (-not (Get-LocalGroup -Name $group -ErrorAction SilentlyContinue)) { continue }
+        $already = Get-LocalGroupMember -Group $group -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -like "*\$AdminUsername" }
+        if (-not $already) {
+            Add-LocalGroupMember -Group $group -Member $AdminUsername -ErrorAction Stop
+            $added += $group
+        }
+    }
+    $hostPrep['DiscoveryAccount'] = if ($added.Count) { "$AdminUsername added to: $($added -join ', ')" }
+                                    else { "$AdminUsername already held the required group memberships" }
+} catch { $hostPrep['DiscoveryAccount'] = "Failed: $($_.Exception.Message)" }
+
+try {
+    $noIntegration = @()
+    foreach ($vm in $allVMs) {
+        $svc = Get-VMIntegrationService -VMName $vm -ErrorAction SilentlyContinue |
+               Where-Object { $_.Name -in @('Heartbeat', 'Key-Value Pair Exchange') -and -not $_.Enabled }
+        if ($svc) { $noIntegration += $vm }
+    }
+    $hostPrep['IntegrationServices'] = if ($noIntegration.Count) { "Incomplete on: $($noIntegration -join ', ')" }
+                                       else { 'Heartbeat and Key-Value Pair Exchange enabled on all four guests' }
+} catch { $hostPrep['IntegrationServices'] = "Unchecked: $($_.Exception.Message)" }
+
+$hostPrep['CredSSP'] = 'Not enabled (guest disks are local, not on SMB shares)'
+
+# Microsoft's own script, run as a verifier. It is Authenticode-signed, so the signature is
+# checked rather than a published hash, which changes with each release.
+try {
+    $prepScript = "$labRoot\MicrosoftAzureMigrate-Hyper-V.ps1"
+    $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
+    & $curlExe --location --fail --silent --show-error --max-time 300 --output $prepScript 'https://aka.ms/migrate/script/hyperv'
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $prepScript)) { throw "Download failed (curl exit $LASTEXITCODE)." }
+    $sig = Get-AuthenticodeSignature $prepScript
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+        throw "Signature check failed (status $($sig.Status)). The script was not run."
+    }
+    $hostPrep['MicrosoftScriptSha256'] = (Get-FileHash -Path $prepScript -Algorithm SHA256).Hash
+
+    # The script is INTERACTIVE. Its answers cannot be piped in: Read-Host reads the console,
+    # not the pipeline. This session has no console, so the script will either exit early or
+    # block on its first prompt. It is therefore run inside a job with a hard timeout, so a
+    # blocked prompt costs 5 minutes and a log line instead of hanging the deployment. Its
+    # checks still print useful detail before any prompt is reached.
+    # Nothing here is load-bearing: the steps above already configured the host, idempotently.
+    $scriptJob = Start-Job -ScriptBlock {
+        param($Path)
+        try { & $Path 2>&1 | Out-String } catch { "Script raised: $($_.Exception.Message)" }
+    } -ArgumentList $prepScript
+    if (Wait-Job -Job $scriptJob -Timeout 300) {
+        $prepOutput = (Receive-Job -Job $scriptJob) -join "`n"
+        $hostPrep['MicrosoftScript'] = "Ran to completion; output in $labRoot\hyperv-prep-output.txt"
+        Write-Log "Microsoft host-preparation script completed. Output saved to $labRoot\hyperv-prep-output.txt"
+    } else {
+        $prepOutput = ((Receive-Job -Job $scriptJob) -join "`n") +
+                      "`n[stopped after 300s - the script was waiting for console input]"
+        $hostPrep['MicrosoftScript'] = 'Stopped at an interactive prompt (expected; it needs a console)'
+        Write-Log "Microsoft host-preparation script stopped at a prompt, as expected without a console."
+        Write-Log "         The prerequisites above were applied directly, so this is not a failure."
+    }
+    Stop-Job -Job $scriptJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $scriptJob -Force -ErrorAction SilentlyContinue
+    Set-Content -Path "$labRoot\hyperv-prep-output.txt" -Value $prepOutput -Encoding UTF8
+} catch {
+    $hostPrep['MicrosoftScript'] = "Did not run: $($_.Exception.Message)"
+    Write-Log "WARNING: Microsoft's host-preparation script did not run ($($_.Exception.Message))."
+    Write-Log "         The prerequisites above were applied directly, so discovery should still work."
+    Write-Log "         Confirm Module 1 section 2 by hand if the appliance cannot reach this host."
+}
+
+foreach ($item in $hostPrep.GetEnumerator()) { Write-Log "  $($item.Key): $($item.Value)" }
+$hostPrep | ConvertTo-Json -Depth 3 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
+
+# Collect the appliance download started in PHASE 2.
+if ($applianceJob) {
+    Write-Log "Waiting for the Azure Migrate appliance download to finish..."
+    try {
+        $applianceResult = Receive-Job -Job $applianceJob -Wait -ErrorAction Stop
+        Write-Log "Appliance staging: $applianceResult"
+    } catch {
+        Write-Log "WARNING: the appliance download did not complete ($($_.Exception.Message))."
+        Write-Log "         Module 1 section 3.3 downloads it by hand; nothing else is affected."
+    } finally {
+        Remove-Job -Job $applianceJob -Force -ErrorAction SilentlyContinue
+    }
+}
 
 @{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
    TrafficScript = $trafficScriptPath } |

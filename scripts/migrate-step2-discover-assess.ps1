@@ -75,6 +75,21 @@
 
 .EXAMPLE
     .\migrate-step2-discover-assess.ps1 -SourceResourceGroup "my-onprem" -MigrateProjectName "MyProject"
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
+
+      Module 1, section 3.1 Generate the project key - NOT automated. The script stops and
+                            waits: the key is issued interactively in the portal.
+      Module 1, section 3.2 Confirm the appliance store.
+      Module 1, section 3.3 Download and verify the archive (already staged by deploy-lab.ps1).
+      Module 1, section 3.4 Import the VHD as a VM, including the resize to 80 GB.
+      Module 1, section 3.5 First boot - printed as manual steps; the console is yours.
+      Module 1, section 4   Register and discover - printed as manual steps. Registration is a
+                            browser sign-in on the appliance and cannot be driven from here.
+      Module 1, section 5   Create the assessment.
+
+    Not covered: Module 1 section 6 (Interpret the dependency view), which is reading, and
+    section 2 (host preparation), which deploy-lab.ps1 already applied.
 #>
 
 [CmdletBinding()]
@@ -1032,6 +1047,83 @@ if ($ApplianceVMName -notmatch '^[A-Za-z0-9]{1,14}$') {
 }
 
 
+
+# --- Confirm the host is prepared for discovery (Module 1, section 2) --------------------
+# deploy-lab.ps1 applies this in PHASE 7 and records the result, but the scripts and the
+# modules are run separately: this host may have been built another way, or that phase may
+# have failed. Checked here rather than at discovery time, so a problem surfaces before the
+# appliance download rather than after it.
+$hostPrepScript = @'
+$report = [ordered]@{}
+$prepFile = 'C:\AzMigrateLab\hyperv-prep.json'
+$report['RecordedByDeployment'] = if (Test-Path $prepFile) { 'Yes' } else { 'No' }
+try { $report['HyperVRole'] = (Get-WindowsFeature -Name Hyper-V).InstallState } catch { $report['HyperVRole'] = 'Unknown' }
+try {
+    $svc = Get-Service WinRM
+    $report['WinRmService'] = "$($svc.Status)/$($svc.StartType)"
+} catch { $report['WinRmService'] = 'Unknown' }
+try {
+    $listeners = @(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop)
+    $report['PSRemoting'] = if ($listeners.Count) { 'Enabled' } else { 'No listener' }
+} catch { $report['PSRemoting'] = 'Not enabled' }
+$missing = @()
+foreach ($vm in @('OnPrem-Web','OnPrem-SQL','OnPrem-Linux-Web','OnPrem-Linux-App')) {
+    if (-not (Get-VM -Name $vm -ErrorAction SilentlyContinue)) { continue }
+    $svcs = Get-VMIntegrationService -VMName $vm -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -in @('Heartbeat','Key-Value Pair Exchange') -and -not $_.Enabled }
+    if ($svcs) { $missing += $vm }
+}
+$report['IntegrationServices'] = if ($missing.Count) { "Incomplete on $($missing -join ', ')" } else { 'Enabled on all present guests' }
+foreach ($k in $report.Keys) { Write-Output ("HOSTPREP|{0}|{1}" -f $k, $report[$k]) }
+'@
+
+Write-Log "Checking host preparation (Module 1, section 2)..."
+$prepLines = @((Invoke-HostScript -Script $hostPrepScript -Stage 'Check host preparation') -split "`r?`n" |
+               Where-Object { $_ -like 'HOSTPREP|*' })
+$prepState = @{}
+foreach ($line in $prepLines) {
+    $parts = $line.Split([char[]]'|')
+    if ($parts.Count -ge 3) { $prepState[$parts[1]] = ($parts[2..($parts.Count - 1)] -join '|') }
+}
+
+$prepProblems = @()
+if ($prepState['HyperVRole'] -ne 'Installed') { $prepProblems += "Hyper-V role: $($prepState['HyperVRole'])" }
+if ($prepState['WinRmService'] -notlike 'Running*') { $prepProblems += "WinRM service: $($prepState['WinRmService'])" }
+if ($prepState['PSRemoting'] -ne 'Enabled') { $prepProblems += "PowerShell remoting: $($prepState['PSRemoting'])" }
+if ($prepState['IntegrationServices'] -like 'Incomplete*') { $prepProblems += $prepState['IntegrationServices'] }
+
+foreach ($key in @('RecordedByDeployment','HyperVRole','WinRmService','PSRemoting','IntegrationServices')) {
+    Write-Log "  $key : $($prepState[$key])"
+}
+
+if ($prepProblems.Count -eq 0) {
+    Write-Log "Host preparation is in place; Module 1 section 2 needs nothing further."
+} else {
+    Write-Host ''
+    Write-Warning 'This host is not fully prepared for discovery. Without these, the appliance finds nothing:'
+    foreach ($problem in $prepProblems) { Write-Host "    $problem" -ForegroundColor Yellow }
+    if ($prepState['HyperVRole'] -ne 'Installed') {
+        Write-Host '  The Hyper-V role is missing. That cannot be fixed from here and needs a restart.' -ForegroundColor Yellow
+        Write-Host '  Install it by hand, restart the host, and rerun this script.' -ForegroundColor Yellow
+    }
+    if ((Read-LabChoice -Prompt '  Apply WinRM and PowerShell remoting now?') -eq 'Yes') {
+        $fixScript = @'
+Enable-PSRemoting -Force -SkipNetworkProfileCheck | Out-Null
+if ((Get-Service WinRM).Status -ne 'Running') { Start-Service WinRM }
+Set-Service -Name WinRM -StartupType Automatic
+Write-Output 'HOSTPREP_FIXED'
+'@
+        try {
+            $fixOutput = Invoke-HostScript -Script $fixScript -Stage 'Apply host preparation'
+            if ($fixOutput -match 'HOSTPREP_FIXED') { Write-Log 'WinRM and PowerShell remoting applied.' }
+        } catch {
+            Write-Warning "Could not apply host preparation: $($_.Exception.Message)"
+            Write-Warning 'Complete Module 1 section 2 on the host by hand before starting discovery.'
+        }
+    } else {
+        Write-Warning 'Continuing without applying it. Complete Module 1 section 2 before starting discovery.'
+    }
+}
 
 # ================================================================
 # STEP 2: Generate the Project Key (Module 1, section 3.1)
