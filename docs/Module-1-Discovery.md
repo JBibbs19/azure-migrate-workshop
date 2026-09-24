@@ -33,6 +33,8 @@ Work inside HyperVHost in an elevated Windows PowerShell session.
 1. In your Azure Migrate project, open discovery and select **Hyper-V** as the source.
 2. Choose the **VHD** download option rather than the installer script.
 3. Enter the appliance name `MigrateAppl` and generate the project key.
+
+> **Note:** Azure Migrate accepts **letters and digits only, 14 characters or fewer** for this name, which is stricter than what Hyper-V allows for a VM name. This lab uses `MigrateAppl` for both the registration name and the Hyper-V VM name, so there is one name to remember.
 4. **Copy the key and keep it somewhere safe** — you need it during registration, and it must stay out of Git, screenshots and chat.
 
 ### 3.2 — Confirm the appliance store
@@ -110,7 +112,9 @@ Start-VM -Name MigrateAppl
 
 The static MAC follows the same `00-15-5D-00-00-xx` scheme deployment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
 
-Time Synchronization is enabled by default on a new Hyper-V VM, so the line above is usually redundant. It is included because this VM comes from an imported configuration rather than one you created, and an import carries whatever the exported settings held. Confirm it took effect:
+> **Instructor note.** Microsoft's own instructions extract the archive and use **Hyper-V Manager > Import Virtual Machine**, which keeps the VM name held in Microsoft's exported configuration and offers no rename step. This lab instead builds the VM with `New-VM -Name MigrateAppl` around the same `.vhd`, so the name, memory, vCPU count, switch and disk size are all explicit and identical on every learner's host. Either route produces a working appliance. If you import rather than create, the VM will carry Microsoft's name, not `MigrateAppl` — pass that name to `migrate-step2-discover-assess.ps1`, which lists the VMs on the host when the name it was given is absent.
+
+Time Synchronization is enabled by default on a new Hyper-V VM, so the line above is usually redundant. Confirm it took effect:
 
 ```powershell
 # Time sync on MigrateAppl — expect Enabled True and PrimaryStatusDescription OK

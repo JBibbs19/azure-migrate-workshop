@@ -192,8 +192,8 @@ function Wait-LabJob {
     }
 }
 
-# Kept beside its only caller so this file stands alone: deploy-lab.ps1 dot-sources it
-# after common.ps1, and configure-host.ps1 embeds it without common.ps1 at all.
+# Kept beside its only caller so this file stands alone: deploy-lab.ps1 dot-sources it, and
+# configure-host.ps1 embeds this file's helpers into the host payload on their own.
 function Assert-LabManagedRunResult {
     param([Parameter(Mandatory)]$InstanceView)
     if ($InstanceView.ExecutionState -ne 'Succeeded' -or $null -eq $InstanceView.ExitCode -or $InstanceView.ExitCode -ne 0 -or

@@ -165,6 +165,10 @@ function Read-LabParameter {
         [Parameter(Mandatory = $true)][string]$Prompt,
         [AllowNull()][AllowEmptyString()][string]$Value,
         [string]$Example,
+        # A lab-wide setting that is the same for everyone may carry a Default. It is shown in
+        # square brackets and Enter accepts it. Names of resources in someone's own subscription
+        # never carry one -- those must be typed, so nobody inherits another person's value.
+        [string]$Default,
         [ValidateSet('Text', 'ResourceGroup', 'Region', 'ProjectName', 'VMName', 'Cidr', 'Time24h', 'TimeZone', 'Url', 'Sha256', 'Generation', 'Currency', 'OfferCode', 'Workload')]
         [string]$Kind = 'Text'
     )
@@ -173,12 +177,17 @@ function Read-LabParameter {
         if ($supplied) {
             $entry = $Value.Trim()
         } else {
-            $hint = if ($Example) { " (example: $Example)" } else { '' }
+            $hint = if ($Default) { " [$Default]" }
+                    elseif ($Example) { " (example: $Example)" }
+                    else { '' }
             $entry = Read-Host "$Prompt$hint"
             if ($null -ne $entry) { $entry = $entry.Trim() }
             if ([string]::IsNullOrWhiteSpace($entry)) {
-                Microsoft.PowerShell.Utility\Write-Host "  A value for $Name is required." -ForegroundColor Yellow
-                continue
+                if ($Default) { $entry = $Default }
+                else {
+                    Microsoft.PowerShell.Utility\Write-Host "  A value for $Name is required." -ForegroundColor Yellow
+                    continue
+                }
             }
         }
         $problem = Test-LabParameterValue -Kind $Kind -Value $entry
@@ -285,6 +294,257 @@ function Read-LabChoice {
     }
 }
 
+function Get-LabResourceGroupNames {
+    # Every resource group visible in the signed-in subscription.
+    try { return @(Get-AzResourceGroup -ErrorAction Stop | Select-Object -ExpandProperty ResourceGroupName | Sort-Object) }
+    catch { return @() }
+}
+
+function Get-LabVMNames {
+    param([Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    try { return @(Get-AzVM -ResourceGroupName $ResourceGroupName -ErrorAction Stop | Select-Object -ExpandProperty Name | Sort-Object) }
+    catch { return @() }
+}
+
+function Get-LabMigrateProjectNames {
+    # Azure Migrate exposes the project as one of two resource types depending on how it was
+    # created, so both are queried and the results merged.
+    param([Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $names = @()
+    foreach ($type in @('Microsoft.Migrate/migrateProjects', 'Microsoft.Migrate/assessmentProjects')) {
+        try {
+            $names += @(Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceType $type -ErrorAction Stop |
+                        Select-Object -ExpandProperty Name)
+        } catch { }
+    }
+    return @($names | Select-Object -Unique | Sort-Object)
+}
+
+function Get-LabSimilarResourceGroupNames {
+    # Names in the CURRENT subscription that resemble what was typed, to expose a typo without
+    # printing the whole subscription.
+    param([Parameter(Mandatory = $true)][string]$Entry)
+    $all = @()
+    try { $all = @(Get-AzResourceGroup -ErrorAction Stop | Select-Object -ExpandProperty ResourceGroupName) } catch { return @() }
+    if ($all.Count -eq 0) { return @() }
+    $needle = $Entry.ToLowerInvariant()
+    $parts = @($needle -split '[-_.]' | Where-Object { $_.Length -ge 3 })
+    $close = @($all | Where-Object {
+        $candidate = $_.ToLowerInvariant()
+        if ($candidate -like "*$needle*" -or $needle -like "*$candidate*") { return $true }
+        foreach ($part in $parts) { if ($candidate -like "*$part*") { return $true } }
+        return $false
+    })
+    return @($close | Select-Object -First 8)
+}
+
+function Find-LabResourceGroupSubscription {
+    <#
+      Looks for a resource group of this name in the account's other enabled subscriptions.
+      The Azure portal spans every subscription, so a group that is plainly visible there can
+      still be absent from the one this session is pointed at. This names that situation
+      instead of leaving it as "not found". The original context is restored either way.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [AllowNull()][AllowEmptyString()][string]$CurrentSubscriptionId
+    )
+    $found = @()
+    $subscriptions = @()
+    try { $subscriptions = @(Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }) }
+    catch { return @() }
+
+    $others = @($subscriptions | Where-Object { $_.Id -ne $CurrentSubscriptionId })
+    if ($others.Count -eq 0) { return @() }
+
+    Microsoft.PowerShell.Utility\Write-Host "  Checking $($others.Count) other subscription(s) on this account..." -ForegroundColor Cyan
+    try {
+        foreach ($subscription in $others) {
+            try {
+                $null = Set-AzContext -SubscriptionId $subscription.Id -ErrorAction Stop
+                if (Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue) { $found += $subscription }
+            } catch { }
+        }
+    } finally {
+        if (-not [string]::IsNullOrWhiteSpace($CurrentSubscriptionId)) {
+            try { $null = Set-AzContext -SubscriptionId $CurrentSubscriptionId -ErrorAction Stop } catch { }
+        }
+    }
+    return @($found)
+}
+
+function Read-LabResourceGroupName {
+    <#
+      Asks for a resource group by name rather than listing every group in the subscription: a
+      training subscription can hold a great many, and the learner is expected to know which one
+      is theirs. The name is checked against Azure and re-asked when it is not there, so a typo
+      is caught at the prompt instead of part way through the run.
+
+      -AllowNew is for a group this script will CREATE. A name that does not exist is then
+      offered for creation rather than refused.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [AllowNull()][AllowEmptyString()][string]$Value,
+        [string]$Example,
+        [switch]$AllowNew,
+        [string]$MissingHelp = ''
+    )
+
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    $entry = $Value
+
+    while ($true) {
+        $entry = Read-LabParameter -Name $Name -Prompt $Prompt -Value $entry -Kind ResourceGroup -Example $Example
+
+        $group = $null
+        try { $group = Get-AzResourceGroup -Name $entry -ErrorAction Stop } catch { $group = $null }
+
+        if ($group) {
+            if ($AllowNew) {
+                Microsoft.PowerShell.Utility\Write-Host "  '$entry' exists in this subscription and will be used as it stands." -ForegroundColor Green
+            }
+            $script:LabResourceGroupCreate = $false
+            return $entry
+        }
+
+        if ($AllowNew) {
+            Microsoft.PowerShell.Utility\Write-Host "  '$entry' does not exist in this subscription." -ForegroundColor Yellow
+            if ((Read-LabChoice -Prompt "  Create '$entry'?") -eq 'Yes') {
+                $script:LabResourceGroupCreate = $true
+                return $entry
+            }
+            $entry = ''
+            continue
+        }
+
+        # Not found. Say WHERE it was looked for: the portal spans every subscription, so a group
+        # that is obviously there can still be missing from the one this session points at.
+        $subscriptionLabel = if ($script:LabSubscriptionName) { "subscription '$script:LabSubscriptionName'" } else { 'the current subscription' }
+        $help = if ($MissingHelp) { " $MissingHelp" } else { '' }
+        Microsoft.PowerShell.Utility\Write-Host ''
+        Microsoft.PowerShell.Utility\Write-Host "  '$entry' was not found in $subscriptionLabel.$help" -ForegroundColor Yellow
+
+        $similar = Get-LabSimilarResourceGroupNames -Entry $entry
+        if ($similar.Count -gt 0) {
+            Microsoft.PowerShell.Utility\Write-Host '  Similar names in this subscription:' -ForegroundColor White
+            foreach ($candidate in $similar) { Microsoft.PowerShell.Utility\Write-Host "    $candidate" -ForegroundColor White }
+        }
+
+        if ((Read-LabChoice -Prompt '  Look for this group in your other subscriptions?') -eq 'Yes') {
+            $elsewhere = Find-LabResourceGroupSubscription -ResourceGroupName $entry -CurrentSubscriptionId $script:LabSubscriptionId
+            if ($elsewhere.Count -gt 0) {
+                Microsoft.PowerShell.Utility\Write-Host "  '$entry' exists in: $(@($elsewhere | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Green
+                $target = $elsewhere[0]
+                if ($elsewhere.Count -gt 1) {
+                    $pickedName = Select-LabFromList -Name 'Subscription' -Prompt 'Subscription to switch to' -Options @($elsewhere | ForEach-Object { $_.Name })
+                    $target = @($elsewhere | Where-Object { $_.Name -eq $pickedName })[0]
+                }
+                if ((Read-LabChoice -Prompt "  Switch this session to '$($target.Name)'?") -eq 'Yes') {
+                    $switched = Set-AzContext -SubscriptionId $target.Id -ErrorAction Stop
+                    $script:LabSubscriptionId = [string]$switched.Subscription.Id
+                    $script:LabSubscriptionName = [string]$switched.Subscription.Name
+                    $script:LabMaskedValues = @($script:LabSubscriptionId)
+                    if ($switched.Tenant -and $switched.Tenant.Id) { $script:LabMaskedValues += [string]$switched.Tenant.Id }
+                    Write-Host "  Now working in $script:LabSubscriptionName  $(Format-LabSubscriptionId $script:LabSubscriptionId)" -ForegroundColor Green
+                    # $entry is left as it is, so the loop re-checks the same name against the
+                    # subscription just switched to without asking for it again.
+                    continue
+                }
+            } else {
+                Microsoft.PowerShell.Utility\Write-Host "  '$entry' was not found in any other subscription on this account either." -ForegroundColor Yellow
+            }
+        }
+
+        if ($supplied) { throw "-$Name '$entry' was not found in $subscriptionLabel.$help" }
+        $entry = ''
+    }
+}
+
+function Select-LabFromList {
+    <#
+      Picks a value that already exists in the subscription instead of asking the learner to
+      recall its name. A value passed on the command line is still honoured; it is only checked
+      against what was found. With -AllowNew the list gains a final entry for typing a name that
+      does not exist yet, which is how a resource this script is about to CREATE is named.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [AllowNull()][AllowEmptyString()][string]$Value,
+        [AllowEmptyCollection()][string[]]$Options = @(),
+        [string]$Example,
+        [ValidateSet('Text', 'ResourceGroup', 'Region', 'ProjectName', 'VMName', 'Cidr', 'Time24h', 'TimeZone', 'Url', 'Sha256', 'Generation', 'Currency', 'OfferCode', 'Workload')]
+        [string]$Kind = 'Text',
+        [switch]$AllowNew,
+        [string]$NewLabel = 'Enter a different name',
+        [string]$EmptyHelp = 'Check that you are signed in to the right subscription (Get-AzContext) and that the earlier steps completed.'
+    )
+
+    $choices = @($Options | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $trimmed = $Value.Trim()
+        $match = @($choices | Where-Object { $_ -eq $trimmed })
+        if ($match.Count -gt 0) { return $match[0] }
+        if ($AllowNew -or $choices.Count -eq 0) {
+            return Read-LabParameter -Name $Name -Prompt $Prompt -Value $trimmed -Kind $Kind -Example $Example
+        }
+        throw "-$Name '$trimmed' was not found in this subscription. Found: $($choices -join ', ')"
+    }
+
+    if ($choices.Count -eq 0) {
+        if (-not $AllowNew) { throw "No candidates for $Name were found in this subscription. $EmptyHelp" }
+        return Read-LabParameter -Name $Name -Prompt $Prompt -Kind $Kind -Example $Example
+    }
+
+    if ($choices.Count -eq 1 -and -not $AllowNew) {
+        Microsoft.PowerShell.Utility\Write-Host "  $Prompt" -ForegroundColor Cyan
+        Microsoft.PowerShell.Utility\Write-Host "    $($choices[0])  (only match in this subscription)" -ForegroundColor Green
+        return $choices[0]
+    }
+
+    $limit = if ($AllowNew) { $choices.Count + 1 } else { $choices.Count }
+    while ($true) {
+        Microsoft.PowerShell.Utility\Write-Host ''
+        Microsoft.PowerShell.Utility\Write-Host "  $Prompt" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $choices.Count; $i++) {
+            Microsoft.PowerShell.Utility\Write-Host ("    [{0}] {1}" -f ($i + 1), $choices[$i]) -ForegroundColor White
+        }
+        if ($AllowNew) {
+            Microsoft.PowerShell.Utility\Write-Host ("    [{0}] {1}" -f $limit, $NewLabel) -ForegroundColor White
+        }
+        $entry = Read-Host "  Select 1-$limit"
+        $number = 0
+        if ([int]::TryParse(([string]$entry).Trim(), [ref]$number)) {
+            if ($number -ge 1 -and $number -le $choices.Count) { return $choices[$number - 1] }
+            if ($AllowNew -and $number -eq $limit) {
+                return Read-LabParameter -Name $Name -Prompt $Prompt -Kind $Kind -Example $Example
+            }
+        }
+        Microsoft.PowerShell.Utility\Write-Host "  Enter one of the numbers listed." -ForegroundColor Yellow
+    }
+}
+
+function Resolve-LabLocation {
+    # A resource group already carries a region, so the region is read from it rather than asked.
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        return Read-LabParameter -Name 'Location' -Prompt 'Azure region' -Value $Value -Kind Region
+    }
+    $location = $null
+    try { $location = (Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction Stop).Location } catch { $location = $null }
+    if (-not [string]::IsNullOrWhiteSpace($location)) {
+        Microsoft.PowerShell.Utility\Write-Host "  Region: $location  (from resource group $ResourceGroupName)" -ForegroundColor Green
+        return $location
+    }
+    return Read-LabParameter -Name 'Location' -Prompt 'Azure region' -Kind Region -Example 'eastus'
+}
+
 function Test-LabCidrContains {
     # True when $Inner (for example a subnet) lies entirely inside $Outer (for example its VNet).
     param([Parameter(Mandatory = $true)][string]$Outer, [Parameter(Mandatory = $true)][string]$Inner)
@@ -305,23 +565,172 @@ function Test-LabCidrContains {
     return ($i[0] -ge $o[0] -and $i[1] -le $o[1])
 }
 
+function Get-LabErrorLogPath {
+    # Next to the script when that is writable, otherwise the temp folder.
+    param([AllowNull()][AllowEmptyString()][string]$ScriptPath)
+    $name = if ([string]::IsNullOrWhiteSpace($ScriptPath)) { 'migrate-step' }
+            else { [IO.Path]::GetFileNameWithoutExtension($ScriptPath) }
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $folders = @()
+    if (-not [string]::IsNullOrWhiteSpace($ScriptPath)) { $folders += (Split-Path -Parent $ScriptPath) }
+    $folders += [IO.Path]::GetTempPath()
+    foreach ($folder in $folders) {
+        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+        try {
+            $probe = Join-Path $folder ".lab-write-test-$stamp"
+            Set-Content -Path $probe -Value 'x' -ErrorAction Stop
+            Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
+            return (Join-Path $folder "$name-error-$stamp.log")
+        } catch { }
+    }
+    return (Join-Path ([IO.Path]::GetTempPath()) "$name-error-$stamp.log")
+}
+
+function Save-LabErrorReport {
+    <#
+      Writes the whole failure to a file so it survives a console window that closes on exit.
+      Everything written here goes through the same masking as the screen output.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [AllowNull()][AllowEmptyString()][string]$ScriptPath
+    )
+    try {
+        $path = Get-LabErrorLogPath -ScriptPath $ScriptPath
+        $invocation = $ErrorRecord.InvocationInfo
+        $report = @(
+            "Time        : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+            "Script      : $ScriptPath"
+            "PowerShell  : $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
+            "OS          : $([Environment]::OSVersion.VersionString)"
+            ''
+            "Message     : $([string]$ErrorRecord.Exception.Message)"
+            "Type        : $($ErrorRecord.Exception.GetType().FullName)"
+            "Category    : $($ErrorRecord.CategoryInfo.Category)"
+            "FullyQualifiedErrorId : $($ErrorRecord.FullyQualifiedErrorId)"
+            ''
+            "Failed at   : line $($invocation.ScriptLineNumber), column $($invocation.OffsetInLine)"
+            "Statement   : $(([string]$invocation.Line).Trim())"
+            ''
+            'Stack trace :'
+            ([string]$ErrorRecord.ScriptStackTrace)
+            ''
+            'Loaded Az modules :'
+        )
+        $report += @(Get-Module -Name 'Az.*' | ForEach-Object { "  $($_.Name) $($_.Version)" })
+        if (-not (Get-Module -Name 'Az.*')) { $report += '  (none loaded)' }
+
+        Set-Content -Path $path -Value (Protect-LabObject $report) -Encoding UTF8 -ErrorAction Stop
+        Microsoft.PowerShell.Utility\Write-Host ''
+        Microsoft.PowerShell.Utility\Write-Host "A full error report was saved to:" -ForegroundColor Yellow
+        Microsoft.PowerShell.Utility\Write-Host "  $path" -ForegroundColor Yellow
+    } catch {
+        Microsoft.PowerShell.Utility\Write-Host ''
+        Microsoft.PowerShell.Utility\Write-Host "  (the error report could not be saved: $($_.Exception.Message))" -ForegroundColor DarkYellow
+    }
+}
+
+function Wait-LabBeforeExit {
+    # A console started by double-click or "Run with PowerShell" closes the instant the script
+    # exits, taking the error with it. This holds it open. Set LAB_NO_PAUSE=1 for unattended runs.
+    if ($env:LAB_NO_PAUSE -eq '1') { return }
+    try {
+        if (-not [Environment]::UserInteractive) { return }
+        Microsoft.PowerShell.Utility\Write-Host ''
+        $null = Read-Host 'Press Enter to close this window'
+    } catch { }
+}
+
 function Get-LabAzContext {
-    # Uses the Azure account you are already signed in with (Connect-AzAccount). Only the first
-    # five characters of the subscription ID are shown, so you can confirm it is the workshop
-    # subscription without exposing the full ID.
-    if (-not (Get-Command -Name Get-AzContext -ErrorAction SilentlyContinue)) {
-        throw 'The Az PowerShell modules are required: Install-Module Az -Scope CurrentUser'
+    <#
+      Makes this script runnable on its own from the scripts folder, the same way deploy-lab.ps1
+      is. It loads the Az modules it needs, signs in when the session has no sign-in, and picks a
+      subscription when none is current. A subscription already selected with Set-AzContext is
+      used as it stands, so an existing session is never second-guessed.
+    #>
+    param(
+        [string[]]$RequiredModules = @('Az.Accounts', 'Az.Resources'),
+        [AllowEmptyCollection()][string[]]$OptionalModules = @()
+    )
+
+    # Modules are loaded best-effort. A module that will not import is reported but is not fatal
+    # on its own: what matters is whether the cmdlets are callable, and PowerShell also
+    # auto-loads them on first use. Only a genuinely missing cmdlet stops the run.
+    $failed = @()
+    foreach ($module in @($RequiredModules + $OptionalModules)) {
+        if ([string]::IsNullOrWhiteSpace($module)) { continue }
+        if (Get-Module -Name $module) { continue }
+        try { Import-Module $module -ErrorAction Stop } catch { $failed += $module }
     }
-    $context = Get-AzContext -ErrorAction SilentlyContinue
-    if (-not $context -or -not $context.Account -or -not $context.Subscription -or [string]::IsNullOrWhiteSpace($context.Subscription.Id)) {
-        throw 'No Azure sign-in found. Run Connect-AzAccount, select the workshop subscription with Set-AzContext -Subscription <name or ID>, then rerun this script.'
+
+    $absent = @()
+    foreach ($command in @('Get-AzContext', 'Get-AzResourceGroup')) {
+        if (-not (Get-Command -Name $command -ErrorAction SilentlyContinue)) { $absent += $command }
     }
+    if ($absent.Count -gt 0) {
+        throw "The Az PowerShell modules are not available in this session: $($absent -join ', ') could not be found. Install them with: Install-Module Az -Scope CurrentUser -Repository PSGallery"
+    }
+    if ($failed.Count -gt 0) {
+        Write-Warning "These modules did not import: $($failed -join ', '). Continuing, because the Azure cmdlets this script needs are present. A step that needs a missing module will say so."
+    }
+
+    $context = $null
+    try { $context = Get-AzContext -ErrorAction Stop } catch { $context = $null }
+
+    if (-not $context -or -not $context.Account) {
+        Microsoft.PowerShell.Utility\Write-Host ''
+        Microsoft.PowerShell.Utility\Write-Host 'This session is not signed in to Azure. Starting sign-in...' -ForegroundColor Cyan
+        try { $null = Connect-AzAccount -ErrorAction Stop }
+        catch { throw "Azure sign-in did not complete: $($_.Exception.Message)" }
+        $context = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $context -or -not $context.Account) {
+            throw 'Azure sign-in did not complete. Run Connect-AzAccount, then rerun this script.'
+        }
+    }
+
+    if (-not $context.Subscription -or [string]::IsNullOrWhiteSpace($context.Subscription.Id)) {
+        $subscriptions = @()
+        try { $subscriptions = @(Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }) }
+        catch { $subscriptions = @() }
+        if ($subscriptions.Count -eq 0) {
+            throw "The signed-in account $($context.Account.Id) has no enabled subscriptions. Sign in with the account that holds the workshop subscription."
+        }
+        $chosen = $null
+        if ($subscriptions.Count -eq 1) {
+            $chosen = $subscriptions[0]
+            Microsoft.PowerShell.Utility\Write-Host "  Subscription: $($chosen.Name)  (the only enabled one on this account)" -ForegroundColor Green
+        } else {
+            $picked = Select-LabFromList -Name 'Subscription' -Prompt 'Azure subscription to work in' -Options @($subscriptions | ForEach-Object { $_.Name })
+            $chosen = @($subscriptions | Where-Object { $_.Name -eq $picked })[0]
+        }
+        $context = Set-AzContext -SubscriptionId $chosen.Id -ErrorAction Stop
+    }
+
     $script:LabSubscriptionId = [string]$context.Subscription.Id
+    $script:LabSubscriptionName = [string]$context.Subscription.Name
     $script:LabAccountId = [string]$context.Account.Id
     $script:LabMaskedValues = @($script:LabSubscriptionId)
     if ($context.Tenant -and $context.Tenant.Id) { $script:LabMaskedValues += [string]$context.Tenant.Id }
     Write-Host "Azure account : $script:LabAccountId" -ForegroundColor Cyan
-    Write-Host "Subscription  : $(Format-LabSubscriptionId $script:LabSubscriptionId)" -ForegroundColor Cyan
+    Write-Host "Subscription  : $($context.Subscription.Name)  $(Format-LabSubscriptionId $script:LabSubscriptionId)" -ForegroundColor Cyan
+
+    # An account with more than one subscription can easily be pointed at the wrong one: the
+    # portal shows every subscription, so a resource group that is plainly there can be absent
+    # from this session. The chance to switch is offered here rather than after a failed lookup.
+    $available = @()
+    try { $available = @(Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }) } catch { $available = @() }
+    if ($available.Count -gt 1) {
+        if ((Read-LabChoice -Prompt "Work in '$script:LabSubscriptionName'?") -eq 'No') {
+            $pickedName = Select-LabFromList -Name 'Subscription' -Prompt 'Azure subscription to work in' -Options @($available | ForEach-Object { $_.Name })
+            $target = @($available | Where-Object { $_.Name -eq $pickedName })[0]
+            $context = Set-AzContext -SubscriptionId $target.Id -ErrorAction Stop
+            $script:LabSubscriptionId = [string]$context.Subscription.Id
+            $script:LabSubscriptionName = [string]$context.Subscription.Name
+            $script:LabMaskedValues = @($script:LabSubscriptionId)
+            if ($context.Tenant -and $context.Tenant.Id) { $script:LabMaskedValues += [string]$context.Tenant.Id }
+            Write-Host "Subscription  : $script:LabSubscriptionName  $(Format-LabSubscriptionId $script:LabSubscriptionId)" -ForegroundColor Cyan
+        }
+    }
     return $context
 }
 
@@ -371,15 +780,24 @@ function Assert-LabResources {
 }
 
 # endregion Lab helpers
-trap { Write-LabTerminatingError $_; exit 1 }
+# $PSCommandPath is the full path of this script; it is captured so the error report can be
+# written beside it. The trap records the failure and holds the window open, because a console
+# launched by double-click closes the moment the script exits.
+$script:LabScriptPath = $PSCommandPath
+trap {
+    Write-LabTerminatingError $_
+    Save-LabErrorReport -ErrorRecord $_ -ScriptPath $script:LabScriptPath
+    Wait-LabBeforeExit
+    exit 1
+}
 
-$context = Get-LabAzContext
+$context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Monitor', 'Az.OperationalInsights', 'Az.RecoveryServices')
 
 Write-Host ""
-Write-Host "Enter the values for your lab environment (examples are hints only; Enter does not accept them)." -ForegroundColor Cyan
-$SourceResourceGroup = Read-LabParameter -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Kind ResourceGroup -Prompt 'Source resource group (contains HyperVHost)' -Example 'rg-ces-source-01'
-$TargetResourceGroup = Read-LabParameter -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Kind ResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01'
-$Location = Read-LabParameter -Name 'Location' -Value $Location -Kind Region -Prompt 'Azure target region chosen in Module 0' -Example 'eastus'
+Write-Host "Enter the values for your lab environment. A value in [brackets] is a lab default and Enter accepts it; an (example: ...) is a hint only and must be typed." -ForegroundColor Cyan
+$SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
+$TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
+$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
 $AutoShutdownTime = Read-LabParameter -Name 'AutoShutdownTime' -Value $AutoShutdownTime -Kind Time24h -Prompt 'Daily auto-shutdown time, 24-hour HHmm' -Example '1900'
 $AutoShutdownTimezone = Read-LabParameter -Name 'AutoShutdownTimezone' -Value $AutoShutdownTimezone -Kind TimeZone -Prompt 'Auto-shutdown time zone (Windows time zone ID)' -Example 'Eastern Standard Time'
 $BackupRetentionDays = Read-LabNumber -Name 'BackupRetentionDays' -Prompt 'Backup retention in days' -Value $BackupRetentionDays -Supplied:($PSBoundParameters.ContainsKey('BackupRetentionDays')) -Minimum 7 -Maximum 9999 -Example '30'
