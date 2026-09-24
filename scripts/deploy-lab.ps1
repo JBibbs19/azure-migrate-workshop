@@ -61,6 +61,99 @@ param(
     [string]$HealthPath
 )
 $ErrorActionPreference = 'Stop'
+
+# ================================================================
+# Launch resilience
+# ================================================================
+# This script must run the same way whether it is started from an open PowerShell window or
+# by right-clicking it and choosing "Run with PowerShell". The two differ in ways that matter:
+#
+#   Right-click  - a brand new process, and the WINDOW CLOSES the moment the script ends,
+#                  taking any error with it.
+#   Open window  - the window survives, but the session may already be carrying state from a
+#                  script run earlier in it.
+#
+# Both are handled here.
+
+# A migrate-step script defines its own Write-Host and Write-Warning so it can mask
+# subscription IDs on a shared screen. Those are functions, and a function can outlive the
+# script that defined it. When one does, it shadows the real cmdlet for everything that runs
+# afterwards in that window - including this script, which then fails on a Write-Host line
+# with "$script:LabMaskedValues cannot be retrieved". Any such shadow is removed here, so an
+# open window behaves exactly like a fresh one.
+foreach ($shadowed in @('Write-Host', 'Write-Warning', 'Write-Error')) {
+    try {
+        if (Test-Path "Function:\$shadowed") {
+            Remove-Item "Function:\$shadowed" -Force -ErrorAction SilentlyContinue
+            Microsoft.PowerShell.Utility\Write-Host "Removed a leftover $shadowed override from this session." -ForegroundColor DarkGray
+        }
+    } catch { }
+}
+
+$script:LabScriptPath = $PSCommandPath
+
+function Save-LabDeploymentError {
+    # Writes the failure to a file so it survives a window that closes on exit. Any GUID is
+    # redacted: the subscription ID is deliberately never written to disk by this script.
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    try {
+        $name = if ($script:LabScriptPath) { [IO.Path]::GetFileNameWithoutExtension($script:LabScriptPath) } else { 'deploy-lab' }
+        $folder = if ($script:LabScriptPath) { Split-Path -Parent $script:LabScriptPath } else { [IO.Path]::GetTempPath() }
+        $path = Join-Path $folder ("{0}-error-{1}.log" -f $name, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        try { Set-Content -Path (Join-Path $folder '.lab-write-test') -Value 'x' -ErrorAction Stop
+              Remove-Item (Join-Path $folder '.lab-write-test') -Force -ErrorAction SilentlyContinue }
+        catch { $path = Join-Path ([IO.Path]::GetTempPath()) (Split-Path -Leaf $path) }
+
+        $invocation = $ErrorRecord.InvocationInfo
+        $report = @(
+            "Time       : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+            "Script     : $script:LabScriptPath"
+            "PowerShell : $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
+            "OS         : $([Environment]::OSVersion.VersionString)"
+            ''
+            "Message    : $([string]$ErrorRecord.Exception.Message)"
+            "Type       : $($ErrorRecord.Exception.GetType().FullName)"
+            "ErrorId    : $($ErrorRecord.FullyQualifiedErrorId)"
+            ''
+            "Failed at  : line $($invocation.ScriptLineNumber), column $($invocation.OffsetInLine)"
+            "Statement  : $(([string]$invocation.Line).Trim())"
+            ''
+            'Stack trace:'
+            ([string]$ErrorRecord.ScriptStackTrace)
+            ''
+            'Loaded Az modules:'
+        ) + @(Get-Module -Name 'Az.*' | ForEach-Object { "  $($_.Name) $($_.Version)" })
+
+        $redacted = $report | ForEach-Object {
+            [regex]::Replace([string]$_, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', '<guid-redacted>')
+        }
+        Set-Content -Path $path -Value $redacted -Encoding UTF8 -ErrorAction Stop
+        Write-Host ''
+        Write-Host 'A full error report was saved to:' -ForegroundColor Yellow
+        Write-Host "  $path" -ForegroundColor Yellow
+    } catch {
+        Write-Host ''
+        Write-Host "  (the error report could not be saved: $($_.Exception.Message))" -ForegroundColor DarkYellow
+    }
+}
+
+function Wait-LabBeforeExit {
+    # Holds a right-click window open. Set LAB_NO_PAUSE=1 for an unattended run.
+    if ($env:LAB_NO_PAUSE -eq '1') { return }
+    try {
+        if (-not [Environment]::UserInteractive) { return }
+        Write-Host ''
+        $null = Read-Host 'Press Enter to close this window'
+    } catch { }
+}
+
+trap {
+    Write-Host ''
+    Write-Host ($_ | Out-String) -ForegroundColor Red
+    Save-LabDeploymentError -ErrorRecord $_
+    Wait-LabBeforeExit
+    exit 1
+}
 # ================================================================
 # Shared helpers, formerly scripts/common.ps1
 # ================================================================
@@ -411,9 +504,6 @@ $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
 $windowsImages = Get-LabWindowsImages -Location $Location
 $guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
 Write-Host "Selected host: $($hostSku.Name), $($hostSku.Cores) enabled vCPUs, $($hostSku.MemoryGB) GiB RAM. Confirm this series supports nested virtualization with Standard security before running deployment."
-$storeDriveLabel = if ($ApplianceStoreDriveLetter) { "$($ApplianceStoreDriveLetter.ToUpperInvariant()):" } else { 'the first unassigned drive letter, normally E:' }
-Write-Host "Appliance store: a $ApplianceStoreSizeGB GB partition is created as $storeDriveLabel for the Module 1 appliance VHD."
-Write-Host 'Guest disks are fixed, not dynamic: 140 GB is allocated in full during setup, which adds roughly 20-40 minutes to deployment.'
 foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Storage','Microsoft.Migrate','Microsoft.OffAzure','Microsoft.RecoveryServices','Microsoft.KeyVault')) {
     $state = @(Get-AzResourceProvider -ProviderNamespace $provider)[0].RegistrationState
     if ($state -ne 'Registered') { throw "Register $provider first with Register-AzResourceProvider and wait until Registered." }
@@ -638,3 +728,7 @@ Write-Output 'APPLIANCE_STORE_READY'
         Write-Warning 'ConfigureWorkshop is retained for failure diagnostics. Inspect its instance view and remove it after it has stopped.'
     }
 }
+
+# A right-click window closes on success just as fast as on failure. The summary above is the
+# point of the run, so hold it until it has been read.
+Wait-LabBeforeExit
