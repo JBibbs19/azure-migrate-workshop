@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Step 4: Perform test migration to validate before cutover.
 
@@ -111,7 +111,15 @@ function Protect-LabText {
     param([AllowNull()][AllowEmptyString()][string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $result = $Text
-    foreach ($secret in $script:LabMaskedValues) {
+    # Resolved with Get-Variable rather than read directly. These console proxies shadow the
+    # real Write-Host, and a shadowed function can outlive the script that defined it - a
+    # dot-sourced run, or an interrupted one. If it is then called from another script that
+    # sets Set-StrictMode, reading an unset $script:LabMaskedValues raises a terminating error
+    # and kills that script at a Write-Host line, which is not this function's business.
+    # Get-Variable with -ErrorAction SilentlyContinue returns nothing instead, so the worst
+    # case is text that was never masked rather than a script that stops.
+    $secrets = @(Get-Variable -Name 'LabMaskedValues' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)
+    foreach ($secret in $secrets) {
         if (-not [string]::IsNullOrWhiteSpace($secret)) {
             $result = [regex]::Replace($result, [regex]::Escape($secret), (Format-LabSubscriptionId $secret),
                 [Text.RegularExpressions.RegexOptions]::IgnoreCase)

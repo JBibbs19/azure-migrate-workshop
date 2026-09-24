@@ -43,6 +43,31 @@ if ($files.Count -eq 0) {
     return
 }
 
+function Test-LabEncoding {
+    <#
+      Windows PowerShell 5.1 reads a file with no byte-order mark using the ANSI code page,
+      not UTF-8. A script that contains a box-drawing character, an emoji or a curly quote and
+      has no BOM is therefore read as mojibake, and the mangled bytes break string terminators
+      and brackets. The failure looks like a syntax error in a line that is perfectly valid.
+
+      Rule applied here:
+        - non-ASCII present and a BOM present  -> fine
+        - non-ASCII present and no BOM         -> reported
+        - pure ASCII                           -> fine either way
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0) { return $null }
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $nonAscii = 0
+    foreach ($byte in $bytes) { if ($byte -gt 127) { $nonAscii++ } }
+    if ($nonAscii -gt 0 -and -not $hasBom) {
+        return "$nonAscii non-ASCII byte(s) and no UTF-8 byte-order mark. Windows PowerShell 5.1 will misread this file. Save it as 'UTF-8 with BOM', or replace the characters with ASCII."
+    }
+    return $null
+}
+
 function Test-LabMissingHelper {
     <#
       Finds *-Lab* helper functions called in a file but never defined in it. Each migrate-step
@@ -59,10 +84,40 @@ function Test-LabMissingHelper {
         $defined[$definition.Name] = $true
     }
 
+    # A helper can legitimately live in another file. Two cases in this lab:
+    #   1. deploy-lab.ps1 dot-sources health.ps1, so health.ps1's functions are in scope.
+    #   2. host/configure-host.ps1 is a PAYLOAD. It never runs from disk: deploy-lab.ps1
+    #      splices health.ps1 into it at the '# LAB_HEALTH_HELPERS' marker and sends the
+    #      result to the host. On disk it looks like it is missing those helpers; at run
+    #      time it is not.
+    # Both are resolved here, otherwise this check reports faults that are not faults -
+    # and a checker that cries wolf gets ignored, which is worse than no checker.
+    $folder = Split-Path -Parent $Path
+    $companions = @()
+    foreach ($dotSource in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq 'Dot' }, $true)) {
+        $target = $dotSource.CommandElements[0].Extent.Text -replace '["'']', ''
+        $leaf = Split-Path -Leaf ($target -replace '\$PSScriptRoot', '')
+        if ($leaf) { $companions += $leaf }
+    }
+    if ((Get-Content -LiteralPath $Path -Raw) -match 'LAB_HEALTH_HELPERS') { $companions += 'health.ps1' }
+
+    foreach ($companion in ($companions | Select-Object -Unique)) {
+        $companionPath = Join-Path $folder $companion
+        if (-not (Test-Path -LiteralPath $companionPath)) {
+            $companionPath = Join-Path (Split-Path -Parent $folder) $companion
+            if (-not (Test-Path -LiteralPath $companionPath)) { continue }
+        }
+        $companionAst = [System.Management.Automation.Language.Parser]::ParseFile($companionPath, [ref]$null, [ref]$null)
+        if (-not $companionAst) { continue }
+        foreach ($definition in $companionAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+            $defined[$definition.Name] = $true
+        }
+    }
+
     $missing = @{}
     foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
         $name = $command.GetCommandName()
-        if (-not $name -or $name -notlike '*-Lab*') { continue }
+        if (-not $name -or ($name -notlike '*-Lab*' -and $name -notlike '*-LabProgress')) { continue }
         if ($defined.ContainsKey($name)) { continue }
         if (-not $missing.ContainsKey($name)) { $missing[$name] = $command.Extent.StartLineNumber }
     }
@@ -131,6 +186,13 @@ foreach ($file in $files) {
         # parser accepts it happily, so it is checked separately here.
         $earlyCalls = Test-LabFunctionUsedBeforeDefined -Path $file.FullName
         $missingHelpers = Test-LabMissingHelper -Path $file.FullName
+        $encodingProblem = Test-LabEncoding -Path $file.FullName
+        if ($encodingProblem) {
+            $totalErrors++
+            Write-Host ("  FAIL  {0}" -f $file.Name) -ForegroundColor Red
+            Write-Host ("        encoding: {0}" -f $encodingProblem) -ForegroundColor Red
+            continue
+        }
         if ($earlyCalls.Count -eq 0 -and $missingHelpers.Count -eq 0) {
             Write-Host ("  OK    {0}" -f $file.Name) -ForegroundColor Green
             continue

@@ -79,7 +79,7 @@ $windowsVhdSasUrl = $WindowsVhdSasUrl
 New-Item -ItemType Directory -Path $vhdPath -Force | Out-Null
 
 # =============================================================
-# PHASE 1 — Virtual networking
+# PHASE 1 - Virtual networking
 # =============================================================
 if ($labResuming) {
     Write-Log 'Resuming an incomplete run. Existing switch, NAT, DHCP scope and base images are reused; partially built guests are rebuilt.'
@@ -154,7 +154,7 @@ function Set-LabReservation {
 }
 
 # =============================================================
-# PHASE 2 — Download OS images
+# PHASE 2 - Download OS images
 # =============================================================
 Write-Log "PHASE 2: Downloading OS images..."
 
@@ -342,7 +342,7 @@ if (-not (Test-Path $windowsBaseVhd)) {
 }
 
 # =============================================================
-# PHASE 3 — Create guest VMs
+# PHASE 3 - Create guest VMs
 # =============================================================
 Write-Log "PHASE 3: Creating guest VMs..."
 
@@ -856,7 +856,7 @@ Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -Memo
 Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraRunCmdYaml $nodeJsRunCmdYaml
 
 # =============================================================
-# PHASE 4 — Start VMs and wait for boot
+# PHASE 4 - Start VMs and wait for boot
 # =============================================================
 Write-Log "PHASE 4: Starting guest VMs..."
 
@@ -903,7 +903,7 @@ function Wait-ForGuestVM {
 }
 
 # =============================================================
-# PHASE 5 — Install workloads
+# PHASE 5 - Install workloads
 # =============================================================
 Write-Log "PHASE 5: Installing workloads..."
 
