@@ -25,6 +25,36 @@ Files in this folder replace their counterparts in a checkout. Everything not li
 
 ---
 
+## Which script completes which module step
+
+The scripts and the modules are run separately, so this is the map between them. It also appears
+in `README.md`, and each script carries its own copy in a `MODULE COVERAGE` block that
+`Get-Help <script> -Full` will show.
+
+| Script | Completes |
+|---|---|
+| `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract, **only when you opt in** |
+| `migrate-step1-setup-project.ps1` | **Optional.** Module 2 §4.1 (target landing zone) as an instructor shortcut. Module 1 §1 is **not** automated — it prints the portal steps |
+| `migrate-step2-discover-assess.ps1` | Module 1 §3.2–3.5, §4 and §5. §3.1 (project key) stops for you |
+| `migrate-step3-replicate.ps1` | Module 2 §5–§7, or Module 3 §8–§9, per `-Workload` |
+| `migrate-step3a-agentless.ps1` | Module 2 §5–§9 in one run |
+| `migrate-step3b-agent-based.ps1` | Module 3 §8–§11 end state — **not** §5–§7 (Mobility Service) |
+| `migrate-step4-test-migrate.ps1` | Module 2 §8, or Module 3 §10, per `-Workload` |
+| `migrate-step5-cutover.ps1` | Module 2 §9, or Module 3 §11, per `-Workload` |
+| `migrate-step6-post-migration.ps1` | Module 5 §2–§5 |
+| `enable-lab-traffic.ps1` | Module 0 §6; supplies what Module 1 §6 needs to show anything |
+| `cleanup-lab.ps1` | Teardown. Leaves the Migrate project, key vault, recovery vault and Entra app |
+| `check-lab-scripts.ps1` | Nothing — maintenance tool |
+
+**The student runs `deploy-lab.ps1` and nothing else.** Everything after it is done in the Azure
+portal and on the host, which is how a real discovery and migration is driven. The `migrate-step`
+scripts exist so an instructor can move a lab to the state a given module expects — for
+troubleshooting alongside a student, or to recover a session that ran out of time.
+
+Nothing automates Module 4: it is analysis, with no lab state to reach.
+
+---
+
 ## 1. The lab builds four workload VMs, not five
 
 Pull 12 created a fifth nested VM, `MigrateAppl`, as a bare Windows Server guest that Module 1 then
@@ -1170,6 +1200,363 @@ restart, so it says so and tells you to rerun.
 The guest group memberships are not re-checked here, because this script does not know which
 account the lab was built with. `hyperv-prep.json` records it, which is why its presence is the
 first line of the report.
+
+## 31. Three faults found by the first real check-lab-scripts run
+
+### Encoding: four scripts could never parse in Windows PowerShell 5.1
+
+`migrate-step3`, `step4`, `step5` and `step6` contain box-drawing characters, emoji and curly
+quotes - 6, 785, 1509 and 1467 non-ASCII bytes - and had **no UTF-8 byte-order mark**. Windows
+PowerShell 5.1 reads a BOM-less file using the ANSI code page, so those bytes arrive as
+mojibake and break string terminators and brackets. The reported faults were things like
+`Unexpected token '€" * 50)` on a line that reads `Write-Host ("─" * 50)`.
+
+**This is pre-existing, not a regression.** The originals in adjustments2 have no BOM either, so
+these four have never been runnable in Windows PowerShell. They would work in PowerShell 7,
+which assumes UTF-8.
+
+Fixed by rule, not case by case:
+
+- **Directly-invoked scripts** keep their characters and gain a UTF-8 BOM. Nothing about their
+  output changes.
+- **Payload files** must stay pure ASCII. `host/configure-host.ps1` is spliced into a Run
+  Command string and never runs from disk, so a BOM would land inside the payload. Its five
+  em-dashes - all in comments - are now hyphens.
+
+`check-lab-scripts.ps1` now applies the same rule, so this cannot ship again.
+
+### A leaked console proxy could kill an unrelated script
+
+```
+Write-Host : The variable '$script:LabMaskedValues' cannot be retrieved because it has not been set.
+At ...\deploy-lab.ps1:286 char:9
+```
+
+`deploy-lab.ps1` does not define `Write-Host` and does not use `$script:LabMaskedValues`. The
+`Write-Host` that ran was the masking proxy from a migrate-step script, still present in the
+session. Its defining scope was gone, so `$script:` resolved to `deploy-lab.ps1`'s scope, where
+the variable does not exist - and `deploy-lab.ps1` sets `Set-StrictMode`, which turns reading an
+unset variable into a terminating error. A console-formatting helper killed a deployment.
+
+`Protect-LabText` now resolves the list with
+`Get-Variable -Name LabMaskedValues -Scope Script -ValueOnly -ErrorAction SilentlyContinue`
+instead of reading it directly. Unset yields nothing rather than an error, so the worst case is
+text that was never masked rather than a script that stops. Applied in all eight scripts that
+carry the proxy.
+
+**Immediate workaround if you hit it again:** open a fresh PowerShell window. The proxy only
+exists in a session where a migrate-step script has already run.
+
+### The checker was crying wolf
+
+It reported `Initialize-LabProgress`, `Write-LabHealth`, `Wait-LabJob`, `Wait-LabManagedSetup`
+and `Complete-LabProgress` as undefined in `deploy-lab.ps1`, and four similar in
+`configure-host.ps1`. All nine are false. `deploy-lab.ps1` dot-sources `health.ps1`;
+`configure-host.ps1` has `health.ps1` spliced into it at the `# LAB_HEALTH_HELPERS` marker
+before it is sent to the host.
+
+The checker now follows both: it walks dot-source commands and resolves the target, and it
+treats the splice marker as importing `health.ps1`. A checker that reports faults which are not
+faults gets ignored, which is worse than no checker.
+
+## 32. deploy-lab.ps1 launches the same way from a window or a right-click
+
+**The two banner lines about the appliance store and the fixed guest disks are removed.** The
+detail is in Module 0; it does not need restating every run.
+
+**Launch resilience.** A right-click *Run with PowerShell* starts a fresh process whose window
+closes the moment the script ends - taking the summary, or the error, with it. An open window
+keeps its output but may be carrying state from an earlier script. Both are now handled:
+
+- A `trap` writes the failure to `deploy-lab-error-<timestamp>.log` beside the script, with
+  every GUID redacted, then holds the window open. The subscription ID is never written to disk.
+- The window is held open on **success** too. The summary is the point of the run.
+- `LAB_NO_PAUSE=1` skips the pause for an unattended run.
+
+**The cause of the reported failure, fixed at the other end as well.** Running from an open
+window was not itself the problem - the problem was what the window was carrying. A
+`migrate-step` script defines `Write-Host` and `Write-Warning` as functions so it can mask
+subscription IDs on a shared screen, and a function can outlive the script that defined it.
+`deploy-lab.ps1` now removes any such override at startup, so an open window behaves exactly
+like a fresh one. Section 31 fixed the same fault from the other side, by making the override
+unable to throw; this stops it being present at all.
+
+**Launch flexibility of the other scripts, assessed.**
+
+| Script | Right-click | Notes |
+|---|---|---|
+| `deploy-lab.ps1` | Yes, fully | Prompts for everything, pauses on both paths, clears session overrides |
+| `migrate-step1` to `step6`, `step3a`, `step3b` | Yes | Trap, error report and pause already present. Built for an open window - they are interactive throughout - but they do not lose their output on a right-click |
+| `check-lab-scripts.ps1` | Yes | Already pauses before closing |
+| `cleanup-lab.ps1` | Not recommended | No pause: a right-click window closes on what it deleted. Run it from a window |
+| `enable-lab-traffic.ps1` | N/A | Runs on the Hyper-V host, from a session there |
+
+The follow-up scripts were left as they are, per the priority given: deploy must be flexible,
+the rest need not be.
+
+## 33. cleanup-lab.ps1 reports what it deleted, and what it cannot
+
+**Launch resilience, matching deploy-lab.** A `trap`, an error report beside the script with
+GUIDs redacted, a pause on every exit path, and removal of any leftover console override from
+an earlier `migrate-step` run. Losing the record of what a destructive script did is the one
+outcome worth designing against, and a right-click window used to close on exactly that.
+
+**It now shows its work.** Before deleting it reads the group and prints every resource,
+grouped by type and named, so the confirmation is informed rather than blind. After deleting it
+confirms the group is actually gone - the cmdlet returning is not the same as the group being
+removed - and prints the summary of what went with it.
+
+**Two failure modes are caught before the confirmation, not after.**
+
+- A `CanNotDelete` lock makes `Remove-AzResourceGroup` fail partway. The script now names the
+  locks and stops, rather than asking you to confirm a deletion that cannot succeed.
+- A Recovery Services vault holding protected items refuses deletion and takes the whole group
+  with it. Any vault in the group is named as a warning before you confirm.
+
+**A closing list of what a resource group deletion does not reach.** Printed on every exit path,
+including a cancelled run, because each item causes a confusing failure in a LATER lab:
+
+1. The other lab resource group - there are two, and this script takes one at a time.
+2. **Soft-deleted key vaults.** Generating the appliance project key creates one; deleting its
+   resource group only soft-deletes it and the name stays reserved. A later lab reusing the
+   project name then cannot generate a key, for no visible reason. The check and purge commands
+   are printed.
+3. **Recovery Services vaults still holding backup items.**
+4. **The Microsoft Entra app registration** created during appliance registration. It is not an
+   Azure resource; no resource group deletion touches it.
+5. **The Azure Migrate project** if it sits outside the groups deleted - an orphaned project
+   keeps its name and its appliance can still be registered and calling home.
+
+**A README correction.** The script table claimed cleanup-lab did "preview/confirmed deletion of
+explicitly named, tagged groups; refuses vaults and locks". It did none of that: no tag check,
+no lock check, no vault check, no preview - just `Remove-AzResourceGroup -Force` after a
+yes/no prompt. The entry now describes what the script does, and the lock check it claimed now
+genuinely exists.
+
+**A help-block fix.** The `MODULE COVERAGE` block had been inserted immediately after the last
+`.EXAMPLE` with no directive between them, so `Get-Help` ran the example text into it. It now
+sits under `.NOTES`.
+
+## 34. The static appliance link served a stale image
+
+A deployment log showed the pre-staged appliance extracting to:
+
+```
+E:\Appliance\Extracted\AzureMigrateAppliance_v3.20.09.25\Virtual Hard Disks\
+  14393.0.amd64fre.rs1_release.160715-1616_server_serverdatacentereval_en-us.vhd
+```
+
+Two independent signals say that is not the current appliance:
+
+- **The archive hash did not match.** The run computed
+  `40AA037987771794428B1C6EBEE2614B092E6D69AC56D48A2BBC75EEEF86C99A`. Microsoft publishes
+  `AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24` for the current Hyper-V VHD
+  zip. This alone is decisive.
+- **The VHD is Windows Server 2016.** Build 14393, `rs1_release.160715`, evaluation edition. The
+  appliance support matrix requires Windows Server 2022 or 2025 and states that Server 2016 or
+  earlier is blocked. A 2016 evaluation image is also long past its 180-day licence.
+
+`https://aka.ms/migrate/appliance/hyperv` is therefore not a safe substitute for the download
+link the portal serves. That link came from the unmodified lab's `migrate-step2`; section 28
+propagated it into the deployment pre-stage, which is what surfaced it.
+
+### Two holes this exposed
+
+**migrate-step2 skipped verification for a pre-staged appliance.** The worker began:
+
+```powershell
+$vhd = Find-ApplianceVhd
+if ($vhd) { Set-Status 'Ready' $vhd.FullName; exit 0 }
+```
+
+An already-extracted VHD was accepted and imported without ever reaching the SHA256 check
+below it. Worse, the check could not have run anyway: `deploy-lab.ps1` stages the archive as
+`MigrateAppl.zip` while the worker only looked for `AzureMigrateAppliance.zip`, so the staged
+archive was invisible to it. The two faults together guaranteed an unverified import.
+
+Both fixed. Any `.zip` in the appliance folder is now a verification candidate, and an extracted
+VHD is verified against the published hash before it is accepted. A mismatch refuses the import
+and leaves the files in place for inspection. Where no archive remains to check against, the
+script says so and requires either a fresh download or an explicit `-ApplianceSha256 SKIP`.
+
+**The pre-stage now checks what it downloaded.** The published VHD carries a Windows build in
+its file name, so that is read back: below 20348 (Windows Server 2022) the phase logs a warning
+naming the problem and telling the instructor not to import it. `download-complete.json` now
+records `WindowsBuild`, `LooksCurrent` and `Verified: false`.
+
+This is a heuristic on a file name, not proof. The published hash is what decides, and it is
+still the instructor who compares it.
+
+**Module 1 section 3.3 rewritten** to say plainly that the staged copy comes from the static
+link, is unverified, has been seen to be stale, and must be checked against Microsoft's published
+SHA256 before import - with the project's own download link as the correct source.
+
+### Not a fault: the host-preparation warning
+
+The same log showed:
+
+```
+WARNING: Microsoft's host-preparation script did not run (The Wait-Job cmdlet cannot finish
+working, because one or more jobs are blocked waiting for user interaction...)
+```
+
+That is the designed outcome. The script is interactive and the deployment session has no
+console, so it blocks at its first prompt and the job is stopped. The five prerequisites were
+applied directly beforehand, and the log confirms all five: Hyper-V role installed, remoting
+enabled, WinRM scoped to 192.168.0.0/24, the discovery account in all three groups, integration
+services on all four guests, CredSSP correctly left off. The script's own SHA256 also matched
+Microsoft's published value, so the signature and hash checks both did their job.
+
+## 35. The appliance VHD download is now opt-in, and Module 1 speaks to the learner
+
+### Staging the appliance is a choice, defaulting to No
+
+`deploy-lab.ps1` gained `-IncludeApplianceVhd` (`Yes`/`No`). When it is not supplied the script
+asks once and takes **No** on Enter. No is right for a learner: nothing in Module 0 needs the
+appliance, it is an ~11 GB download, and Module 1 fetches it from the Azure Migrate project at
+the point it is required - which is also the link that serves the current build. Yes is for an
+instructor staging a host before a session.
+
+`-ApplianceVhdSha256` accompanies it. When supplied, the staged archive is checked against that
+value on the host and **deleted** on a mismatch, rather than left looking ready to import. When
+omitted the archive is staged unverified and both the log and `download-complete.json` say so.
+Section 34's build-number heuristic still runs either way.
+
+`configure-host.ps1` takes both as parameters and skips the download entirely when the answer is
+No, logging that Module 1 will fetch it.
+
+### Module 1 section 2 rewritten for the learner
+
+The section described what this lab's deployment had done. It now describes what the **learner's
+own organisation** will face, because that is the transferable part:
+
+- The direct `aka.ms` script link is gone; the Hyper-V discovery tutorial is still cited, with
+  the instruction to verify the script's signature before running it anywhere.
+- The per-prompt table keeps the explanation of each item and what fails without it, and drops
+  the Yes/No answer column - the answers belong to a run of the script, not to understanding it.
+- CredSSP is described as what it is and when an estate needs it, rather than carrying a warning
+  not to enable it here. The warning made sense when the table told you how to answer.
+- Added: the observation that on a real estate this is usually where a migration stalls, because
+  the host belongs to someone else and the discovery account needs an owner.
+
+Section 2.2 is now "In this environment" and opens with the point rather than the mechanism:
+our lab environment anticipates the needs the Hyper-V script would account for. The two details
+that genuinely differ - WinRM scoped to the nested subnet, and the lab user's group memberships -
+are kept, with the scoping framed as a habit worth carrying into an engagement. The explanation
+of why the script is not driven directly is gone; it is implementation, and it is in section 27.
+
+### Section 3.3 trimmed
+
+The staged-appliance warning is now a short note: the archive may already be there, it is a
+convenience rather than a verification, check it against Microsoft's published value, and where
+to go if it does not match. The observed stale-build detail moved here, to section 34, with a
+pointer for instructors. A learner needs the hash-check habit, not the incident history.
+
+### Module 0 aligned with the same principle
+
+The student now runs **one** script. The `migrate-step1-setup-project.ps1` call was removed from
+the Step 4 block and became an instructor note: the target landing zone is still needed before
+Module 2's target settings, and can be built in the portal with the students or staged
+beforehand. Step 4 also tells the learner to answer **No** to the appliance staging question.
+
+Two "deployment did X" phrasings in Module 1 became "our lab environment", one of them gaining
+the more useful instruction to confirm those packages exist in their own estate before relying
+on dependency analysis.
+
+## 36. Module 0 claimed NAT gateways that no script creates
+
+Two statements in Module 0 described infrastructure that does not exist:
+
+- *"The target and test NAT gateways created by `migrate-step1-setup-project.ps1` provide
+  explicit outbound access without public IPs on the workload VMs."*
+- A cost-table row reading *"Two NAT gateways and their public IPs"*.
+
+`NatGateway` and `New-AzPublicIpAddress` appear **nowhere** in `migrate-step1-setup-project.ps1`,
+`migrate-step4-test-migrate.ps1` or `deploy-lab.ps1`. No NAT gateway is created by anything in
+this lab.
+
+This mattered twice. It overstated the cost estimate, and - worse - it asserted that the thing
+the paragraph's own linked article warns about had been handled. Migrated VMs in the target
+subnet reach the internet only through Azure's **default outbound access**, which Microsoft is
+retiring. A reader who trusted that paragraph would carry the assumption into a design.
+
+Both corrected. The paragraph now states plainly that the lab's landing zone has no NAT gateway
+and no firewall, and that a real one needs explicit egress. The cost row reads "None - one host
+public IP only".
+
+**The landing zone is also now enumerated** in the Module 0 instructor note, because it is easy
+to assume that creating the Azure Migrate project creates it. It does not, and the two are
+different planes:
+
+- The **project** - with the key vault, storage account and recovery services vault that
+  generating the appliance key creates - is the *management* plane, and lives in the source
+  resource group.
+- The **landing zone** is the *destination network*: a target resource group, a VNet
+  (`10.1.0.0/16`), a subnet (`default`, `10.1.0.0/24`) and an NSG with inbound RDP, SSH, HTTP,
+  HTTPS and Node.js rules. Plus registration of `Microsoft.OffAzure`, `Microsoft.Migrate` and
+  `Microsoft.KeyVault`.
+
+The note also records which parts Module 2's replication wizard can create inline - the resource
+group and the storage account - and which it cannot: the **VNet and subnet are selected from a
+dropdown and must already exist**. That is the constraint that decides whether the landing zone
+has to be staged in advance.
+
+## 37. Module 2 builds the landing zone; step1 becomes optional
+
+Module 2 assumed a target resource group and VNet already existed, and nothing student-facing
+created them. Section 36 established why that gap was easy to miss - the Azure Migrate project
+creates resources, so it feels like the destination was set up too, when the project is the
+management side and the landing zone is the destination network.
+
+**New Module 2 section 4.1, "Build the target landing zone."** Portal steps for the resource
+group, the VNet (`10.1.0.0/16` with a `default` subnet on `10.1.0.0/24`), and the NSG with its
+five inbound rules, associated to the subnet. The existing 4.1 to 4.3 shifted to 4.2 to 4.4;
+nothing cross-referenced them.
+
+It teaches three things the scripted version cannot:
+
+- **Why the address space differs.** Source is `10.0.0.0/16` and the test network in section 8 is
+  `10.2.0.0/16`. Overlapping ranges are a common reason a real cutover cannot complete - the VM
+  migrates, then cannot reach anything on-premises.
+- **That the NSG rules are deliberately open.** Source `Any` on RDP and SSH is a lab decision,
+  stated as one, with the note that Module 5 section 4 has them tighten exactly these rules.
+- **That there is no egress.** No NAT gateway, no firewall, and default outbound access is being
+  retired.
+
+It also states plainly why the wizard cannot cover it: section 5.3 creates a resource group and
+storage account inline, but the VNet and subnet are dropdown selections.
+
+**`migrate-step1-setup-project.ps1` is unchanged functionally** and is now described as optional
+- the instructor's shortcut to the same landing zone, identical names, ranges and rules. Its
+`MODULE COVERAGE` block, the README row and the Module 0 instructor note all now say so, and
+point at Module 2 section 4.1 as the place the decisions are actually taught.
+
+**The script-to-module map moved to the top of this file**, above the numbered sections, since it
+is reference rather than change history. It remains in `README.md` and in each script's own
+`MODULE COVERAGE` block.
+
+## 38. The lab password is entered once for the traffic mesh
+
+`enable-lab-traffic.ps1` asked for the lab password, and then ssh asked again for each Linux
+guest, so the same password was typed three or four times in one run.
+
+The script's own prompt is worth keeping - the alternative is deployment writing the lab password
+to disk on the host, which is a poor trade for saving one entry. What has changed is that the
+password entered there is now handed to ssh instead of being asked for again.
+
+Windows has no `sshpass`. OpenSSH's own mechanism is `SSH_ASKPASS`: ssh runs a named program and
+reads the password from its output. `SSH_ASKPASS_REQUIRE=force`, which makes ssh use it even when
+a console is attached, arrived in **OpenSSH 8.4** - so `ssh -V` is parsed and the interactive
+prompt is kept, with a line saying why, on anything older. Windows Server 2022 shipped 8.1
+originally, so that fallback is a real path, not a formality.
+
+**The helper holds no secret.** It is a two-line `.cmd` that echoes an environment variable. The
+variable is set immediately before the ssh call and removed in the `finally` immediately after,
+so the password stays in process memory - where `$passwordText` already held it - and is never
+written to disk. The helper file itself is deleted when the script ends.
+
+`sudo` does not add a prompt: the guests are provisioned with `sudo: ALL=(ALL) NOPASSWD:ALL`,
+which was verified rather than assumed.
 
 ## Not changed
 

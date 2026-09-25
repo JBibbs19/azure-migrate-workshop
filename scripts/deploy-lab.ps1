@@ -25,6 +25,17 @@ appliance. The guest VHDs never touch it, so the appliance has capacity of its o
 Drive letter for that partition inside HyperVHost. Leave it unset and deployment uses the
 first unassigned letter, which is E: on the default host size: C: is the OS disk and D: is
 the virtual DVD drive. Supply a letter only to override that choice.
+.PARAMETER IncludeApplianceVhd
+Whether to download the Azure Migrate appliance VHD onto the host during deployment. Default No,
+which is the right answer for a learner: it is an ~11 GB download that is not needed to finish
+Module 0, and Module 1 fetches the appliance from the Azure Migrate project when it is actually
+required - which is also the link that serves the current build. Yes is for an instructor
+preparing a host before a session. When not supplied, the script asks once and defaults to No.
+.PARAMETER ApplianceVhdSha256
+The SHA256 Microsoft publishes for the Hyper-V appliance archive. Used only with
+-IncludeApplianceVhd Yes. When supplied the staged archive is checked against it and deleted on
+a mismatch. When omitted the archive is staged unverified and must be checked before it is
+imported.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
@@ -58,6 +69,8 @@ param(
     [ValidateRange(30,240)][int]$GuestSetupTimeoutMinutes = 240,
     [ValidateRange(60,400)][int]$ApplianceStoreSizeGB = 100,
     [ValidatePattern('^([D-Zd-z])?$')][string]$ApplianceStoreDriveLetter = '',
+    [ValidateSet('Yes','No')][string]$IncludeApplianceVhd,
+    [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$ApplianceVhdSha256 = '',
     [string]$HealthPath
 )
 $ErrorActionPreference = 'Stop'
@@ -500,6 +513,34 @@ if ($existingGroup) {
     $resumeDeployment = $true
     Write-Host "Resuming the incomplete deployment in '$ResourceGroupName'. Existing resources are reused; unfinished guests are rebuilt."
 }
+# The appliance VHD is an ~11 GB download and nothing in Module 0 needs it. A learner should
+# skip it: Module 1 downloads the appliance from the Azure Migrate project when it is required,
+# and the project's own link is the one that serves the current build. An instructor staging a
+# host before a session usually does want it. Asked once, defaulting to No.
+if (-not $PSBoundParameters.ContainsKey('IncludeApplianceVhd')) {
+    $IncludeApplianceVhd = 'No'
+    if ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
+        Write-Host ''
+        Write-Host 'Stage the Azure Migrate appliance VHD on the host during deployment?' -ForegroundColor Cyan
+        Write-Host '  No   Recommended. Module 1 downloads it from your project when it is needed.' -ForegroundColor Gray
+        Write-Host '  Yes  For an instructor preparing a host ahead of a session. Adds an ~11 GB download.' -ForegroundColor Gray
+        if ((Read-Host 'Yes or No [No]') -match '^(?i)y') { $IncludeApplianceVhd = 'Yes' }
+    }
+}
+if ($IncludeApplianceVhd -eq 'Yes') {
+    if (-not $ApplianceVhdSha256 -and [Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
+        Write-Host ''
+        Write-Host 'Paste the SHA256 Microsoft publishes for the Hyper-V appliance archive, or press' -ForegroundColor Cyan
+        Write-Host 'Enter to stage it unverified and check it yourself before importing.' -ForegroundColor Gray
+        $ApplianceVhdSha256 = (Read-Host 'Published SHA256 (optional)').Trim()
+        if ($ApplianceVhdSha256 -and $ApplianceVhdSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw 'That is not a 64-character SHA256 value. Rerun and paste the published hash, or leave it blank.'
+        }
+    }
+    if ($ApplianceVhdSha256) { Write-Host 'The staged appliance archive will be checked against the hash supplied.' }
+    else { Write-Host 'The appliance archive will be staged UNVERIFIED. Check it against the published SHA256 before importing it (Module 1, section 3.3).' -ForegroundColor Yellow }
+}
+
 $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
 $windowsImages = Get-LabWindowsImages -Location $Location
 $guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
@@ -676,7 +717,11 @@ Write-Output 'APPLIANCE_STORE_READY'
     }
     $diskCreated = $true
     $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName -Access Read -DurationInSecond 18000
-    $parameters = @(@{ Name = 'AdminUsername'; Value = $AdminUsername })
+    $parameters = @(
+        @{ Name = 'AdminUsername';       Value = $AdminUsername }
+        @{ Name = 'IncludeApplianceVhd'; Value = $IncludeApplianceVhd }
+        @{ Name = 'ApplianceVhdSha256';  Value = $ApplianceVhdSha256 }
+    )
     $protected = @(@{ Name = 'AdminPassword'; Value = $passwordPlain }, @{ Name = 'WindowsVhdSasUrl'; Value = $access.AccessSAS })
     # A Run Command left by an interrupted attempt would block the new submission.
     $staleRun = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction SilentlyContinue

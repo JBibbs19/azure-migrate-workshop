@@ -14,58 +14,57 @@ Portal labels vary as Azure Migrate rolls out its newer **Explore / Decide / Exe
 
 ## 2. Prepare the Hyper-V host
 
-Deployment already applied everything in this section to `HyperVHost`, so on a script-deployed
-lab there is nothing to do here. Read it anyway — the appliance cannot see a single guest
-unless these five things are true, and this is where a real engagement most often stalls.
+Azure Migrate does not reach into a Hyper-V guest to discover it. It talks to the **host**, and
+the host reports on the virtual machines it runs. So before anything is discovered, the host has
+to be willing to answer — and in most organisations it is not, because nothing has ever needed
+to ask it.
 
-To confirm what deployment did, on the host:
+Whatever your organisation runs Hyper-V for — a few line-of-business servers in a branch office,
+a consolidated rack in a datacentre, a lab that quietly became production — the appliance needs
+the same five things to be true of every host holding workloads you intend to migrate. Microsoft
+publishes a host-preparation script that configures them, described in its
+[Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v).
+The script is signed; verify its signature or published hash before running it anywhere.
+
+### 2.1 — What the script configures, and why the appliance needs it
+
+| Step | What it does, and what fails without it |
+|---|---|
+| **WinRM service, ports 5985/5986** | Starts WinRM and opens its ports. The appliance collects each guest's configuration and performance metadata over a **CIM session** to the host. This is the channel that carries it — closed, nothing is discovered at all. |
+| **PowerShell version check** | Confirms PowerShell 4.0 or later. The appliance issues PowerShell to the host, and older versions lack the cmdlets it calls. A check, not a change. |
+| **Discovery account** | The appliance signs in to the host as this account. It must be a host administrator, or belong to **Remote Management Users** (permits the WinRM connection), **Hyper-V Administrators** (permits reading VM inventory and configuration) and **Performance Monitor Users** (permits reading the counters that drive right-sizing). In a domain environment this is usually the account you will be asked to justify to whoever owns the host. |
+| **PowerShell remoting** | Runs `Enable-PSRemoting`. WinRM being open is not enough on its own — remoting is what lets the appliance *execute* on the host rather than merely connect to it. |
+| **Hyper-V Integration Services** | Checks they are enabled on every guest. They supply each guest's **OS detail and IP address** to the host. Without them a guest is still discovered, but its operating system column stays blank and the assessment cannot size it properly. |
+| **CredSSP delegation** | Needed only where guest disks sit on **remote SMB shares**, because the host must then pass your credentials onward to the file server. It is the one item on this list that is not a default, and it relays credentials — so it is worth knowing whether your estate actually requires it before enabling it anywhere. |
+
+Run against a real estate, this script is often the point where a migration stalls: the host is
+someone else's responsibility, the changes need a change record, and the discovery account needs
+an owner. Budget for that conversation.
+
+### 2.2 — In this environment
+
+Our lab environment anticipates the needs that the Hyper-V script would account for, so there is
+nothing to run here. Two details are worth knowing, because they differ from what the script
+would have done:
+
+1. **WinRM is open to the nested lab subnet only.** The script opens 5985 and 5986 without a
+   scope. Here they are restricted to `192.168.0.0/24`, which is the only network the appliance
+   ever connects from. Narrower is better, and it is worth carrying that habit into a real
+   engagement.
+2. **The lab user is already a host administrator**, which satisfies the account requirement on
+   its own. It is also a member of the three groups above, so the least-privilege path can be
+   examined without rebuilding anything.
+
+To see the state of each item:
 
 ```powershell
 # Host preparation summary — expect PowerShellRemoting Enabled and CredSSP not enabled
 Get-Content C:\AzMigrateLab\hyperv-prep.json | ConvertFrom-Json
 ```
 
-### 2.1 — What the preparation script configures, and why
-
-Microsoft publishes a host-preparation script at
-[aka.ms/migrate/script/hyperv](https://aka.ms/migrate/script/hyperv), described in the
-[Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v).
-It is Authenticode-signed; verify the signature or the published SHA256 before running it. It
-prompts for each item below.
-
-| Prompt | Answer | What it does, and why the appliance needs it |
-|---|---|---|
-| **WinRM service and ports 5985/5986** | **Yes** | Starts WinRM and opens its ports. The appliance collects each guest's configuration and performance metadata over a **CIM session** to the host — this is the channel that carries it. Closed, nothing is discovered at all. |
-| **PowerShell version check** | **Yes** | Confirms PowerShell 4.0 or later. The appliance issues PowerShell to the host; older versions lack the cmdlets it calls. A check, not a change. |
-| **Create a discovery account** | **Yes** | The appliance signs in to the host as this account. It must either be a host administrator, or belong to **Remote Management Users** (permits the WinRM connection), **Hyper-V Administrators** (permits reading VM inventory and configuration) and **Performance Monitor Users** (permits reading the performance counters that drive right-sizing). |
-| **Enable PowerShell remoting** | **Yes** | Runs `Enable-PSRemoting`. WinRM being open is not enough on its own — remoting is what allows the appliance to execute commands on the host rather than merely connect to it. |
-| **Hyper-V Integration Services** | **Yes** | Checks that integration services are enabled on every guest. These supply each guest's **OS detail and IP address** to the host. Without them a guest is still discovered, but its operating system column stays blank and the assessment cannot size it properly. |
-| **CredSSP delegation** | **No** | Only needed when guest disks live on **remote SMB shares**, because the host must then pass your credentials onward to the file server. This lab's disks are local, so it is unnecessary — and CredSSP relays credentials to the host, which is worth avoiding whenever it buys you nothing. |
-
-> **Warning:** Do not enable CredSSP just because you see it in a cluster example. It is the one
-> item on this list that is not a default, and it is not needed here.
-
-### 2.2 — What deployment did differently
-
-Two deliberate differences from running the script by hand:
-
-1. **WinRM is open to the nested lab subnet only.** Microsoft's script opens 5985 and 5986
-   without a scope. Deployment creates the same openings restricted to `192.168.0.0/24`, which
-   is the only place the appliance ever connects from. Keep it that way.
-2. **The lab user is already a host administrator**, which satisfies the account requirement on
-   its own. Deployment also adds it to the three groups above, so the least-privilege path can
-   be demonstrated without rebuilding anything.
-
-Deployment applies each item directly rather than driving the script, because the script is
-interactive and the deployment session has no console. It then runs the script as a verifier,
-under a timeout, and writes whatever it produced to `C:\AzMigrateLab\hyperv-prep-output.txt`.
-**That file reaching a prompt and stopping is expected, not a failure** — the preparation above
-has already been applied.
-
-> **Instructor note.** If the appliance later reports that it cannot reach the host, this is the
-> first place to look. `hyperv-prep.json` records the state of every item; anything reading
-> `Failed` or `NOT FOUND` should be applied by hand from the table above before you troubleshoot
-> anything else.
+> **Instructor note.** If the appliance later reports that it cannot reach the host, read this
+> file first. Anything showing `Failed` or `NOT FOUND` should be applied by hand from the table
+> above before troubleshooting anything else.
 
 When you add host credentials later, use `HyperVHost\labadmin` (or whichever host user you
 chose). The guest Windows credentials are different: `Administrator`, with the lab password.
@@ -111,12 +110,13 @@ Get-FileHash -Path $archive.FullName -Algorithm SHA256 | Format-List
 Expand-Archive -Path $archive.FullName -DestinationPath 'E:\Appliance\Extracted' -Force
 ```
 
-> **Note:** on a script-deployed lab the archive is usually already in `E:\Appliance` —
-> deployment starts the download alongside the OS images, since the appliance VHD is published
-> at a fixed link and only *registration* needs the project key. Check for it before downloading
-> again. `E:\Appliance\download-complete.json` records the source and the SHA256 that deployment
-> computed. Verify that against Microsoft's published value exactly as you would for a manual
-> download — a hash is only worth something when you compare it against the vendor's.
+> **Note:** if the appliance VHD was staged during deployment, an archive is already in
+> `E:\Appliance` and `E:\Appliance\download-complete.json` records what was fetched. That is a
+> convenience, not a verification — check it against Microsoft's published value exactly as you
+> would a copy you downloaded yourself. If it does not match, delete `E:\Appliance\Extracted` and
+> the archive, and download from your project's own link on the Discover page.
+>
+> *(Instructors: see `CHANGES.md` section 34 for why the staged copy is treated as unverified.)*
 
 Stop if the hash does not match. Keep the archive until the import succeeds, then delete it — the archive and the extracted VHD both sit on `E:`, and reclaiming roughly 11 GB gives the appliance disk room to grow.
 
@@ -165,7 +165,7 @@ Start-VM -Name MigrateAppl
 
 > **Note on the 100 GB partition.** `E:` is the host-side store that holds the download, the extracted VHD and the running VM — it is not the appliance's own disk. An 80 GB dynamic disk consumes only what the appliance actually writes, so it sits comfortably inside 100 GB alongside the archive. Leave this disk **dynamic**: unlike the four workload VMs, the appliance is lab infrastructure rather than an assessment subject, so its disk I/O profile does not affect the sizing data, and a fixed 80 GB disk plus the 40 GB source during conversion would not fit in the partition.
 
-The static MAC follows the same `00-15-5D-00-00-xx` scheme deployment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
+The static MAC follows the same `00-15-5D-00-00-xx` scheme our lab environment used for the workloads, so the appliance picks up `192.168.0.20` from the host's DHCP scope automatically.
 
 > **Instructor note.** Microsoft's own instructions extract the archive and use **Hyper-V Manager > Import Virtual Machine**, which keeps the VM name held in Microsoft's exported configuration and offers no rename step. This lab instead builds the VM with `New-VM -Name MigrateAppl` around the same `.vhd`, so the name, memory, vCPU count, switch and disk size are all explicit and identical on every learner's host. Either route produces a working appliance. If you import rather than create, the VM will carry Microsoft's name, not `MigrateAppl` — pass that name to `migrate-step2-discover-assess.ps1`, which lists the VMs on the host when the name it was given is absent.
 
@@ -307,7 +307,7 @@ Provisioning records the same facts, so you can check without opening a session:
 Get-Content C:\AzMigrateLab\setup-log.txt | Select-String 'LAB_SUDO|LAB_DEPENDENCY|LAB_SSH|LAB_KVP'
 ```
 
-> **Note:** `netstat`, `ss`, `getcap` and `locate` come from `net-tools`, `iproute2`, `libcap2-bin` and `plocate`. Ubuntu cloud images ship none of them reliably, so deployment installs all four. A missing `getcap` is the easiest to overlook — it appears in Microsoft's dependency-analysis command list but not in most base images.
+> **Note:** `netstat`, `ss`, `getcap` and `locate` come from `net-tools`, `iproute2`, `libcap2-bin` and `plocate`. Ubuntu cloud images ship none of them reliably, so our lab environment installs all four. In your own estate, confirm they are present before relying on dependency analysis. A missing `getcap` is the easiest to overlook — it appears in Microsoft's dependency-analysis command list but not in most base images.
 
 Then open the **Software inventory** column on the Discovered servers page. You should see:
 

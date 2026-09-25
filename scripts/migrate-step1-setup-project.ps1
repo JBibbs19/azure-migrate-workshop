@@ -55,9 +55,16 @@ MODULE COVERAGE
                             made with New-AzMigrateProject has no tool solutions registered and
                             cannot generate an appliance key. See CHANGES.md section 26.
 
-    It also prepares the target landing zone - resource group, VNet, subnet and NSG - which the
-    modules assume already exists when you reach Module 2 section 5.3 (Configure Target
-    Settings). No module step covers that; it is groundwork the modules expect.
+      Module 2, section 4.1 Build the target landing zone - resource group, VNet (10.1.0.0/16),
+                            subnet (default, 10.1.0.0/24) and NSG with five inbound rules, plus
+                            registration of the Microsoft.OffAzure, Microsoft.Migrate and
+                            Microsoft.KeyVault providers. Identical names, ranges and rules to
+                            the portal steps in that section.
+
+    Running this is OPTIONAL and is the instructor's shortcut when time is short. Module 2
+    section 4.1 has the student build the same landing zone in the portal, which is where the
+    address-planning and NSG-scoping decisions are actually taught. Skip this script if you want
+    the student to do that.
 #>
 
 [CmdletBinding()]

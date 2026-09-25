@@ -427,6 +427,32 @@ function Expand-LabPayload {
     })
 }
 
+function Initialize-LabSshAskpass {
+    <#
+      Lets ssh take the lab password without prompting, so the password entered once at the top
+      of this script is the only time it is typed.
+
+      Windows has no sshpass. OpenSSH's own mechanism is SSH_ASKPASS: ssh runs the named program
+      and reads the password from its output. SSH_ASKPASS_REQUIRE=force, which makes ssh use it
+      even when a console is attached, arrived in OpenSSH 8.4 - so the version is checked and
+      the interactive prompt is kept when it is older.
+
+      The helper script contains no secret. It echoes an environment variable that is set only
+      around the ssh call, so the password stays in process memory and is never written to disk.
+    #>
+    $version = ''
+    try { $version = (& ssh.exe -V 2>&1 | Out-String) } catch { return $null }
+    if ($version -notmatch 'OpenSSH[_a-zA-Z]*(\d+)\.(\d+)') { return $null }
+    $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+    if ($major -lt 8 -or ($major -eq 8 -and $minor -lt 4)) {
+        Write-Step "OpenSSH $major.$minor is older than 8.4, so ssh will prompt for the lab password per guest."
+        return $null
+    }
+    $path = Join-Path $trafficRoot 'lab-askpass.cmd'
+    Set-Content -LiteralPath $path -Value @('@echo off', 'echo %LAB_SSH_PASSWORD%') -Encoding ASCII
+    return $path
+}
+
 function Invoke-LabLinuxPayload {
     param([string]$VMName,[string]$Address,[string]$Payload,[string]$Marker)
     $expanded = Expand-LabPayload $Payload
@@ -450,7 +476,7 @@ function Invoke-LabLinuxPayload {
         return $false
     }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($expanded -replace "`r`n","`n")))
-    Write-Step "Connecting to $VMName ($Address). Enter the lab password for $LinuxUsername when prompted."
+    Write-Step "Connecting to $VMName ($Address) as $LinuxUsername."
     $remote = "echo $encoded | base64 -d | sudo bash"
     # ssh writes progress and host-key notices to stderr even on success. Merging that stream
     # with 2>&1 while ErrorActionPreference is 'Stop' turns each line into a terminating
@@ -461,11 +487,27 @@ function Invoke-LabLinuxPayload {
     # retains the key.
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    # The askpass path is resolved once and reused. $script:LabAskpass stays $null when this
+    # build of OpenSSH cannot be driven that way, and ssh then prompts as it always did.
+    if (-not (Test-Path 'Variable:script:LabAskpassResolved')) {
+        $script:LabAskpassResolved = $true
+        $script:LabAskpass = Initialize-LabSshAskpass
+    }
     try {
+        if ($script:LabAskpass) {
+            $env:LAB_SSH_PASSWORD  = $passwordText
+            $env:SSH_ASKPASS       = $script:LabAskpass
+            $env:SSH_ASKPASS_REQUIRE = 'force'
+        }
         $output = & $ssh.Source '-o' 'StrictHostKeyChecking=no' '-o' 'UserKnownHostsFile=NUL' `
             '-o' 'LogLevel=ERROR' '-o' 'ConnectTimeout=15' "$LinuxUsername@$Address" $remote 2>&1
         $exitCode = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $previousPreference }
+    } finally {
+        $ErrorActionPreference = $previousPreference
+        # Cleared immediately: the password must not remain in the environment of anything this
+        # script runs afterwards.
+        Remove-Item Env:LAB_SSH_PASSWORD, Env:SSH_ASKPASS, Env:SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue
+    }
     $text = @($output | ForEach-Object { [string]$_ }) -join "`n"
     $output | ForEach-Object { Write-Host "  $_" }
     if ($exitCode -ne 0 -or $text -notmatch [regex]::Escape($Marker)) {
@@ -530,4 +572,7 @@ try {
 } finally {
     $passwordText = $null
     $webScript = $null
+    # The askpass helper holds no secret, but it exists only to serve this run.
+    if ($script:LabAskpass) { Remove-Item -LiteralPath $script:LabAskpass -Force -ErrorAction SilentlyContinue }
+    Remove-Item Env:LAB_SSH_PASSWORD, Env:SSH_ASKPASS, Env:SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue
 }

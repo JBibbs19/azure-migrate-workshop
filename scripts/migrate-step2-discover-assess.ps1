@@ -1242,6 +1242,13 @@ $statusPath = Join-Path $Root 'appliance-download.status'
 $archive = Join-Path $Root 'AzureMigrateAppliance.zip'
 $partial = "$archive.partial"
 $extracted = Join-Path $Root 'Extracted'
+# deploy-lab.ps1 pre-stages the archive under a different name, so any .zip in the folder is
+# a candidate for verification. Without this the staged archive is invisible here and the
+# extracted VHD would be accepted with nothing to check it against.
+if (-not (Test-Path -LiteralPath $archive)) {
+    $staged = Get-ChildItem -LiteralPath $Root -Filter *.zip -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($staged) { $archive = $staged.FullName }
+}
 function Set-Status([string]$State, [string]$Detail) {
     $line = '{0}|{1}|{2}' -f $State, (Get-Date).ToUniversalTime().ToString('o'), ($Detail -replace '[\r\n|]+', ' ')
     Set-Content -LiteralPath $statusPath -Value $line -Encoding UTF8
@@ -1252,7 +1259,20 @@ function Find-ApplianceVhd {
 }
 try {
     $vhd = Find-ApplianceVhd
-    if ($vhd) { Set-Status 'Ready' $vhd.FullName; exit 0 }
+    if ($vhd) {
+        # An already-extracted VHD is NOT automatically trustworthy. deploy-lab.ps1 stages one
+        # from the static aka.ms link, which is not guaranteed to be the appliance the portal
+        # currently serves - a stale build has been observed. Accepting it unchecked would
+        # import an appliance nobody verified, so it is verified here or refused.
+        if ($Sha256 -eq 'SKIP') { Set-Status 'Ready' $vhd.FullName; exit 0 }
+        if (Test-Path -LiteralPath $archive) {
+            Set-Status 'Verifying' 'Checking the staged archive against the published hash'
+            $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+            if ($actual -eq $Sha256.ToUpperInvariant()) { Set-Status 'Ready' $vhd.FullName; exit 0 }
+            throw "The staged appliance does not match the published SHA256 (expected $Sha256, got $actual). It was left in place, not deleted, so you can inspect it. Remove $Root\Extracted and the .zip beside it, then rerun to download the appliance the portal serves."
+        }
+        throw "An extracted appliance VHD is present at $extracted but no archive remains beside it, so it cannot be checked against the published SHA256. Either remove the extracted folder and rerun to download a verifiable copy, or rerun with -ApplianceSha256 SKIP to accept it unverified."
+    }
     if (-not (Test-Path -LiteralPath $archive)) {
         $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
         $attempt = 0

@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory)][string]$AdminUsername,
     [Parameter(Mandatory)][string]$AdminPassword,
     [Parameter(Mandatory)][string]$WindowsVhdSasUrl,
+    [string]$IncludeApplianceVhd = 'No',
+    [string]$ApplianceVhdSha256 = '',
     [string]$WorkshopTitle = 'TD SYNNEX - Cloud Enablement Services'
 )
 try {
@@ -168,7 +170,11 @@ Write-Log "PHASE 2: Downloading OS images..."
 # still works unchanged if it did not run.
 $applianceJob = $null
 $applianceRoot = $null
+if ($IncludeApplianceVhd -ne 'Yes') {
+    Write-Log "Appliance VHD staging is off. Module 1 downloads it from the Azure Migrate project when it is needed."
+}
 try {
+  if ($IncludeApplianceVhd -eq 'Yes') {
     $storeVolume = Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue |
                    Where-Object { $_.DriveLetter } | Select-Object -First 1
     if (-not $storeVolume) {
@@ -177,7 +183,7 @@ try {
         $applianceRoot = "$($storeVolume.DriveLetter):\Appliance"
         New-Item -ItemType Directory -Path $applianceRoot -Force | Out-Null
         $applianceJob = Start-Job -Name 'LabApplianceDownload' -ScriptBlock {
-            param($Root)
+            param($Root, $ExpectedSha256)
             $ErrorActionPreference = 'Stop'
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             $zip = Join-Path $Root 'MigrateAppl.zip'
@@ -202,23 +208,44 @@ try {
             Move-Item -LiteralPath $partial -Destination $zip -Force
             if (-not (Test-Path $zip)) { throw 'The appliance archive did not download.' }
             $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+            # When the published hash was supplied, a mismatch means the static link did not
+            # serve the appliance the project offers. Delete it rather than leave something
+            # unusable staged where it looks ready to import.
+            if ($ExpectedSha256 -and $hash -ne $ExpectedSha256.ToUpperInvariant()) {
+                Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+                throw "SHA256 mismatch: expected $ExpectedSha256, got $hash. The archive was deleted. Download the appliance from the Azure Migrate project instead."
+            }
             $extract = Join-Path $Root 'Extracted'
             New-Item -ItemType Directory -Path $extract -Force | Out-Null
             Expand-Archive -Path $zip -DestinationPath $extract -Force
             $vhd = Get-ChildItem $extract -Recurse -Include *.vhd,*.vhdx -ErrorAction SilentlyContinue |
                    Select-Object -First 1
             if (-not $vhd) { throw 'No VHD was found inside the appliance archive.' }
+            # The static link is not guaranteed to serve the appliance the portal currently
+            # offers. The published VHD carries a Windows Server build in its file name, so
+            # that is read back as a cheap sanity check: Windows Server 2022 is build 20348,
+            # and Microsoft's support matrix blocks Server 2016 or earlier. A heuristic on a
+            # file name, not proof - the published hash is what actually decides.
+            $build = 0
+            if ($vhd.Name -match '^(\d+)\.') { $build = [int]$Matches[1] }
+            $looksCurrent = ($build -ge 20348)
             [ordered]@{
                 CompletedUtc = (Get-Date).ToUniversalTime().ToString('o')
                 Archive      = $zip
                 ArchiveSha256 = $hash
                 ExtractedVhd = $vhd.FullName
                 Source       = 'https://aka.ms/migrate/appliance/hyperv'
+                WindowsBuild = $build
+                LooksCurrent = $looksCurrent
+                Verified     = [bool]$ExpectedSha256
+                Note         = if ($ExpectedSha256) { 'Checked against the SHA256 supplied at deployment.' } else { 'Staged from the static link and NOT checked against a published SHA256. Verify before importing.' }
             } | ConvertTo-Json | Set-Content $done -Encoding UTF8
+            if (-not $looksCurrent) { return "STALE|$($vhd.FullName)|$hash|build $build" }
             return "READY|$($vhd.FullName)|$hash"
-        } -ArgumentList $applianceRoot
+        } -ArgumentList $applianceRoot, $ApplianceVhdSha256
         Write-Log "Azure Migrate appliance download started in the background into $applianceRoot."
     }
+  }
 } catch {
     Write-Log "WARNING: could not start the appliance download ($($_.Exception.Message)). Module 1 section 3.3 still applies."
     $applianceJob = $null
@@ -1341,6 +1368,16 @@ if ($applianceJob) {
     try {
         $applianceResult = Receive-Job -Job $applianceJob -Wait -ErrorAction Stop
         Write-Log "Appliance staging: $applianceResult"
+        if ("$applianceResult" -like 'STALE|*') {
+            Write-Log "WARNING: the staged appliance does not look like a current build."
+            Write-Log "         The static link served an image whose name reports a Windows build older"
+            Write-Log "         than Server 2022, which the appliance support matrix does not accept."
+            Write-Log "         Do not import it. Download the appliance from your Azure Migrate project"
+            Write-Log "         instead (Module 1 section 3.3) and check the published SHA256."
+        } else {
+            Write-Log "         Staged from the static link and NOT verified against Microsoft's published"
+            Write-Log "         SHA256. Check it before importing - Module 1 section 3.3."
+        }
     } catch {
         Write-Log "WARNING: the appliance download did not complete ($($_.Exception.Message))."
         Write-Log "         Module 1 section 3.3 downloads it by hand; nothing else is affected."

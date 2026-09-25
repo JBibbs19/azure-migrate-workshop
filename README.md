@@ -81,6 +81,27 @@ $location = 'eastus'
     -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
 ```
 
+### Two ways to launch
+
+`deploy-lab.ps1` runs the same way either from an open PowerShell window or from a right-click
+**Run with PowerShell**. Every value it needs is a mandatory parameter, so PowerShell prompts
+for anything not supplied, and the three sensitive ones are masked as you type.
+
+On a right-click launch the window closes the instant the script ends, so the script holds it
+open at the finish and after a failure, and writes a full error report next to itself
+(`deploy-lab-error-<timestamp>.log`, with GUIDs redacted). Set `LAB_NO_PAUSE=1` to skip the
+pause for an unattended run.
+
+In an open window it also clears any leftover `Write-Host` / `Write-Warning` override left
+behind by a `migrate-step` script run earlier in that session. Those scripts install console
+overrides to mask subscription IDs, and a leftover one used to make `deploy-lab.ps1` fail on a
+`Write-Host` line.
+
+The `migrate-step` scripts are built for an open window. They work from a right-click too and
+hold the window open the same way, but they are interactive throughout — they ask which
+resource group, which project, which VM — so a console you can read and scroll back through is
+the better fit.
+
 Every `migrate-step` script then runs on its own, with no arguments:
 
 ```powershell
@@ -103,7 +124,7 @@ The scripts and the modules are run separately. Each script also carries this in
 | Script | Completes |
 |---|---|
 | `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract |
-| `migrate-step1-setup-project.ps1` | Target landing zone. Module 1 §1 is **not** automated — it prints the portal steps |
+| `migrate-step1-setup-project.ps1` | **Optional.** Module 2 §4.1 (target landing zone), as an instructor shortcut — the student builds the same thing in the portal there. Module 1 §1 is **not** automated; it prints the portal steps |
 | `migrate-step2-discover-assess.ps1` | Module 1 §3.2–3.5, §4 and §5. §3.1 (project key) stops for you |
 | `migrate-step3-replicate.ps1` | Module 2 §5–§7, or Module 3 §8–§9, per `-Workload` |
 | `migrate-step3a-agentless.ps1` | Module 2 §5–§9 in one run |
@@ -130,7 +151,7 @@ Nothing automates Module 4: it is analysis, with no lab state to reach.
 | `migrate-step3b-agent-based.ps1` | Bridges the lab to the end state of **Module 3** (OnPrem-SQL, OnPrem-Linux-App). Reaches that state agentlessly — see CHANGES.md |
 | `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |
 | `check-lab-scripts.ps1` | Parses every lab script without running any of them; reports file, line and column for anything that will not parse |
-| `cleanup-lab.ps1` | Preview/confirmed deletion of explicitly named, tagged groups; refuses vaults and locks |
+| `cleanup-lab.ps1` | Lists the resource group's contents, confirms, deletes the group, then reports what went and what must still be removed by hand. Refuses to start when a CanNotDelete lock is present |
 
 ## Costs and teardown
 
@@ -142,6 +163,12 @@ Estimate the host, OS disk, target/test VMs, replicated disks/storage, **two NAT
 ```
 
 The script takes one resource group per run and confirms before deleting. Review what it lists before confirming; `-Force` skips the prompt.
+
+Deleting the two resource groups does not finish the teardown. A soft-deleted key vault keeps
+its name reserved, a Recovery Services vault holding backup items refuses to be deleted, and the
+appliance's Microsoft Entra app registration is not an Azure resource at all. `cleanup-lab.ps1`
+prints all of them, with the commands to check, at the end of every run — including a cancelled
+one. Clear them before you close out, or the next lab fails in ways that look unrelated.
 
 > The `migrate-step` and `cleanup-lab` scripts take no subscription parameter. They act on whichever subscription is active in your session, so confirm it with `Get-AzContext` first.
 

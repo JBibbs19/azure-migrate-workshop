@@ -176,24 +176,95 @@ Define "done" before you start:
 | OnPrem-Linux-Web    | Ubuntu 22.04          | Nginx       | 192.168.0.12  |
 
 - ✅ Azure subscription with sufficient quota for at least 2× Standard_B2s VMs
-- ✅ A target Resource Group and Virtual Network in Azure
+- ✅ A target Resource Group and Virtual Network in Azure — **you build these in section 4.1**
 
 ---
 
 ## 4. Step 1 — Prepare for Migration
 
-### 4.1 Navigate to Azure Migrate
+### 4.1 Build the target landing zone
+
+Azure Migrate does not create the network your migrated VMs land in. It cannot — it has no way
+to know your address plan, your segmentation, or how traffic is meant to leave. Creating the
+Azure Migrate project does not create it either: the project, and the key vault and storage
+account that came with your appliance key, are the **management** side of the migration and sit
+alongside your source environment. What you are building now is the **destination**.
+
+Build it before you start the replication wizard. In section 5.3 the wizard will let you create
+a resource group and a storage account inline, but the **virtual network and subnet are chosen
+from a dropdown** — if they do not exist, you cannot proceed without leaving the wizard.
+
+**Create the resource group.**
+
+1. In the portal, search for **Resource groups** and select **Create**.
+2. **Subscription** — the one holding your Azure Migrate project.
+3. **Resource group** — `rg-ces-target-01`.
+4. **Region** — the region you are migrating into.
+5. **Review + create**, then **Create**.
+
+**Create the virtual network.**
+
+1. Search for **Virtual networks** and select **Create**.
+2. **Resource group** — `rg-ces-target-01`. **Name** — `rg-ces-target-01-vnet`. **Region** — as above.
+3. On **IP addresses**, set the address space to `10.1.0.0/16`.
+4. Edit the default subnet so it is named `default` with range `10.1.0.0/24`.
+5. **Review + create**, then **Create**.
+
+> **Why a different address space?** The source lab network is `10.0.0.0/16` and the test
+> migration network in section 8 is `10.2.0.0/16`. Overlapping ranges are one of the most common
+> reasons a real migration cannot cut over — the migrated VM works, and then cannot talk to
+> anything back on-premises. Plan the target space against what is already in use, not against
+> what is convenient.
+
+**Create the network security group and attach it.**
+
+1. Search for **Network security groups** and select **Create**, in `rg-ces-target-01`, named
+   `rg-ces-target-01-nsg`.
+2. Once created, open it and add these **inbound** rules so the migrated workloads can be
+   reached and validated:
+
+| Priority | Name | Port | Protocol | Purpose |
+|---|---|---|---|---|
+| 100 | `Allow-RDP` | 3389 | TCP | Reach the migrated Windows VMs |
+| 110 | `Allow-SSH` | 22 | TCP | Reach the migrated Linux VMs |
+| 120 | `Allow-HTTP` | 80 | TCP | Validate IIS and Nginx after cutover |
+| 130 | `Allow-HTTPS` | 443 | TCP | Validate TLS endpoints |
+| 140 | `Allow-NodeJS` | 3000 | TCP | Validate the Node.js API |
+
+3. Under **Subnets**, select **Associate**, choose the VNet and the `default` subnet.
+
+> **⚠️ These rules are deliberately open, and that is a lab decision.** Source is `Any` on every
+> rule, which means RDP and SSH are reachable from the internet. In an engagement you would scope
+> each source to a jump host, a bastion subnet or an on-premises range, and you would not expose
+> 3389 or 22 at all. You will tighten exactly these rules in **Module 5, section 4**, which is
+> the more realistic exercise.
+
+> **🏗️ In Production — egress.** This landing zone has no NAT gateway and no firewall, so
+> migrated VMs reach the internet only through Azure's **default outbound access** — which
+> Microsoft is retiring. A real landing zone gives its spoke explicit egress through a NAT
+> gateway or a firewall in the hub. Do not assume a new VNet has outbound internet.
+> [Azure outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
+
+**Expected result:** `rg-ces-target-01` contains a VNet with a `default` subnet on `10.1.0.0/24`,
+and an NSG carrying five inbound rules is associated with that subnet.
+
+> **Instructor note.** `.\scripts\migrate-step1-setup-project.ps1` builds this same landing zone
+> — identical names, ranges and rules — and also registers the `Microsoft.OffAzure`,
+> `Microsoft.Migrate` and `Microsoft.KeyVault` providers. Run it beforehand when time is short,
+> but the portal path above is the one that teaches the decisions.
+
+### 4.2 Navigate to Azure Migrate
 
 1. Open the [Azure Portal](https://portal.azure.com).
 2. Search for **Azure Migrate** in the top search bar and select it.
 3. Click **Servers, databases and web apps** in the left menu.
 
-### 4.2 Open the Migration Tool
+### 4.3 Open the Migration Tool
 
 1. In the **Migration tools** tile, locate **Azure Migrate: Server Migration**.
 2. Click **Discover** to begin the discovery process for migration.
 
-### 4.3 Select Hyper-V as the Source
+### 4.4 Select Hyper-V as the Source
 
 1. In the **Discover** dialog, for **Are your machines virtualized?**, select **Yes, with Hyper-V**.
 2. Select the **Target region** where you want to migrate VMs.

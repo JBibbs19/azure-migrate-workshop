@@ -182,14 +182,34 @@ $password = Read-Host 'Lab-only administrator password' -AsSecureString
 .\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId `
     -ResourceGroupName $sourceRg -Location $location `
     -AdminUsername labadmin -AdminPassword $password -AdminSourceCidr $secureAdminCidr
-
-.\scripts\migrate-step1-setup-project.ps1 `
-    -SourceResourceGroup $sourceRg -TargetResourceGroup $targetRg -Location $location
 ```
+
+This is the only script you run. Everything after it is done through the Azure portal and on the
+host itself, which is how a real discovery and migration is driven.
 
 `deploy-lab.ps1` takes the subscription ID and the address as **SecureString** values, so neither is visible while you type them — useful when the session is being shared or recorded. `$secureSubscriptionId` comes from Step 1.
 
-The `migrate-step` scripts take no subscription parameter at all. They use whichever subscription is active in your session, which is why `Set-AzContext` in Step 1 matters — confirm it with `Get-AzContext` before running them.
+It will ask whether to stage the Azure Migrate appliance VHD on the host. **Answer No** — it is an
+~11 GB download that nothing in this module needs, and Module 1 fetches the appliance from your
+Azure Migrate project at the point it is actually required.
+
+> **Instructor note — the target landing zone.** This is not created here, and it is not created
+> by the Azure Migrate project either. The project and its key vault, storage account and
+> recovery services vault are the *management* plane and live in the source group; the landing
+> zone is the *destination network* migrated VMs are placed into. Module 2 needs it to exist by
+> the time you reach its target settings.
+>
+> It is four things: a **target resource group**, a **VNet** (`10.1.0.0/16`), a **subnet**
+> (`default`, `10.1.0.0/24`) and an **NSG** carrying inbound RDP, SSH, HTTP, HTTPS and Node.js
+> rules. Plus registration of the `Microsoft.OffAzure`, `Microsoft.Migrate` and
+> `Microsoft.KeyVault` providers.
+>
+> **Module 2 section 4.1 now has the student build it in the portal**, which is where the
+> address-planning and NSG-scoping decisions are taught. Running
+> `.\scripts\migrate-step1-setup-project.ps1` beforehand produces the identical result and is the
+> shortcut when time is short — skip it if you want the students to do the work. That script and
+> the other `migrate-step` scripts take no subscription parameter; they act on whichever
+> subscription is active in the session, so confirm it with `Get-AzContext` first.
 
 > **Note:** Masking applies to entry only. Both values still reach Azure, and both remain visible afterwards — the subscription ID in `Get-AzContext` and in every resource ID, the address in the host's NSG rule.
 
@@ -209,7 +229,7 @@ Before provisioning begins, deployment sizes `C:` and creates the 100 GB `E:` ap
 
 Deployment uses managed Run Command, which allows a longer setup timeout and protected parameters, and it reports workload readiness only after checking the real HTTP, API and SQL endpoints. [Managed Run Command](https://learn.microsoft.com/azure/virtual-machines/windows/run-command-managed)
 
-The target and test NAT gateways created by `migrate-step1-setup-project.ps1` provide explicit outbound access without public IPs on the workload VMs. Do not assume new networks provide automatic outbound internet. [Azure outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
+The target landing zone in this lab has **no NAT gateway and no firewall**. Migrated VMs reach the internet only through Azure's default outbound access, which Microsoft is retiring — a real landing zone needs explicit egress. Do not assume a new VNet provides outbound internet. [Azure outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
 
 ### Step 3: Connect to the Hyper-V host
 
@@ -655,7 +675,7 @@ In a production migration engagement, the lab infrastructure is more substantial
 | Azure Migrate appliance | Imported VHD running as a nested VM, no separate charge | Dedicated VM on the source infrastructure |
 | Replication storage | Workshop-scale, minimal | Premium storage accounts sized for replication data |
 | Target VMs | Created during the migration modules | Sized to match production workloads |
-| Additional networking | Two NAT gateways and their public IPs | Hub-spoke, ExpressRoute or VPN, firewalls |
+| Additional networking | None — one host public IP only | NAT gateway or firewall for egress, hub-spoke, ExpressRoute or VPN |
 
 Estimate every resource listed in the [README](../README.md) for your own region and agreement rather than reusing a figure from another engagement.
 
