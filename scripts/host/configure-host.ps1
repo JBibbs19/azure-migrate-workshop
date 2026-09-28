@@ -168,6 +168,12 @@ Write-Log "PHASE 2: Downloading OS images..."
 # exists; it is found by its volume label rather than by assuming a drive letter.
 # This is best-effort. Nothing later in this script depends on it, and Module 1 section 3.3
 # still works unchanged if it did not run.
+# The download link published by Microsoft in the appliance article, in the same table row as
+# the SHA256 it is checked against - so the link and its expected hash are maintained together.
+# The previous source, aka.ms/migrate/appliance/hyperv, came from the lab this was forked from,
+# appears in no Microsoft documentation, and was observed serving a years-old Windows Server 2016
+# build. See CHANGES.md section 41.
+$applianceUrl = 'https://go.microsoft.com/fwlink/?linkid=2191848'
 $applianceJob = $null
 $applianceRoot = $null
 if ($IncludeApplianceVhd -ne 'Yes') {
@@ -183,7 +189,7 @@ try {
         $applianceRoot = "$($storeVolume.DriveLetter):\Appliance"
         New-Item -ItemType Directory -Path $applianceRoot -Force | Out-Null
         $applianceJob = Start-Job -Name 'LabApplianceDownload' -ScriptBlock {
-            param($Root, $ExpectedSha256)
+            param($Root, $ExpectedSha256, $Url)
             $ErrorActionPreference = 'Stop'
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             $zip = Join-Path $Root 'MigrateAppl.zip'
@@ -200,7 +206,7 @@ try {
             while ($true) {
                 $attempt++
                 & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 `
-                        --continue-at - --output $partial 'https://aka.ms/migrate/appliance/hyperv'
+                        --continue-at - --output $partial $Url
                 if ($LASTEXITCODE -eq 0) { break }
                 if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
                 Start-Sleep -Seconds 30
@@ -234,7 +240,7 @@ try {
                 Archive      = $zip
                 ArchiveSha256 = $hash
                 ExtractedVhd = $vhd.FullName
-                Source       = 'https://aka.ms/migrate/appliance/hyperv'
+                Source       = $Url
                 WindowsBuild = $build
                 LooksCurrent = $looksCurrent
                 Verified     = [bool]$ExpectedSha256
@@ -242,7 +248,7 @@ try {
             } | ConvertTo-Json | Set-Content $done -Encoding UTF8
             if (-not $looksCurrent) { return "STALE|$($vhd.FullName)|$hash|build $build" }
             return "READY|$($vhd.FullName)|$hash"
-        } -ArgumentList $applianceRoot, $ApplianceVhdSha256
+        } -ArgumentList $applianceRoot, $ApplianceVhdSha256, $applianceUrl
         Write-Log "Azure Migrate appliance download started in the background into $applianceRoot."
     }
   }

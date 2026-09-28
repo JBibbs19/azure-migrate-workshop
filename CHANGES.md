@@ -1558,6 +1558,143 @@ written to disk. The helper file itself is deleted when the script ends.
 `sudo` does not add a prompt: the guests are provisioned with `sudo: ALL=(ALL) NOPASSWD:ALL`,
 which was verified rather than assumed.
 
+## 39. Portal navigation in Modules 2 and 3 did not match the current experience
+
+Module 2 section 4.2 read:
+
+```
+1. Open the Azure Portal.
+2. Search for Azure Migrate and select it.
+3. Click "Servers, databases and web apps" in the left menu.
+```
+
+Two problems. It omitted the step that actually matters - **Azure Migrate is project-scoped**.
+Searching for the service lands on a hub page, and no migration tool appears until a specific
+project is open. And "Servers, databases and web apps" is the **classic** heading; Azure Migrate
+is rolling out an **Explore / Decide / Execute** experience that reaches tenants at different
+times, so that label is not what many people now see.
+
+Module 1 already carried the portal-variance caveat. Modules 2 and 3 did not, and both also
+skipped the project selection.
+
+**Module 2 section 4.2** is now "Open your Azure Migrate project": search, **All projects**,
+choose the Module 1 project, and confirm the subscription - because an account that can see
+several subscriptions will often open on the wrong one and show an empty project list. It states
+the expected result (the discovered servers from Module 1) and where to go if the count is zero.
+
+**Section 4.3** describes the tool by what it does rather than by its name, and adds the warning
+that earns its place here: **Discovery and assessment** and **Migration and modernization** are
+adjacent tiles, and selecting the assessment tile at this point is the most common wrong turn in
+the module.
+
+**Module 3 section 5.1** got the same treatment, shorter.
+
+The underlying principle, now applied consistently: describe the operation, not the label. Labels
+in this service are being actively changed.
+
+## 40. Appliance hash verification moved to the end of the run, and terminology corrected
+
+### The hash was being asked for before anything could be verified
+
+`deploy-lab.ps1` prompted for the published SHA256 immediately after the opt-in question - before
+the download had started, let alone finished. There was nothing to compare against yet, so the
+question arrived long before it could do any work.
+
+The host already computes the archive's SHA256 while staging it and records it in
+`download-complete.json`. That value is now read back at the **end** of the run and this script
+performs the comparison:
+
+```
+Azure Migrate appliance staged on the host.
+  Location : E:\Appliance
+  SHA256   : 40AA0379...
+  Compare that against the value Microsoft publishes for the Hyper-V VHD zip under
+  "Verify security": https://learn.microsoft.com/azure/migrate/migrate-appliance
+
+  Paste the published SHA256 to verify now, or press Enter to verify later:
+```
+
+A match is reported plainly; a mismatch names the file, says not to import it, and points at the
+project's own download link. **No RDP to the host is needed** - the value is already on the host
+and the script fetches it.
+
+`-ApplianceVhdSha256` still exists for unattended runs. Supplied that way, the host checks during
+staging and deletes the archive on a mismatch, which is the right behaviour when no one is
+watching.
+
+### Two different downloads were being described with one name
+
+The prompt said "the Hyper-V appliance archive", which conflates two unrelated downloads:
+
+| Thing | What it is |
+|---|---|
+| **Hyper-V host-preparation script** | `MicrosoftAzureMigrate-Hyper-V.ps1`, from `aka.ms/migrate/script/hyperv`. A PowerShell script that configures WinRM, remoting and the discovery account on the **host**. Published SHA256 `0AD60E72...` - which the deployment log shows **matched**. |
+| **Azure Migrate appliance VHD** | An ~11 GB zip containing the appliance **virtual machine**. Published SHA256 `AD3C72FB...`. This is the one that staged as a stale Windows Server 2016 image with hash `40AA0379...`. |
+
+There is no such thing as a "Hyper-V appliance". The prompts and parameter help now say
+**Azure Migrate appliance VHD** and note explicitly that it is not the host-preparation script.
+Section 34 named the correct link throughout, but the prompt wording did not, which is how the
+two came to look like one thing.
+
+## 41. Appliance download source, and where its hash comes from
+
+### Source of truth
+
+The Azure Migrate appliance VHD download link and the SHA256 it should have are published
+**together, in the same table row**, under "Verify security":
+
+**https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security**
+
+| Item | Value |
+|---|---|
+| Download | `https://go.microsoft.com/fwlink/?linkid=2191848` (the "Latest version" link, Hyper-V VHD zip, ~11.4 GB) |
+| SHA256 | `AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24` |
+| Recorded | 2026-09-27 |
+
+**That is the page to check first if the hash ever fails.** Both values move when Microsoft
+republishes the appliance, and they move together.
+
+### The download source changed
+
+`aka.ms/migrate/appliance/hyperv` was inherited from the lab this was forked from. It appears in
+no Microsoft documentation, and it was observed serving a Windows Server 2016 build with hash
+`40AA0379...` - years out of date and outside the appliance support matrix (section 34).
+
+The download now uses the fwlink above. The argument for it is not just that it is newer: it is
+published in the same row as the hash it will be checked against, so the link and its expected
+value are maintained as one thing. An undocumented redirect has no such guarantee.
+
+Changed in `host/configure-host.ps1` (the staging download) and in the example shown by
+`migrate-step2-discover-assess.ps1`.
+
+**One caveat, stated plainly.** The fwlink target could not be confirmed independently from here -
+it is a redirect that resolves in a browser, and it does not appear in search results. It was read
+off the live article. If a future run downloads something unexpected, that page is the first place
+to look.
+
+### Where the hash comes from, and why it is advisory
+
+There was no published hash anywhere in the scripts before this. The host computed the SHA256 of
+whatever it downloaded; the published value only ever arrived by someone pasting it.
+
+The reference value above is now recorded in `deploy-lab.ps1` and compared automatically at the
+end of a staging run. It is deliberately **advisory, not authoritative**:
+
+- **Match** - reported as matching the appliance published as of the recorded date.
+- **Mismatch** - reported as *ambiguous*, because there are two causes and they need opposite
+  responses: Microsoft has republished the appliance (normal - confirm and continue), or the
+  download is wrong (do not import). The script says both and points at the article.
+
+Hardcoding it as a pass/fail test would have been worse than useless. Microsoft republishes the
+appliance periodically; the first time they did, every run would report a failure for a download
+that was correct, and the check would be learned as noise and ignored.
+
+An explicitly supplied `-ApplianceVhdSha256` is still treated as authoritative - the host deletes
+the archive on mismatch - because in that case someone has asserted what the value should be.
+
+When a verified hash differs from the reference, the script says so and suggests updating the
+constant in `deploy-lab.ps1`.
+
 ## Not changed
 
 `cleanup-lab.ps1` and `migrate-step1` through `migrate-step6` are the supplied versions. Modules 2

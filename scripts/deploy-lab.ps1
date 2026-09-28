@@ -26,16 +26,19 @@ Drive letter for that partition inside HyperVHost. Leave it unset and deployment
 first unassigned letter, which is E: on the default host size: C: is the OS disk and D: is
 the virtual DVD drive. Supply a letter only to override that choice.
 .PARAMETER IncludeApplianceVhd
-Whether to download the Azure Migrate appliance VHD onto the host during deployment. Default No,
+Whether to download the AZURE MIGRATE APPLIANCE VHD onto the host during deployment. This is
+Microsoft's appliance virtual machine - not the Hyper-V host-preparation script, which is a
+separate download and easily confused with it. Default No,
 which is the right answer for a learner: it is an ~11 GB download that is not needed to finish
 Module 0, and Module 1 fetches the appliance from the Azure Migrate project when it is actually
 required - which is also the link that serves the current build. Yes is for an instructor
 preparing a host before a session. When not supplied, the script asks once and defaults to No.
 .PARAMETER ApplianceVhdSha256
-The SHA256 Microsoft publishes for the Hyper-V appliance archive. Used only with
--IncludeApplianceVhd Yes. When supplied the staged archive is checked against it and deleted on
-a mismatch. When omitted the archive is staged unverified and must be checked before it is
-imported.
+The SHA256 Microsoft publishes for the AZURE MIGRATE APPLIANCE VHD archive - the Hyper-V zip
+listed under 'Verify security' in the appliance article. Used only with -IncludeApplianceVhd
+Yes, and intended for unattended runs: when supplied, the host checks the archive against it
+during staging and deletes it on a mismatch. When omitted, the archive is staged and this
+script offers to verify it once deployment finishes.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
@@ -528,17 +531,13 @@ if (-not $PSBoundParameters.ContainsKey('IncludeApplianceVhd')) {
     }
 }
 if ($IncludeApplianceVhd -eq 'Yes') {
-    if (-not $ApplianceVhdSha256 -and [Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
-        Write-Host ''
-        Write-Host 'Paste the SHA256 Microsoft publishes for the Hyper-V appliance archive, or press' -ForegroundColor Cyan
-        Write-Host 'Enter to stage it unverified and check it yourself before importing.' -ForegroundColor Gray
-        $ApplianceVhdSha256 = (Read-Host 'Published SHA256 (optional)').Trim()
-        if ($ApplianceVhdSha256 -and $ApplianceVhdSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
-            throw 'That is not a 64-character SHA256 value. Rerun and paste the published hash, or leave it blank.'
-        }
-    }
-    if ($ApplianceVhdSha256) { Write-Host 'The staged appliance archive will be checked against the hash supplied.' }
-    else { Write-Host 'The appliance archive will be staged UNVERIFIED. Check it against the published SHA256 before importing it (Module 1, section 3.3).' -ForegroundColor Yellow }
+    # The published hash is NOT asked for here. Nothing can be verified before the download has
+    # happened, so the question would be asked long before it could be answered usefully. The
+    # host computes the archive's SHA256 as part of staging it, and this script compares that
+    # against the published value at the END of the run.
+    Write-Host ''
+    Write-Host 'The Azure Migrate appliance VHD will be staged on the host during deployment.' -ForegroundColor Cyan
+    Write-Host 'Its SHA256 is computed there, and this script offers to check it when deployment finishes.' -ForegroundColor Gray
 }
 
 $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
@@ -743,7 +742,79 @@ Write-Output 'APPLIANCE_STORE_READY'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
     Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
-    Write-Host "Download and extract the Azure Migrate appliance VHD into $appliancePath on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
+    if ($IncludeApplianceVhd -eq 'Yes') {
+        # ------------------------------------------------------------------------------
+        # Verify the staged appliance
+        #
+        # Asking for the published hash at the start of the run was the wrong shape: there was
+        # nothing to compare it against yet. The host computed the archive's SHA256 while
+        # staging it, so it is read back here and this script does the comparison. No RDP is
+        # needed - the value is already recorded on the host.
+        # ------------------------------------------------------------------------------
+        $stagedHash = $null
+        try {
+            $readHash = "if (Test-Path '$appliancePath\download-complete.json') { (Get-Content '$appliancePath\download-complete.json' -Raw | ConvertFrom-Json).ArchiveSha256 } else { 'NONE' }"
+            $hashResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $readHash -ErrorAction Stop
+            $hashText = (@($hashResult.Value | Where-Object { $_.Code -match 'StdOut' } | ForEach-Object { $_.Message }) -join "`n").Trim()
+            if ($hashText -match '(?m)^([0-9A-Fa-f]{64})\s*$') { $stagedHash = $Matches[1].ToUpperInvariant() }
+        } catch { Write-Warning "Could not read the staged appliance hash from the host: $($_.Exception.Message)" }
+
+        Write-Host ''
+        if (-not $stagedHash) {
+            Write-Warning "The appliance archive was not staged, or its record could not be read. Download it from your Azure Migrate project instead (docs/Module-1-Discovery.md, section 3.3)."
+        } else {
+            # Reference value, recorded from the 'Verify security' table in the appliance article
+            # on 2026-09-27, in the same row as the download link the host used. It is ADVISORY,
+            # not authoritative: Microsoft republishes the appliance periodically, and when they
+            # do this value goes stale while the download stays correct. So a mismatch is
+            # reported as ambiguous rather than as a failure - see CHANGES.md section 41.
+            $referenceHash = 'AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24'
+            $referenceDate = '2026-09-27'
+
+            Write-Host 'Azure Migrate appliance staged on the host.' -ForegroundColor Cyan
+            Write-Host "  Location : $appliancePath"
+            Write-Host "  SHA256   : $stagedHash"
+            if ($stagedHash -eq $referenceHash) {
+                Write-Host "  Matches the appliance published as of $referenceDate." -ForegroundColor Green
+            } else {
+                Write-Host ''
+                Write-Warning "This does not match the appliance recorded on $referenceDate ($($referenceHash.Substring(0,16))...)."
+                Write-Warning 'That means one of two things, and they need different responses:'
+                Write-Host '    1. Microsoft has published a newer appliance. Normal - confirm against the' -ForegroundColor White
+                Write-Host '       article below and carry on.' -ForegroundColor White
+                Write-Host '    2. The download is not what it should be. This link has served a stale build' -ForegroundColor White
+                Write-Host '       before. Do not import it until the published hash confirms it.' -ForegroundColor White
+            }
+            Write-Host '  Published value, "Verify security" table:' -ForegroundColor Gray
+            Write-Host '  https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security' -ForegroundColor Gray
+            if ($ApplianceVhdSha256) {
+                # Already checked on the host during staging; a mismatch would have deleted it.
+                Write-Host '  Checked against the hash supplied at the command line: MATCH.' -ForegroundColor Green
+            } elseif ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
+                Write-Host ''
+                $published = (Read-Host '  Paste the published SHA256 to verify now, or press Enter to verify later').Trim()
+                if (-not $published) {
+                    Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
+                } elseif ($published -notmatch '^[0-9A-Fa-f]{64}$') {
+                    Write-Warning 'That is not a 64-character SHA256 value. The archive is unverified; check it before importing.'
+                } elseif ($published.ToUpperInvariant() -eq $stagedHash) {
+                    Write-Host '  MATCH. The staged appliance is the published build.' -ForegroundColor Green
+                    if ($published.ToUpperInvariant() -ne $referenceHash) {
+                        Write-Host "  Note: this differs from the value recorded on $referenceDate, so Microsoft has" -ForegroundColor Gray
+                        Write-Host '  republished the appliance. Worth updating the reference in deploy-lab.ps1.' -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host ''
+                    Write-Warning 'MISMATCH. The staged archive is NOT the appliance Microsoft currently publishes.'
+                    Write-Warning "Do not import it. Delete $appliancePath\Extracted and the archive beside it, then download the appliance from your Azure Migrate project (Module 1, section 3.3)."
+                }
+            } else {
+                Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
+            }
+        }
+    } else {
+        Write-Host "Download and extract the Azure Migrate appliance VHD into $appliancePath on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
+    }
 } catch {
     try {
         $lastHealth = Get-Content -LiteralPath $HealthPath -Raw -ErrorAction Stop | ConvertFrom-Json

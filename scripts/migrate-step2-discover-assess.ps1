@@ -1228,7 +1228,7 @@ if ($storeDrive -ne 'E:') {
 $doImport = ($hostVMNames -notcontains $ApplianceVMName)
 if ($doImport) {
     Write-Log "No VM named '$ApplianceVMName' on the host yet: the VHD will be downloaded and imported into $storeRoot."
-    $ApplianceDownloadUrl = Read-LabParameter -Name 'ApplianceDownloadUrl' -Value $ApplianceDownloadUrl -Kind Url -Prompt 'VHD download link shown in the project (Discover > Hyper-V > VHD)' -Example 'https://aka.ms/migrate/appliance/hyperv'
+    $ApplianceDownloadUrl = Read-LabParameter -Name 'ApplianceDownloadUrl' -Value $ApplianceDownloadUrl -Kind Url -Prompt 'VHD download link shown in the project (Discover > Hyper-V > VHD)' -Example 'https://go.microsoft.com/fwlink/?linkid=2191848'
     $ApplianceSha256 = Read-LabParameter -Name 'ApplianceSha256' -Value $ApplianceSha256 -Kind Sha256 -Prompt "SHA256 Microsoft publishes for this archive (Hyper-V appliance article, 'Verify security'), or SKIP"
     $DownloadTimeoutMinutes = Read-LabNumber -Name 'DownloadTimeoutMinutes' -Prompt 'Minutes to wait for the download before asking whether to keep waiting' -Value $DownloadTimeoutMinutes -Supplied:($PSBoundParameters.ContainsKey('DownloadTimeoutMinutes')) -Minimum 15 -Maximum 480 -Example '90'
 }
