@@ -8,6 +8,25 @@ Discover, assess, test and migrate four Hyper-V VMs to Azure, then validate and 
 
 **Release status:** awaiting a full live Azure/Hyper-V run. Validate the scripts end to end in a training subscription before partner delivery, and record the revision you used.
 
+## Current runtime and complete checkout
+
+Initial deployment includes Tomcat 9/OpenJDK 17, the original named WAR, protected JNDI
+credentials, SQL mixed mode/shared restricted login, lab aliases and Nginx desk/API proxy.
+No manual app install, extra password prompt or traffic command is needed by students.
+SQL-independent health precedes SQL setup; final success requires actual SQL readiness/data,
+named UI and proxy readiness. Discovery credentials still need appliance-side validation.
+The `AgentBased` wrapper/filter remains a Module 3 grouping/instructor agentless shortcut,
+not proof of a Mobility Service migration path or a waiver of guest discovery permissions.
+
+The checkout contains all app source, WAR/runtime binary assets and rebuild/tests under
+[apps/contoso-orderdesk](apps/contoso-orderdesk/README.md). A new checkout has no workspace
+or output-folder dependency. Read the pinned JDBC/local-checksum prerequisite options there.
+Run `python3 tests/integration_checks.py` and app static checks, then the real Windows
+PowerShell 5.1 `scripts/check-lab-scripts.ps1` before release. `python3 build.py zip --output
+../azure-migrate-workshop-tomcat.zip` packages the complete checkout with per-file SHA256 guards. No Java/SQL/appliance test is
+claimed by the static validation report. Existing-lab 3001 staging is a separate fallback,
+not part of new deployment.
+
 ## Learning path
 
 Provision the environment before the teaching session. Budget a full working day for initial delivery; actual deployment, discovery, replication and backup time depends on bandwidth, quota and regional capacity. Measure the duration yourself before advertising a timed agenda.
@@ -32,7 +51,7 @@ flowchart LR
       IIS["OnPrem-Web · .10 · IIS"]
       SQL["OnPrem-SQL · .11 · SQL Express 2022"]
       Nginx["OnPrem-Linux-Web · .12 · Nginx"]
-      App["OnPrem-Linux-App · .13 · Node.js 24"]
+      App["OnPrem-Linux-App · .13 · Tomcat 9 / OpenJDK 17"]
       Appliance["MigrateAppl · .20\nImported in Module 1 from the appliance VHD\n8 vCPU / 16 GB"]
     end
     Project["Azure Migrate project"]
@@ -50,7 +69,7 @@ flowchart LR
 
 This is a **single nested Hyper-V host**, not a cluster or a production landing zone. Its internal NAT topology is a workshop adaptation. Microsoft documents an external switch for a production appliance deployment; validate the nested topology yourself and do not describe it as production support certification. [Appliance prerequisites](https://learn.microsoft.com/azure/migrate/deploy-appliance-script)
 
-The sites and Node API are independent samples. The IIS page is static; Nginx is not a reverse proxy; the Node API has no database client or persistence. The SQL database remains named `ContosoApp` to keep its sample schema and validation stable.
+The IIS and Nginx port-80 sites remain static. **Contoso Order Desk** is now a real lightweight Java/JSP application on Linux-App: it reads/writes the unchanged `ContosoApp` Customers/Orders tables through a bounded JDBC pool. Nginx provides a separate desk/API proxy on 8080; optional generators are not needed for application setup.
 
 ## Start here
 
@@ -58,7 +77,7 @@ The sites and Node API are independent samples. The IIS page is static; Nginx is
 2. Obtain the repository and record the exact commit shown below. For partner delivery, supply the release tag or commit you validated so every learner uses the same revision. Run these commands in a terminal, then continue from the repository directory:
 
    ```bash
-   git clone --branch main https://github.com/j33pguy/azure-migrate-workshop.git
+   git clone --branch <reviewed-tomcat-branch> <workshop-repository-url>
    cd azure-migrate-workshop
    git rev-parse HEAD
    ```
@@ -123,7 +142,7 @@ The scripts and the modules are run separately. Each script also carries this in
 
 | Script | Completes |
 |---|---|
-| `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract |
+| `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract only when opted in |
 | `migrate-step1-setup-project.ps1` | **Optional.** Module 2 §4.1 (target landing zone), as an instructor shortcut — the student builds the same thing in the portal there. Module 1 §1 is **not** automated; it prints the portal steps |
 | `migrate-step2-discover-assess.ps1` | Module 1 §3.2–3.5, §4 and §5. §3.1 (project key) stops for you |
 | `migrate-step3-replicate.ps1` | Module 2 §5–§7, or Module 3 §8–§9, per `-Workload` |
@@ -145,11 +164,11 @@ Nothing automates Module 4: it is analysis, with no lab state to reach.
 | `deploy-lab.ps1` | Billable source host, nested guests on fixed disks, DHCP/NAT and samples; creates the `E:` appliance store partition; protected setup parameters; fails if readiness is not observed |
 | `host/configure-host.ps1` | Runs inside the Windows host; creates the four workload VMs and stages the optional traffic generator |
 | `migrate-step1-setup-project.ps1` | Billable target/test network preparation; portal project creation follows |
-| `enable-lab-traffic.ps1` | Optional; staged on HyperVHost by deployment and run there with its generated settings file. Wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` reverses it |
+| `enable-lab-traffic.ps1` | Optional; staged on HyperVHost by deployment and run there with its generated settings file. Wires the four workloads into one order desk so dependency analysis has real traffic to observe; `-Disable` stops generators without removing the application prerequisites |
 | `migrate-step2` – `migrate-step5` | Discovery/assessment, replication, test migration and cutover helpers for Modules 1–3. Steps 3–5 accept `-Workload All\|Agentless\|AgentBased` |
 | `migrate-step3a-agentless.ps1` | Bridges the lab to the end state of **Module 2** (OnPrem-Web, OnPrem-Linux-Web) in one run |
 | `migrate-step3b-agent-based.ps1` | Bridges the lab to the end state of **Module 3** (OnPrem-SQL, OnPrem-Linux-App). Reaches that state agentlessly — see CHANGES.md |
-| `migrate-step6-post-migration.ps1` | Read-only VM inventory and Module 5 handoff |
+| `migrate-step6-post-migration.ps1` | Configures monitoring, backup, security rules and cost controls on migrated VMs; creates or changes Azure resources |
 | `check-lab-scripts.ps1` | Parses every lab script without running any of them; reports file, line and column for anything that will not parse |
 | `cleanup-lab.ps1` | Lists the resource group's contents, confirms, deletes the group, then reports what went and what must still be removed by hand. Refuses to start when a CanNotDelete lock is present |
 
@@ -192,4 +211,4 @@ No attempt has been made to solve for environments beyond the one this was built
 
 Parse every script with PowerShell before sharing changes, and confirm the documentation links resolve. The host-side scripts target Windows PowerShell 5.1; the deployment client works on either 5.1 or PowerShell 7.
 
-The supplied source has an [MIT license](LICENSE) attributed to Pamir Erdem. Its GitHub metadata reports a standalone repository; the claimed Microsoft original was not identified. Preserve the existing license and trace the original source before making Microsoft-derived attribution claims.
+Preserve upstream license/attribution notices when merging this reviewed source into the workshop repository. This supplied baseline does not include a LICENSE file; do not infer Microsoft-derived attribution or silently manufacture licensing metadata.

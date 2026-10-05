@@ -2,12 +2,14 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-This file describes the **current state** of the changes in this folder, measured against the two
-supplied sources: the original workshop (referred to below as the *unmodified* lab) and the
-*Pull 12* revision. It is written as a description of what is now true, not as a history of the
-revisions that got here, so it does not go stale as work continues.
+The Tomcat integration section records the current runtime. Numbered sections retained below
+are **historical baseline notes**, including earlier Node/traffic behavior that is now superseded.
+The earlier comparison used the supplied original and Pull 12 revision; this integration uses
+only the published baseline and does not import Pull 12 modules.
 
-Files in this folder replace their counterparts in a checkout. Everything not listed is unchanged.
+This is the complete branch-ready source, not a changes-only overlay. See
+`tests/baseline-manifest.json` for exact changed/unchanged/omitted baseline files and
+`SHA256SUMS` for current per-file integrity.
 
 | File | State |
 |---|---|
@@ -24,6 +26,29 @@ Files in this folder replace their counterparts in a checkout. Everything not li
 | `README.md` | Modified |
 
 ---
+
+## Current: Tomcat initial deployment (2026-10-05)
+
+| Area | Implemented behavior |
+|---|---|
+| Linux-App | Original Contoso Order Desk WAR, Tomcat 9/OpenJDK 17, non-root contoso-orderdesk service, port 3000 |
+| SQL | Same schema/seeds; initial mixed mode + labapp reader/writer login using protected deployment password |
+| Linux-Web | Original Nginx port-80 site; required desk/API proxy on 8080 with port-bearing Host header |
+| Payload | Checkout-local deterministic minimal runtime ZIP/WAR and SHA256 guards; no branch source download |
+| JDBC | Pinned official 13.6.0.jre11 HTTPS retrieval with bounded retries/structural checks; explicit locally checksum-verified JAR option |
+| Ordering | Early health has no SQL dependency; final host validation requires SQL/data/page/proxy before success |
+| Credentials | Root-only initial seed; root:runtime 0640 JNDI descriptor; no secret in source/WAR/arguments/log messages |
+| Traffic | Instructor opt-in HTTP-only Python via Nginx; real Java-owned bounded SQL pool; disable preserves prerequisites |
+| Discovery | Actual appliance SSH mapping plus both Tomcat trees directory r+x and sudo ls/netstat; not appliance-tested |
+| Validation | Reproducible packaging, helper tests, static deploy/host/cloud-init composition; target PS AST/JSP/SQL/discovery still required |
+| Deliverables | Full published baseline plus complete apps/contoso-orderdesk and integration tests; untouched files preserved byte-for-byte |
+
+Current module/runtime checks and instructor script labels are updated. AgentBased remains the
+Module 3 workload grouping/agentless automation shortcut; migration architecture, VM names,
+sizing/disks, schema/seeds and appliance behavior are not changed. Module 4 remains unchanged.
+No material was imported from Pull 12 modules. Existing-lab staging/rollback is documented only
+as a fallback. Personal account/session override notes and obsolete source-only pointers were
+removed. The prior dated parser report is omitted because it is not evidence for this revision.
 
 ## Which script completes which module step
 
@@ -61,7 +86,7 @@ Pull 12 created a fifth nested VM, `MigrateAppl`, as a bare Windows Server guest
 installed the Azure Migrate appliance onto. That VM is no longer created.
 
 The four workloads — `OnPrem-Web` (.10, IIS), `OnPrem-SQL` (.11, SQL Express), `OnPrem-Linux-Web`
-(.12, Nginx) and `OnPrem-Linux-App` (.13, Node.js) — are built exactly as Pull 12 built them, using
+(.12, Nginx) and `OnPrem-Linux-App` (.13, now Tomcat) — retain the published baseline topology using
 the same creation methods that are known to work: managed Run Command with protected parameters, a
 SAS-exported marketplace disk for the Windows base image, qemu-img conversion for the Ubuntu cloud
 image, cloud-init for the Linux guests and `unattend.xml` injection for the Windows guests.
