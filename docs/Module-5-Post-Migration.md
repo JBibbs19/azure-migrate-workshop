@@ -208,7 +208,7 @@ DCRs are the modern, declarative way to define what telemetry to collect. They r
 | **IIS Logs** (custom text log) | HTTP requests, response codes, latency | Web server performance for `OnPrem-Web` |
 | **SQL Performance Counters** | Buffer cache hit ratio, batch requests/sec, lock waits | Database performance for `OnPrem-SQL` |
 | **Nginx Access Logs** (custom text log) | Request rates, upstream response times, error rates | Web tier monitoring for `OnPrem-Linux-Web` |
-| **Node.js Application Metrics** (custom) | Event loop lag, heap usage, request throughput | Application health for `OnPrem-Linux-App` |
+| **Tomcat JVM/Application Metrics** (custom) | JVM heap/GC, active JDBC connections, request throughput | Application health for `OnPrem-Linux-App` |
 
 5. Under **Destination**, select `law-migrate-workshop`
 6. Click **Review + create** → **Create**
@@ -281,7 +281,7 @@ Before configuring backup, ask the business question: **How much data can you af
 | `OnPrem-SQL` (database) | 1 hour | Every 4 hours (SQL backup) + daily VM | 30 days daily, 12 months monthly, 5 years yearly |
 | `OnPrem-Web` (IIS) | 24 hours | Daily | 30 days daily |
 | `OnPrem-Linux-Web` (Nginx) | 24 hours | Daily | 30 days daily |
-| `OnPrem-Linux-App` (Node.js) | 24 hours | Daily | 30 days daily, 12 months monthly |
+| `OnPrem-Linux-App` (Tomcat) | 24 hours | Daily | 30 days daily, 12 months monthly |
 
 ### 3.2 Create a Recovery Services Vault and Backup Policy
 
@@ -429,9 +429,9 @@ flowchart TD
     NSG --> Web["OnPrem-Web<br/>Allow: 80, 443"]
     NSG --> SQL["OnPrem-SQL<br/>Allow: 1433 from Web only"]
     NSG --> Nginx["OnPrem-Linux-Web<br/>Allow: 80, 443"]
-    NSG --> Node["OnPrem-Linux-App<br/>Allow: 3000 from Nginx only"]
+    NSG --> TomcatApp["OnPrem-Linux-App<br/>Allow: 3000 from Nginx only"]
 
-    Web & SQL & Nginx & Node --> Bastion["Step 2: Azure Bastion<br/>Replace open RDP/SSH"]
+    Web & SQL & Nginx & TomcatApp --> Bastion["Step 2: Azure Bastion<br/>Replace open RDP/SSH"]
     Bastion --> Defender["Step 3: Microsoft Defender<br/>Threat Protection"]
     Defender --> JIT["Step 4: JIT VM Access<br/>Time-limited admin access"]
     JIT --> Done["🛡️ Zero Trust Achieved"]
@@ -535,7 +535,7 @@ Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 | 200 | Allow-SSH-MyIP | Inbound | Allow | TCP | *Your IP* | 22 |
 | 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
 
-**OnPrem-Linux-App (Node.js — App Tier):**
+**OnPrem-Linux-App (Tomcat — App Tier):**
 
 | Priority | Name | Direction | Action | Protocol | Source | Dest Port |
 |---|---|---|---|---|---|---|

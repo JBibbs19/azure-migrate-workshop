@@ -316,7 +316,19 @@ Then open the **Software inventory** column on the Discovered servers page. You 
 | OnPrem-Web | IIS web server role, ASP.NET 4.5 |
 | OnPrem-SQL | SQL Server 2022 Express, with the `ContosoApp` database under SQL discovery |
 | OnPrem-Linux-Web | Nginx |
-| OnPrem-Linux-App | Node.js, the `contoso-app` service |
+| OnPrem-Linux-App | Tomcat 9, OpenJDK 17, Contoso Order Desk WAR and `contoso-orderdesk` service |
+
+**Tomcat discovery prerequisites:** map the actual SSH guest credential on the appliance.
+It needs recursive read + execute on directories under `/usr/share/tomcat9` (CATALINA_HOME)
+and `/var/lib/contoso-orderdesk` (CATALINA_BASE), and sudo `netstat` and `ls`. The deployment
+user retains the existing NOPASSWD sudo. Keep `ROOT.xml` root:runtime 0640; do not make
+credentials world-readable. Run `sudo bash /opt/contoso-orderdesk/scripts/validate.sh
+--credential-user <deployed-linux-username>` as one command to check local access, then
+validate appliance SSH separately. Tomcat 8+ Linux web-app discovery/assessment support is
+not proof of migration execution; Nginx remains separate software inventory, not an assessed
+web-app platform. Allow multiple five-minute TCP polling windows; uploads can take six hours
+and web-app configuration discovery 24 hours.
+
 
 > **Warning:** An empty Software inventory column almost always means guest credentials are missing, not that the guests have no applications. VM inventory comes through the Hyper-V host; software inventory connects **directly to each guest** over PowerShell remoting on Windows and SSH on Linux, using the credentials from step 5. No credentials, no applications — and no error message either.
 
@@ -330,8 +342,8 @@ Test-NetConnection 192.168.0.11 -Port 5985
 
 ```bash
 # From MigrateAppl or the host — expect a version string from both Linux guests
-ssh labadmin@192.168.0.12 'command -v locate && nginx -v'
-ssh labadmin@192.168.0.13 'command -v locate && node --version'
+ssh <deployed-linux-username>@192.168.0.12 'command -v locate && nginx -v'
+ssh <deployed-linux-username>@192.168.0.13 'command -v locate && java -version && sudo -n systemctl is-active contoso-orderdesk'
 ```
 
 Deployment enables PowerShell remoting on the Windows guests and installs `plocate` on the Linux guests, because software inventory runs `locate` to find installed applications and Ubuntu cloud images omit it. If either check fails, that prerequisite did not take.
@@ -414,9 +426,9 @@ Record for each machine: readiness, any unsupported configuration, the selected 
 
 What you see here depends on whether the sample business traffic from [Module 0, section 6](Module-0-Setup.md#6-start-the-sample-business-traffic) is running.
 
-**Without it,** the IIS site, the Nginx site and the Node API are independent samples — none of them calls SQL or each other. An empty application dependency view is the correct result, and saying so is a more useful lesson than manufacturing a diagram. Do not go looking for a connection string or a `/api/products` endpoint; they do not exist in the base lab.
+**Without generators,** the Tomcat JVM already reads ContosoApp and retains a bounded pooled SQL connection after readiness. The Nginx proxy is installed, but idle HTTP edges may not appear. Interpret empty/partial polling evidence carefully; do not manufacture sustained sockets. `/api/health` is only liveness; `/api/ready` and `/api/orders` verify actual SQL access.
 
-**With it,** the four workloads behave as one order desk: Nginx proxies to the Node API, the Node API reads and writes `ContosoApp` over TCP 1433, and the IIS server runs an internal order report against that same database. `OnPrem-SQL` therefore appears as a shared dependency of both application tiers — the finding that tells a customer the database cannot be moved on its own.
+**With optional traffic,** Python performs low-rate HTTP through Nginx into Tomcat; the JVM reads/writes `ContosoApp` over TCP 1433, and an IIS-host scheduled task reads an internal SQL report and calls Tomcat health. Disabling generators leaves the SQL login, proxy, hosts and application intact. `OnPrem-SQL` therefore appears as a shared dependency of both application tiers — the finding that tells a customer the database cannot be moved on its own.
 
 Either way, agentless dependency discovery needs supported guest credentials and time to collect observations.
 

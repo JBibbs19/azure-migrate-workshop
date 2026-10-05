@@ -2,129 +2,81 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-By default the four workloads are independent samples, so Azure Migrate's application
-dependency view is legitimately empty. This optional add-on wires them into one small-business
-order desk that produces continuous TCP traffic between the guests, which gives dependency
-analysis something real to observe and makes the performance-based assessment comparison in
-Module 1 meaningful.
-
-It is opt-in, and it is delivered to the host by deployment rather than copied there by
-hand. A lab that never runs it behaves exactly as Modules 0–5 describe.
-
-## What it creates
+Initial deployment already provisions Contoso Order Desk on Tomcat 9/OpenJDK 17, its shared
+SQL login, lab aliases and Nginx 8080 desk/API proxy. Port-80 IIS/Nginx sites remain unchanged.
+The optional instructor generators add low-rate requests; they are not app prerequisites.
 
 | Edge | Protocol | Driven by |
 |---|---|---|
-| `OnPrem-Web` → `OnPrem-SQL` | TDS 1433 | Scheduled task `LabOrderDeskTraffic` reads a recent-orders report |
-| `OnPrem-Web` → `OnPrem-Linux-App` | HTTP 3000 | The same task calls `/api/health` as a batch job would |
-| `OnPrem-Linux-App` → `OnPrem-SQL` | TDS 1433 | systemd unit `lab-traffic` inserts an order and counts the table |
-| `OnPrem-Linux-App` → `OnPrem-Linux-Web` | HTTP 8080 | The same unit calls the proxy |
-| `OnPrem-Linux-Web` → `OnPrem-Linux-App` | HTTP 3000 | Nginx `proxy_pass` on a new port 8080 server block |
+| OnPrem-Web → OnPrem-SQL | TDS 1433 | LabOrderDeskTraffic scheduled task reads existing orders |
+| OnPrem-Web → OnPrem-Linux-App | HTTP 3000 | The same task calls health |
+| OnPrem-Linux-App → OnPrem-Linux-Web | HTTP 8080 | contoso-orderdesk-traffic Python HTTP generator |
+| OnPrem-Linux-Web → OnPrem-Linux-App | HTTP 3000 | Existing Nginx desk/API reverse proxy |
+| OnPrem-Linux-App → OnPrem-SQL | TDS 1433 | Actual Tomcat Java process reads/inserts through bounded JDBC pool |
 
-`OnPrem-SQL` becomes a shared dependency of both application tiers, which is the discussion
-the map should provoke: the database cannot be moved on its own.
+Python never connects directly to SQL and contains no SQL password. It performs health,
+orders read and at most one sample order insert per cycle through Nginx. Default interval is
+30 seconds; allowed range 20–600 seconds. This is not a production load/sizing benchmark.
+The real JVM keeps initial/min idle 1 and maxActive 4 JDBC connections after readiness;
+no arbitrary sockets are opened merely to affect dependency polling.
 
-Nothing deployment validates is replaced. The IIS site on `.10`, the Nginx root site on `.12`
-and the Node service on port 3000 keep serving their original pages, so
-`Assert-LabSourceWorkloads` still passes. The proxy listens on 8080 and the generators are
-separate units.
+## Run on HyperVHost (instructor opt-in)
 
-## Run it
-
-The script is already on the host. Deployment writes it to
-`C:\AzMigrateLab\enable-lab-traffic.ps1`, together with
-`C:\AzMigrateLab\lab-traffic.settings.json` holding the lab user name, the guest addresses
-and the request interval. Nothing is started for you.
-
-Deploy the lab, confirm workload readiness, then in an elevated Windows PowerShell session
-inside HyperVHost:
+Deployment stages the script/settings, but never starts generators:
 
 ```powershell
 C:\AzMigrateLab\enable-lab-traffic.ps1
+# Or change the request interval:
+C:\AzMigrateLab\enable-lab-traffic.ps1 -IntervalSeconds 30
+# Stop generators only:
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable
 ```
 
-Enter the lab password when prompted. That is the only value the script needs; everything
-else comes from the settings file. Explicit parameters override it when you pass them.
+Supply the same existing lab password privately. LinuxUsername is read from
+`C:\AzMigrateLab\lab-traffic.settings.json`, otherwise enter the confirmed deployment
+username when prompted; an explicit parameter overrides settings. Windows configuration uses
+PowerShell Direct. Linux configuration uses SSH; OpenSSH 8.4+ can reuse the initial password
+prompt with askpass, older clients prompt per guest. `-SkipLinux` configures Windows only
+and saves the Linux commands for console execution. `-SettingsPath` accepts an alternate
+settings file; the normal file is deployment-generated. Do not run from your workstation.
 
-Windows guests are configured over PowerShell Direct, which needs no network path. The two
-Linux guests are configured over SSH from the host; the script prompts for the `labadmin`
-password once per guest. If no SSH client is present it tries to add the OpenSSH client
-capability, and failing that writes each guest's script to `C:\AzMigrateLab\Traffic\` to run
-from the Hyper-V console.
+Reruns update only optional generator tasks/configuration. SQL mixed mode/login preparation
+belongs to initial PHASE 5, not this script. Nginx/hosts already exist; the traffic script
+checks proxy readiness without replacing it. **Disable preserves the SQL login, proxy,
+hosts, Tomcat and original sites**. It stops/removes the Windows task and disables the
+Python service; no shared application prerequisite is removed.
 
-Useful switches:
-
-- `-IntervalSeconds 20` — seconds between request cycles. Keep it low-rate.
-- `-SkipLinux` — configure the Windows guests only and write the Linux scripts to disk.
-- `-SettingsPath` — point at a different settings file.
-- `-Disable` — stop and remove the generators, the proxy and the lab SQL login.
-
-> **Note:** Running the repository copy from your workstation will not work. The script needs
-> Hyper-V cmdlets and PowerShell Direct access to the guests, so it must run on HyperVHost.
-> It stops with a clear message if you try.
-
-> **Tip:** Re-running the script is safe. Every step is written to be repeatable — hosts entries
-> are replaced between markers, the SQL login is created or altered, the scheduled task is
-> registered with `-Force`, and the Linux units are rewritten and restarted. If a run stops
-> part-way, fix the cause and run it again rather than unpicking what it already did.
-
-## Verify
+## Verify actual dependencies
 
 ```powershell
-Invoke-RestMethod http://192.168.0.12:8080/api/health
-Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database ContosoApp `
-    -Query 'SELECT COUNT(*) AS Orders FROM dbo.Orders'
+Invoke-RestMethod http://192.168.0.13:3000/api/ready
+Invoke-RestMethod http://192.168.0.12:8080/api/ready
+Invoke-RestMethod http://192.168.0.13:3000/api/orders
 ```
 
-The order count should climb between runs. Generator logs are at
-`C:\LabTraffic\traffic.log` on `OnPrem-Web` and `journalctl -u lab-traffic` on
-`OnPrem-Linux-App`.
+Counts should rise after generator cycles. The Windows log is `C:\LabTraffic\traffic.log`;
+Linux uses `sudo journalctl -u contoso-orderdesk-traffic -n 15 --no-pager`. The generator has
+no SQL secret. Windows traffic credentials remain in a root-equivalent administrator/SYSTEM
+ACL-protected script; this is lab-only, not production secret storage. Do not share that file.
+On Linux-App, `sudo ss -ntp | grep ':1433'` should attribute SQL sockets to **java**, not Python.
+Disabling traffic must leave both direct and proxy readiness working.
 
-Leave the mesh running for at least one full dependency collection interval before expecting
-a populated map. Agentless dependency analysis samples active connections on a polling
-interval rather than capturing continuously, so a short burst can be missed entirely. Confirm
-the current interval and the guest-credential prerequisites in the
-[support matrix](https://learn.microsoft.com/azure/migrate/migrate-support-matrix-hyper-v)
-rather than assuming a value.
+## Discovery and migration
 
-## Names, not addresses — on purpose
+Without generators, HTTP edges may be idle; the Tomcat→SQL dependency still exists. An empty
+or partial polling view is not evidence of no dependency. Use the appliance's actual guest
+credential and validate SSH reachability, recursive CATALINA_HOME/BASE directory read/execute,
+and sudo netstat/ls separately. Leave real traffic/pool activity across multiple five-minute
+polling windows; dependency uploads can take six hours and web-app configuration 24 hours.
+No local health test proves appliance discovery. Nginx is separate inventory, not a supported
+assessed web-app platform.
 
-Every generator resolves `onprem-sql`, `onprem-app` and `onprem-nginx` through each guest's
-hosts file. Hardcoded `192.168.0.x` addresses would silently break after cutover into
-`10.1.0.0/16`, and the failure would look like a migration defect.
+After test migration/cutover, repoint only lab aliases/private DNS to **actual new private IPs**,
+restart Tomcat to close the old pool and reload Nginx to resolve its new upstream. Update
+Windows generator aliases too. Keep test dependencies isolated from source/production.
+Generators resume at boot if enabled; stop them before maintenance and re-enable explicitly
+only after readiness. See [Module 3](Module-3-Agent-Based-Migration.md) and the
+[application guide](../apps/contoso-orderdesk/README.md).
 
-Because the generators start at boot, the migrated VMs resume the same traffic in Azure —
-and it fails until the hosts entries are repointed. Treat that as a scheduled exercise in
-Module 3, not an accident: rewriting hosts entries or moving to DNS is exactly the
-remediation a customer performs after a real cutover.
-
-## Keep the load light
-
-Module 1 asks learners to record the collection period, confidence rating and idle nature of
-the samples, because a few minutes of idle telemetry cannot justify a production right-sizing
-recommendation. A steady trickle of requests improves that conversation. A CPU or network
-stress tool would ruin it: the host has only 8 vCPUs shared across four guests, and the
-resulting assessment recommendations would be fiction.
-
-## What it changes on the guests
-
-- **OnPrem-SQL** — SQL Server Express is switched to mixed-mode authentication and given one
-  lab-only login, `labapp`, holding `db_datareader` and `db_datawriter` on `ContosoApp` only.
-  The Linux generator cannot use Windows authentication, so this is required. `-Disable`
-  removes the login; it does not revert the authentication mode.
-- **OnPrem-Web** — `C:\LabTraffic\order-desk.ps1` plus the `LabOrderDeskTraffic` scheduled
-  task, running as SYSTEM with an at-startup trigger.
-- **OnPrem-Linux-App** — the `mssql` npm package, `/opt/contoso-app/lab-traffic.js`, the
-  `lab-traffic` systemd unit and `/etc/lab-traffic.env` (mode 600, root-owned). The original
-  `contoso-app` service and `server.js` are untouched.
-- **OnPrem-Linux-Web** — `/etc/nginx/conf.d/lab-order-desk.conf` only. The default site is
-  untouched.
-
-Credentials are held in the systemd environment file and the scheduled task's script. Both
-are readable by an administrator of the guest. Use lab-only credentials, as Module 0 requires.
-
-## Firewall
-
-The base deployment already permits this traffic between guests; see
-[Module 0, section 8.2](Module-0-Setup.md#82--lab-firewall-posture). No additional rules are
-needed for the mesh itself.
+The existing private-network firewall rules permit these edges. No new broad public rule
+is necessary; retain app-tier access from the intended Nginx/Windows clients only.

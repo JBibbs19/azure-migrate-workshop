@@ -21,7 +21,7 @@ Agent-based migration deploys a **Mobility Service agent** on each source VM. Th
 │  Source VM        │ ──────────────────────────→  │  Replication Appliance│
 │  (Mobility Agent) │     Continuous stream        │  ┌─────────────────┐ │
 │  - SQL Server     │     Port 9443                │  │ Process Server  │ │
-│  - Node.js App    │                              │  │ Config Server   │ │
+│  - Tomcat App    │                              │  │ Config Server   │ │
 └──────────────────┘                               │  └─────────────────┘ │
                                                    └──────────┬──────────┘
                                                               │ HTTPS/443
@@ -141,7 +141,7 @@ flowchart TD
         IIS["OnPrem-Web → Agentless"] 
         Nginx["OnPrem-Linux-Web → Agentless"]
         SQL["OnPrem-SQL → Agent-Based"]
-        NodeJS["OnPrem-Linux-App → Agent-Based"]
+        TomcatApp["OnPrem-Linux-App → Agent-Based"]
     end
 
     style Agentless fill:#4CAF50,color:white
@@ -149,7 +149,7 @@ flowchart TD
     style IIS fill:#4CAF50,color:white
     style Nginx fill:#4CAF50,color:white
     style SQL fill:#2196F3,color:white
-    style NodeJS fill:#2196F3,color:white
+    style TomcatApp fill:#2196F3,color:white
 ```
 
 ---
@@ -178,14 +178,14 @@ Agent-based migration supports **application-consistent snapshots** via VSS (Win
 | **TempDB and log locations** | Azure VM may have different drive letters. Verify TempDB and log file paths post-migration. |
 | **Recovery model** | Verify recovery model (FULL/SIMPLE) is preserved. Check backup chain is not broken. |
 
-### Node.js / Application Server Considerations
+### Tomcat / Application Server Considerations
 
 | Concern | Strategy |
 |---------|----------|
 | **Stateless vs stateful** | If truly stateless, consider agentless. If using local sessions, file uploads, or SQLite — agent-based. |
-| **Environment variables** | Document all env vars (DB_HOST, API_KEY, etc.) that reference on-premises resources. Update post-migration. |
+| **Database configuration** | Keep the private JNDI descriptor protected; repoint onprem-sql in hosts/private DNS, not a password argument. |
 | **Service discovery** | If the app discovers services by IP or hostname, update service registry/DNS post-migration. |
-| **Process manager** | Verify PM2/systemd auto-starts the application on boot. Test this during test migration. |
+| **Process manager** | Verify non-root contoso-orderdesk systemd service auto-starts the bounded Tomcat JVM on boot. |
 | **Port bindings** | Confirm NSG rules allow inbound traffic on application ports (e.g., 3000, 8080). |
 
 ---
@@ -198,7 +198,7 @@ Agent-based migration supports **application-consistent snapshots** via VSS (Win
 | VM Name              | OS                    | Role                   | IP Address    |
 |----------------------|-----------------------|------------------------|---------------|
 | OnPrem-SQL           | Windows Server 2022   | SQL Server 2022 Express| 192.168.0.11  |
-| OnPrem-Linux-App     | Ubuntu 22.04          | Node.js Express app    | 192.168.0.13  |
+| OnPrem-Linux-App     | Ubuntu 22.04          | Tomcat 9 JSP order desk    | 192.168.0.13  |
 
 - ✅ RDP access to OnPrem-SQL and SSH access to OnPrem-Linux-App
 - ✅ Azure subscription with quota for 2× Standard_B2s VMs
@@ -212,8 +212,14 @@ The replication appliance is a dedicated Windows Server that manages all replica
 
 ### 5.1 Download the Replication Appliance
 
-1. In the Azure Portal, navigate to **Azure Migrate** → **Servers, databases and web apps**.
-2. In the **Migration tools** section, click **Discover**.
+1. In the Azure Portal, search for **Azure Migrate**, select **All projects**, and open the
+   project you created in Module 1. The tools only appear once a project is open.
+2. Find the tool that performs **migration** — **Migration and modernization**, or
+   **Azure Migrate: Server Migration** in the classic layout — and select **Discover**.
+
+> **Note:** Azure Migrate is rolling out an **Explore / Decide / Execute** experience and it
+> reaches tenants at different times, so headings vary. Follow the operation described rather
+> than the exact label.
 3. For **Are your machines virtualized?**, select **Physical or other (AWS, GCP, etc.)**.
 4. Select your **Target region**.
 5. Click **Create resources** — this provisions the required Azure resources (Recovery Services vault, cache storage accounts).
@@ -595,47 +601,35 @@ $connection.Close()
 2. Click **Test migration** → Select the test VNet → Click **Test migration**.
 3. Wait for the job to complete.
 
-### 10.4 Validate Node.js App on Test VM
+### 10.4 Validate Tomcat Order Desk on Test VM
 
-1. SSH into the test VM `OnPrem-Linux-App-test`.
-2. Verify the application:
-
-```bash
-# Check if Node.js is installed and correct version
-node --version
-
-# Check if the app process is running
-pm2 list   # If using PM2 process manager
-# OR
-sudo systemctl status nodeapp   # If running as a systemd service
-
-# Start the app if it's not running
-cd /opt/app
-npm start &
-
-# Verify the app is responding on port 3000
-curl -s http://localhost:3000
-curl -s http://localhost:3000/api/health   # If a health endpoint exists
-
-# Verify the app is listening on the expected port
-sudo ss -tlnp | grep ':3000'
-```
-
-3. **Test application-to-database connectivity** (note: in the isolated test VNet, the app may not reach the SQL test VM unless both are on the same test VNet):
+SSH into `OnPrem-Linux-App-test`. Put its SQL and Nginx dependencies on the same isolated
+test VNet, repoint the three lab aliases to their actual **test** private addresses using
+`/opt/contoso-orderdesk/scripts/repoint.sh`, and update Linux-Web aliases/reload Nginx.
+Do not let a test app silently query the production/source SQL address.
 
 ```bash
-# Check if the app reports database connectivity errors
-curl -s http://localhost:3000/api/health | python3 -m json.tool
-
-# Check application logs for connection errors
-pm2 logs --lines 50
-# OR
-sudo journalctl -u nodeapp --since "10 minutes ago" --no-pager
+java -version
+sudo systemctl --no-pager status contoso-orderdesk
+curl --fail http://localhost:3000/api/health
+curl --fail http://localhost:3000/api/info
+curl --fail http://localhost:3000/api/ready
+curl --fail http://localhost:3000/api/orders
+sudo bash /opt/contoso-orderdesk/scripts/validate.sh
+sudo ss -ntp | grep ':1433'  # Java owns the SQL connection.
 ```
 
-> **🏗️ In Production:** For test migrations of multi-tier applications, migrate all dependent VMs to the test VNet simultaneously so you can validate end-to-end connectivity. A web app that passes smoke tests but cannot reach its database is not a successful test.
+Health must report healthy, OnPrem-Linux-App, timestamp and Contoso Order Desk. Info exposes
+javaVersion for the JVM runtime. SQL failure must return 503 from readiness/orders; health
+alone is not a successful multi-tier test. Open the named desk and confirm existing customers,
+counts and recent orders. `validate.sh --write` explicitly creates/reads one real test order
+and rejects invalid quantity; compare SQL data using the existing Customers/Orders tables.
+Manage the app with its systemd unit; never expose the protected JNDI file in a support log.
 
-**Expected Outcome:** The Node.js Express app is running and responding on port 3000.
+**Expected outcome:** non-root Tomcat 9/OpenJDK 17 serves port 3000 and reads the isolated
+migrated SQL data. Verify Linux-Web port-8080 desk/readiness separately; port 80 stays static.
+
+---
 
 ### 10.5 Clean Up Test Migrations
 
@@ -679,7 +673,7 @@ stateDiagram-v2
     │                    CUTOVER SEQUENCE                       │
     ├──────────────────────────────────────────────────────────┤
     │                                                          │
-    │  1. DRAIN ──→ Stop application (Node.js)                │
+    │  1. DRAIN ──→ Stop application (Tomcat)                │
     │               ↓ Ensures no new transactions              │
     │  2. SYNC  ──→ Final delta sync (SQL + App VMs)          │
     │               ↓ All pending writes committed             │
@@ -703,7 +697,7 @@ stateDiagram-v2
 - [ ] Application users notified of maintenance window
 - [ ] Target NSG rules pre-configured:
   - Port 1433 (SQL Server) — inbound from application subnet only
-  - Port 3000 (Node.js) — inbound from web tier / load balancer
+  - Port 3000 (Tomcat) — inbound from web tier / load balancer
   - Port 22 (SSH) and 3389 (RDP) — restricted to management subnet or Azure Bastion only
 - [ ] DNS TTL reduced to 300 seconds (done 7 days before cutover)
 - [ ] Connection string update procedure tested and ready
@@ -753,62 +747,45 @@ sqlcmd -S .\SQLEXPRESS -Q "EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL, 'D
 Test-NetConnection -ComputerName <OnPrem-SQL-private-ip> -Port 1433
 ```
 
-### 11.6 Post-Cutover Validation — Node.js App
+### 11.6 Post-Cutover Validation — Tomcat Order Desk
 
-1. SSH into the migrated OnPrem-Linux-App VM.
+SSH to the migrated Linux-App private address and verify `contoso-orderdesk` is active.
+Use private access; do not expose the unauthenticated demo on the Internet. Stop optional
+traffic before changing aliases, then follow the repoint sequence below.
 
-```bash
-# Check Node.js app status
-pm2 list
-# OR
-sudo systemctl status nodeapp
+### 11.7 Repoint Application Dependencies
 
-# Test the application
-curl -s http://localhost:3000
-
-# Verify external access (if public IP assigned)
-curl -s http://<public-ip>:3000
-```
-
-### 11.7 Update Connection Strings
-
-This is a critical post-cutover step. The Node.js app must now point to the SQL Server's **Azure private IP**, not the on-premises IP.
+The JDBC URL uses `onprem-sql`, not a fixed address. Substitute the **actual** Azure SQL,
+Linux-App and Linux-Web private IPs (the examples below are not assigned addresses):
 
 ```bash
-# Update environment variable or config file
-sudo nano /opt/app/.env
-# Change: DB_HOST=192.168.0.11
-# To:     DB_HOST=<OnPrem-SQL-azure-private-ip>
-
-# Restart the application
-pm2 restart all
-# OR
-sudo systemctl restart nodeapp
+# Linux-App: closes old pool and validates against the new SQL target.
+sudo bash /opt/contoso-orderdesk/scripts/repoint.sh 10.1.0.11 10.1.0.13 10.1.0.12
+# Linux-Web: update only these lab aliases in /etc/hosts, preserving other entries/comments.
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-> **🏗️ In Production — Connection String Management:**
-> Hard-coded IPs are a migration anti-pattern. Use **Azure Private DNS Zones** so applications connect via hostname (`sql.internal.contoso.com`) rather than IP. This way, you update DNS once and all applications pick up the change without code or config changes.
->
-> For Azure-native applications, consider **Azure Key Vault** for connection string storage with managed identity access.
+Update the same aliases for any Windows scheduled generator, or use private DNS. No SQL
+password change or plaintext environment file is necessary. In production, use private DNS
+and an approved secret-management approach, not lab hosts-file mappings.
 
 ### 11.8 Verify End-to-End Connectivity
 
 ```bash
-# From OnPrem-Linux-App, test SQL connectivity
-nc -zv <OnPrem-SQL-private-ip> 1433
-
-# Verify the app can query the database
-curl -s http://localhost:3000/api/health
+curl --fail http://localhost:3000/api/health
+curl --fail http://localhost:3000/api/ready
+curl --fail http://localhost:3000/api/orders
+sudo bash /opt/contoso-orderdesk/scripts/validate.sh
+curl --fail http://onprem-nginx:8080/api/ready
+# Optional explicit write test adds one row and reads it back:
+sudo bash /opt/contoso-orderdesk/scripts/validate.sh --write
+# Optional instructor traffic after readiness:
+sudo bash /opt/contoso-orderdesk/scripts/traffic.sh on 30
 ```
 
-```powershell
-# From OnPrem-SQL, verify it can be reached
-Test-NetConnection -ComputerName <OnPrem-Linux-App-private-ip> -Port 3000
-```
-
-**Expected Outcome:** Both VMs are running in Azure. SQL Server is accessible with verified data integrity, and the Node.js app is serving requests and connected to the migrated database.
-
----
+**Expected outcome:** SQL integrity/row counts are verified; Tomcat reads/writes the migrated
+ContosoApp database; the separate Nginx proxy works. Health alone is not database readiness.
+`traffic.sh off` stops the generator without removing SQL login, hosts or proxy.
 
 ## 12. Migration at Scale — CSA Guidance
 
@@ -919,7 +896,7 @@ You have successfully migrated all four on-premises VMs to Azure:
 | OnPrem-Web       | Agentless        | 2      | Stateless (IIS) |
 | OnPrem-Linux-Web | Agentless        | 2      | Stateless (Nginx) |
 | OnPrem-SQL       | Agent-Based      | 3      | Stateful (SQL Server) |
-| OnPrem-Linux-App | Agent-Based      | 3      | Application (Node.js) |
+| OnPrem-Linux-App | Agent-Based      | 3      | Application (Tomcat) |
 
 Continue to the next module in the workshop:
 

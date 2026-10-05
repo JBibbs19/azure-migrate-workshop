@@ -229,7 +229,7 @@ from a dropdown** — if they do not exist, you cannot proceed without leaving t
 | 110 | `Allow-SSH` | 22 | TCP | Reach the migrated Linux VMs |
 | 120 | `Allow-HTTP` | 80 | TCP | Validate IIS and Nginx after cutover |
 | 130 | `Allow-HTTPS` | 443 | TCP | Validate TLS endpoints |
-| 140 | `Allow-NodeJS` | 3000 | TCP | Validate the Node.js API |
+| 140 | `Allow-Tomcat` | 3000 | TCP | Validate the Tomcat order desk |
 
 3. Under **Subnets**, select **Associate**, choose the VNet and the `default` subnet.
 
@@ -253,16 +253,40 @@ and an NSG carrying five inbound rules is associated with that subnet.
 > `Microsoft.Migrate` and `Microsoft.KeyVault` providers. Run it beforehand when time is short,
 > but the portal path above is the one that teaches the decisions.
 
-### 4.2 Navigate to Azure Migrate
+### 4.2 Open your Azure Migrate project
+
+Almost everything in Azure Migrate is **scoped to a project**. Searching for the service lands you
+on a hub page, and the migration tools do not appear until a project is selected — the project is
+what holds your discovered servers, your assessment and your appliance registration.
 
 1. Open the [Azure Portal](https://portal.azure.com).
-2. Search for **Azure Migrate** in the top search bar and select it.
-3. Click **Servers, databases and web apps** in the left menu.
+2. Search for **Azure Migrate** and select it under **Services**.
+3. Select **All projects** in the left pane, then choose the project you created in Module 1
+   (for example `ces-migrate-01`).
+4. Confirm the subscription shown matches the one holding that project. If your account can see
+   several subscriptions, the portal may open on a different one and the project list will look
+   empty.
 
-### 4.3 Open the Migration Tool
+**Expected result:** the project opens and shows your discovered servers from Module 1. If the
+count is zero, discovery has not completed — return to Module 1 section 4 before continuing.
 
-1. In the **Migration tools** tile, locate **Azure Migrate: Server Migration**.
-2. Click **Discover** to begin the discovery process for migration.
+> **Note: the portal is changing.** Azure Migrate is rolling out an **Explore / Decide /
+> Execute** experience, and it reaches tenants at different times. Steps here are described by
+> what you are doing rather than by the exact heading you will see. In the newer layout the
+> migration work sits under **Execute**; in the classic layout it is under **Servers, databases
+> and web apps**. If a name below does not match your portal, look for the operation, not the
+> label. [Create and manage projects](https://learn.microsoft.com/azure/migrate/create-manage-projects)
+
+### 4.3 Open the migration tool
+
+1. In the project, find the tool that performs **migration** — **Migration and modernization**
+   in the current experience, or **Azure Migrate: Server Migration** in the classic one. Either
+   way it is the tile that replicates servers, not the one that assesses them.
+2. Select **Discover**.
+
+> **Tip:** Two tiles look similar. **Discovery and assessment** is what you used in Module 1 to
+> find and size the servers. **Migration and modernization** is what replicates them. Selecting
+> the assessment tile here is the most common wrong turn in this module.
 
 ### 4.4 Select Hyper-V as the Source
 

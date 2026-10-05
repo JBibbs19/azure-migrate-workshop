@@ -14,7 +14,7 @@ In a real migration engagement this phase corresponds to **preparing the landing
 
 Instead, this module deploys a **self-contained simulation of an on-premises datacenter** inside a single Azure VM using nested Hyper-V virtualization. The host VM, virtual networking and all four guest workloads are provisioned by `deploy-lab.ps1` through managed Run Command. No RDP session is required during setup.
 
-**Why this approach?** It gives every participant an isolated, reproducible "datacenter" with realistic workloads (IIS, SQL Server, Nginx, Node.js) while keeping cost and complexity low. The trade-off is that it does not exercise subscription-level governance, which you would address through Azure Landing Zones in a production engagement.
+**Why this approach?** It gives every participant an isolated, reproducible "datacenter" with realistic workloads (IIS, SQL Server, Nginx, Tomcat) while keeping cost and complexity low. The trade-off is that it does not exercise subscription-level governance, which you would address through Azure Landing Zones in a production engagement.
 
 ### What Gets Deployed
 
@@ -23,7 +23,7 @@ Instead, this module deploys a **self-contained simulation of an on-premises dat
 | OnPrem-Web | Windows Server 2022 | IIS web server | 192.168.0.10 | 4 GB | 2 |
 | OnPrem-SQL | Windows Server 2022 | SQL Server 2022 Express | 192.168.0.11 | 4 GB | 2 |
 | OnPrem-Linux-Web | Ubuntu 22.04 | Nginx web server | 192.168.0.12 | 2 GB | 2 |
-| OnPrem-Linux-App | Ubuntu 22.04 | Node.js Express app | 192.168.0.13 | 2 GB | 2 |
+| OnPrem-Linux-App | Ubuntu 22.04 | Tomcat 9 JSP order desk | 192.168.0.13 | 2 GB | 2 |
 
 All four guests run on an internal Hyper-V switch (`intSwitch`) with NAT on the `192.168.0.0/24` subnet. The host is reachable from the guests at `192.168.0.1`. Addresses are DHCP reservations, not static guest configuration, so the guests keep working when they are later copied into an Azure VNet.
 
@@ -44,7 +44,7 @@ Every infrastructure choice in this lab was made deliberately. The table below d
 | **Guest network** | `192.168.0.0/24` with NAT | Simulates an isolated on-premises network. NAT provides outbound internet access, required for package downloads during provisioning, without exposing guests to inbound traffic from the Azure VNet. This mirrors how many on-premises datacenters sit behind NAT with no direct internet-facing exposure. |
 | **VM generation** | Gen 2 | UEFI boot, vTPM support and larger OS disk support. Gen 2 is required for several Azure features post-migration (Trusted Launch, Confidential VMs), so starting here avoids a generation conversion later. |
 | **Windows guest memory** | 4 GB | SQL Server Express recommends a minimum of 2 GB; with Windows Server overhead, 4 GB is the practical minimum. IIS is lighter, but keeping both Windows guests at 4 GB simplifies the configuration. |
-| **Linux guest memory** | 2 GB | Nginx and Node.js are lightweight. 2 GB is sufficient for the sample workloads and keeps total guest memory within budget. |
+| **Linux guest memory** | 2 GB | The desk uses a 384-MB JVM heap, bounded request threads/JDBC pool and a 900-MB service limit. Validate 2 GB for these sample workloads and keeps total guest memory within budget. |
 | **Deployment method** | PowerShell + managed Run Command | No ARM templates or Bicep — the deployment is imperative PowerShell. Managed Run Command executes the host payload through the Azure VM agent over the secure control plane, which means no public endpoint or RDP session during setup, and it supports long timeouts and protected parameters so credentials never appear in the script payload. |
 | **Guest firewall posture** | Trusted lab ranges | The nested subnet and the host, target and test VNets are treated as trusted so ping, lab traffic and validation work without a rule per service. See [section 8](#8-security-baseline) for the exact rules and what changes in production. |
 
@@ -111,9 +111,9 @@ You also need your current internet-facing IPv4 address, including any VPN or co
 
 ### 3.6 — Downloads and Package Sources
 
-Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, NodeSource's Node.js packages, Express from npm, and the Hyper-V guest daemon packages for the Linux guests from the Ubuntu archive.
+Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, Ubuntu Tomcat 9/OpenJDK 17 packages and the pinned Microsoft JDBC 13.6.0.jre11 JAR, and the Hyper-V guest daemon packages for the Linux guests from the Ubuntu archive.
 
-ADK and SQL installers receive Authenticode checks, and the Ubuntu image is verified against Canonical's published hash. These are online package sources, not a pinned offline distribution — a proxy that allows Microsoft endpoints but blocks Canonical, Chocolatey, NodeSource or npm will break setup.
+ADK and SQL installers receive Authenticode checks, and the Ubuntu image is verified against Canonical's published hash. These are online package sources, not a pinned offline distribution — a proxy that allows Microsoft endpoints but blocks Canonical, Chocolatey, Ubuntu or Maven HTTPS will break setup.
 
 > **Instructor note.** Confirm endpoint availability and package policy in the teaching environment before the session. Capture versions and archive approved artifacts if you need a repeatable course release.
 
@@ -168,7 +168,7 @@ foreach ($provider in $providers) {
 
 ### Step 2: Deploy the lab environment
 
-Keep the complete reviewed checkout together. Before it contacts Azure, deployment reads and parses `scripts/host/configure-host.ps1` and `scripts/enable-lab-traffic.ps1` — a missing, empty or syntactically invalid script stops setup before any resource is created.
+Keep the complete reviewed checkout together. Before it contacts Azure, deployment reads and parses `scripts/host/configure-host.ps1` and `scripts/enable-lab-traffic.ps1`, and verifies the included `apps/contoso-orderdesk/dist/runtime.zip` checksum — a missing, empty or syntactically invalid script stops setup before any resource is created.
 
 ```powershell
 $sourceRg = 'rg-ces-source-01'
@@ -200,7 +200,7 @@ Azure Migrate project at the point it is actually required.
 > the time you reach its target settings.
 >
 > It is four things: a **target resource group**, a **VNet** (`10.1.0.0/16`), a **subnet**
-> (`default`, `10.1.0.0/24`) and an **NSG** carrying inbound RDP, SSH, HTTP, HTTPS and Node.js
+> (`default`, `10.1.0.0/24`) and an **NSG** carrying inbound RDP, SSH, HTTP, HTTPS and Tomcat
 > rules. Plus registration of the `Microsoft.OffAzure`, `Microsoft.Migrate` and
 > `Microsoft.KeyVault` providers.
 >
@@ -246,6 +246,17 @@ Get-AzPublicIpAddress -ResourceGroupName $sourceRg | Select-Object Name, IpAddre
 
 ---
 
+### Initial Tomcat prerequisite
+
+The complete checkout includes the WAR, source and minimal runtime ZIP. Deployment installs
+Tomcat 9/OpenJDK 17 on Linux-App and prepares SQL mixed mode plus the restricted shared
+`labapp` login using the same protected deployment password. No extra password prompt,
+app install command or traffic setup is required. The guest retrieves pinned JDBC
+13.6.0.jre11 over HTTPS with bounded retries and structural checks; availability was not
+validated here. If blocked, supply an approved exact local `mssql-jdbc-13.6.0.jre11.jar`
+and reviewed expected hash with `-TomcatJdbcJar` and `-TomcatJdbcSha256` before deployment.
+See [application integration](../apps/contoso-orderdesk/integration/FRESH-DEPLOYMENT.md).
+
 ## 5. Verify inside HyperVHost
 
 Verification goes beyond "can I ping it?" — confirm that the environment matches the intended architecture and that every workload is functional.
@@ -290,8 +301,12 @@ Get-VM | Select-Object Name,DynamicMemoryEnabled,MemoryStartup
 # Nginx on OnPrem-Linux-Web — expect HTTP 200
 (Invoke-WebRequest http://192.168.0.12 -UseBasicParsing).StatusCode
 
-# Node.js API on OnPrem-Linux-App — expect status healthy
+# Tomcat order desk — liveness is NOT SQL readiness
 Invoke-RestMethod http://192.168.0.13:3000/api/health
+Invoke-RestMethod http://192.168.0.13:3000/api/info
+Invoke-RestMethod http://192.168.0.13:3000/api/ready
+Invoke-RestMethod http://192.168.0.13:3000/api/orders
+Invoke-RestMethod http://192.168.0.12:8080/api/ready
 
 # SQL Server on OnPrem-SQL — expect TcpTestSucceeded True
 Test-NetConnection 192.168.0.11 -Port 1433
@@ -303,7 +318,7 @@ Test-NetConnection 192.168.0.11 -Port 1433
 |---|---|
 | `Get-VM` | Four VMs, all `Running`: `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, `OnPrem-Linux-App` |
 | Both `Invoke-WebRequest` calls | `200` |
-| `Invoke-RestMethod` | `status: healthy` |
+| Tomcat endpoint checks | `healthy`, app Contoso Order Desk, Java version, `ready`, and existing seeded orders/customers; proxy ready |
 | `Test-NetConnection` | `TcpTestSucceeded: True` |
 | `Get-Volume -FileSystemLabel ApplianceStore` | Roughly 100 GB, nearly all free, normally `E:` |
 | `Get-VHD` output | Four disks, all `VhdType: Fixed` — 40, 40, 30 and 30 GB |
@@ -346,9 +361,9 @@ Get-Content C:\AzMigrateLab\setup-log.txt -Tail 50
 
 ## 6. Start the sample business traffic
 
-The four workloads are independent samples. Nothing connects them, so Azure Migrate has no application dependencies to find and the dependency map in Module 1 is legitimately empty.
+Initial deployment already connects the Tomcat order desk to SQL and supplies the Nginx proxy. The JVM retains one bounded pooled SQL connection after readiness. Without optional traffic, most HTTP edges are idle and can be missed by dependency polling; an empty or partial map is not proof that no dependency exists.
 
-This optional step wires them into one small-business order desk. Nginx proxies to the Node API, the Node API reads and writes the `ContosoApp` database, and the IIS server runs an internal order report against that same database. `OnPrem-SQL` then appears as a shared dependency of both application tiers — which is the conversation a customer needs to have before moving anything.
+This optional instructor step generates low-rate HTTP through Nginx into Tomcat and adds an IIS-host SQL report/health-call task. Database reads and writes for the Linux application stay in the actual Tomcat JVM; Python never connects directly to SQL. `OnPrem-SQL` then appears as a shared dependency of both application tiers — which is the conversation a customer needs to have before moving anything.
 
 Run it after the checks in section 5 pass and before you begin Module 1, so traffic is already flowing when discovery starts.
 
@@ -360,7 +375,7 @@ C:\AzMigrateLab\enable-lab-traffic.ps1
 
 Enter the lab password when prompted. The lab user name and guest addresses come from `C:\AzMigrateLab\lab-traffic.settings.json`, which deployment wrote alongside the script, so no other values are needed.
 
-The script configures the Windows guests through PowerShell Direct and the two Linux guests over SSH, prompting once per Linux guest for the `labadmin` password. It finishes by listing the traffic it started.
+The script configures the Windows guests through PowerShell Direct and the two Linux guests over SSH, using the deployed Linux username and the same lab password (OpenSSH 8.4+ reuses the initial prompt; older clients prompt per guest). It finishes by listing the traffic it started.
 
 Confirm traffic is flowing:
 
@@ -374,7 +389,7 @@ Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database Con
 
 > 💡 **Tip:** Start this before Module 1 so connections accumulate while you work through discovery setup. Dependency analysis samples active connections on a polling interval rather than recording continuously, so traffic that starts minutes before you open the map may not appear in it.
 
-> **Instructor note.** This step is optional, and the rest of the lab is written to work without it. Skip it if you want to teach why an empty dependency map can be a correct result; run it when you want a populated map to interpret. `-IntervalSeconds` adjusts the request rate and `-Disable` removes the mesh. Keep the load light — the host has 8 vCPUs shared across four guests, and a heavy generator would distort the performance-based sizing discussion in Module 1. [Lab traffic mesh](Lab-Traffic.md) lists exactly what changes on each guest, including the mixed-mode SQL login the Linux generator requires.
+> **Instructor note.** This step is optional, and the rest of the lab is written to work without it. Skip it to discuss idle/partial polling evidence; enable it for additional HTTP and Windows-SQL edges. `-IntervalSeconds` adjusts the request rate and `-Disable` stops only the generators. Keep the load light — the host has 8 vCPUs shared across four guests, and a heavy generator would distort the performance-based sizing discussion in Module 1. [Lab traffic mesh](Lab-Traffic.md) lists exactly what changes on each guest, while preserving the SQL login and proxy already required by the main application.
 
 ---
 
@@ -513,11 +528,11 @@ Get-Content C:\AzMigrateLab\setup-log.txt | Select-String 'LAB_GUEST_PASSWORD'
 
 ### Linux Workload Missing
 
-**Symptom:** Nginx or the Node API does not respond, though the guest is running.
+**Symptom:** Nginx or the Tomcat order desk does not respond, though the guest is running.
 
 **Cause:** Cloud-init may still be running, or the guest may be completing its scheduled reboot. Each Linux guest restarts once at the end of provisioning so the Hyper-V guest daemons start against the udev rules their tools package installed.
 
-**Resolution:** Wait for the guest to come back, then from the guest check `sudo cloud-init status --long`, `/var/log/cloud-init-output.log`, and `journalctl -u contoso-app`. Validation retries for 20 minutes, which absorbs the restart.
+**Resolution:** Wait for the guest to come back, then from the guest check `sudo cloud-init status --long`, `/var/log/cloud-init-output.log`, and `journalctl -u contoso-orderdesk`. Validation retries for 20 minutes, which absorbs the restart.
 
 ### SQL Not Listening
 
