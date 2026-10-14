@@ -1,836 +1,585 @@
-# Module 2: Agentless Migration — Zero-Footprint Migration
+# Module 2: Agentless Migration — Hyper-V Web Workloads
 
-| **Estimated Time** | 60–90 minutes |
+| **Estimated Time** | 60–90 minutes, plus replication time |
 |---------------------|---------------|
 | **Level**           | Advanced — Cloud Solution Architect |
-| **Prerequisites**   | Module 1 (Discovery & Assessment) completed |
+| **Prerequisites**   | [Module 1: Discovery & Assessment](Module-1-Discovery.md) completed |
 | **CAF Phase**       | **Migrate** — Cloud Adoption Framework |
+
+### Learning Objectives — Concepts
+
+By the end of this module, you will understand host-based replication, target-network planning, isolated test migration, coordinated cutover, and rollback. You will practice enabling replication and testing IIS and Nginx. The complete application test and shared four-VM cutover continue in [Module 3: Stateful Workload Migration](Module-3-Agent-Based-Migration.md); completing this module's frontend cutover is **not** a prerequisite for starting Module 3.
 
 ---
 
 ## 1. Overview — Zero-Footprint Migration: When and Why
 
-Agentless migration is a **zero-footprint** approach: no software is installed on the source VMs, no agents to manage, and no attack surface expansion on production workloads. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves.
+### Concepts
+
+Agentless migration avoids installing a migration agent inside each source guest. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves. In this Hyper-V lab, the **Azure Site Recovery Provider and Recovery Services agent on HyperVHost** perform replication for all four workloads. The discovery appliance inventories and assesses machines; it is **not a replication appliance**.
 
 ### How It Works Architecturally
 
-Agentless migration for Hyper-V leverages the hypervisor's native snapshot and change-tracking capabilities. The Azure Migrate appliance orchestrates the entire flow without touching the guest OS:
+1. **Initial replication** — The registered Hyper-V host provider coordinates copying the selected VM disks to Azure.
+2. **Delta replication** — Changed disk data continues to replicate while source workloads run.
+3. **Test migration** — Azure creates separate test copies in an isolated network while sources continue running.
+4. **Final sync & cutover** — A planned migration shuts down the selected source VM, completes final synchronization, and creates its Azure target.
 
-1. **Initial Snapshot** — Azure Migrate triggers a Hyper-V VSS (Volume Shadow Copy Service) snapshot of the VM's virtual disks.
-2. **Full Replication** — The appliance reads the snapshot and streams all disk blocks to Azure-managed replica disks via HTTPS (port 443).
-3. **Delta Sync Cycles** — On subsequent intervals, Hyper-V's Resilient Change Tracking (RCT) identifies changed blocks since the last snapshot. Only deltas are transferred.
-4. **Final Sync & Cutover** — During cutover, a final delta sync captures the last changes, the source VM is optionally shut down, and the Azure VM boots from the replica disks.
+```text
+Source guests (no guest migration agent)
+    → Hyper-V host provider + Recovery Services agent
+    → Azure replication storage / replica disks
+    → Isolated test copies OR final Azure target VMs
 
-```
-┌──────────────────┐     VSS Snapshot      ┌─────────────────────┐
-│  Source VM        │ ─────────────────────→ │  Hyper-V Host       │
-│  (No agent)       │     RCT Deltas        │  (Change Tracking)  │
-└──────────────────┘                        └─────────┬───────────┘
-                                                       │ HTTPS/443
-                                                       ▼
-                                            ┌─────────────────────┐
-                                            │  Azure Migrate      │
-                                            │  Appliance          │
-                                            └─────────┬───────────┘
-                                                       │ HTTPS/443
-                                                       ▼
-                                            ┌─────────────────────┐
-                                            │  Azure Managed Disks│
-                                            │  (Replica)          │
-                                            └─────────────────────┘
+Discovery appliance → Inventory and assessment (separate role)
 ```
 
-#### Agentless Replication Flow
+#### Hyper-V Replication Flow
 
 ```mermaid
 sequenceDiagram
-    participant HV as Hyper-V Host
-    participant Appliance as Azure Migrate<br/>Appliance
-    participant Azure as Azure Storage
-
-    Note over HV,Azure: Initial Replication
-    HV->>Appliance: VSS Snapshot (full disk)
-    Appliance->>Azure: Upload to Managed Disk
-    
-    Note over HV,Azure: Delta Replication (every cycle)
-    loop Every replication cycle
-        HV->>Appliance: Changed blocks (delta)
-        Appliance->>Azure: Sync deltas
+    participant HV as Hyper-V Host Provider
+    participant Azure as Azure Replication Storage
+    participant VM as Azure VM
+    HV->>Azure: Initial disk copy
+    loop Ongoing replication
+        HV->>Azure: Changed disk data
     end
-
-    Note over HV,Azure: Test Migration
-    Azure->>Azure: Create VM from replica disk
-    
-    Note over HV,Azure: Cutover
-    HV->>HV: Shutdown source VM
-    HV->>Appliance: Final delta sync
-    Appliance->>Azure: Apply final changes
-    Azure->>Azure: Boot migrated VM
+    Azure->>VM: Create isolated test copy
+    Note over HV,VM: Later, in the approved shared cutover window
+    HV->>HV: Shut down selected source VM
+    HV->>Azure: Final synchronization
+    Azure->>VM: Create final target VM
 ```
 
 ### RPO/RTO Characteristics
 
-| Metric | Value | Implication |
-|--------|-------|-------------|
-| **RPO** | Snapshot interval (typically 5–15 minutes) | Data changes between snapshots are at risk during unplanned events |
-| **RTO** | VM boot time (2–5 minutes) | Includes final delta sync + Azure VM provisioning |
-| **Initial Sync** | Proportional to disk size ÷ bandwidth | Plan for 15–60 min in lab; hours in production with large disks |
+| Metric | Meaning | Planning Implication |
+|--------|---------|----------------------|
+| **RPO** | Acceptable age of recovered data | Review the actual latest recovery point; do not promise zero data loss |
+| **RTO** | Acceptable service-restoration time | Include shutdown, final sync, provisioning, dependency updates, and validation |
+| **Initial sync** | First copy of selected disks | Duration depends on disk size, churn, bandwidth, and service conditions |
 
-### When to Choose Agentless
+### When to Choose Guest-Agentless Replication
 
-✅ **Use agentless for:**
-- Stateless web servers, reverse proxies, load balancers
-- Linux servers with standard configurations
-- Non-critical workloads where minutes of RPO are acceptable
-- Quick wins in early migration waves to build team confidence
-- Environments where installing agents requires change advisory board (CAB) approval
+- Stateless web servers, reverse proxies, and Linux servers with standard configurations are useful pilot candidates.
+- Avoiding guest migration software can simplify change approval, but the host still needs its provider.
+- Stateful workloads need data-consistency and dependency planning, **not a different migration architecture merely because they hold state**. The SQL and Tomcat VMs use this same Hyper-V provider in Module 3.
+- Source platform, supported configuration, recovery objectives, disk layout, and measured churn determine migration suitability. A web-server label alone is not a readiness test.
 
-❌ **Do not use agentless for:**
-- Databases or stateful applications requiring near-zero RPO
-- Physical servers (not supported)
-- Workloads with high disk churn rates (delta sync intervals may not keep pace)
-- VMs with shared disks, pass-through disks, or ultra-large disks (>4 TB)
+**Hands-On — Student Actions**
 
-> **⚠️ Limitation Awareness:** Agentless replication is periodic, not continuous. Between snapshot intervals, changes are not protected. For mission-critical workloads, see [Module 3: Agent-Based Migration](Module-3-Agent-Based-Migration.md).
+1. In your student notes, distinguish the discovery appliance from the registered Hyper-V replication host.
+2. Identify the frontend pair: `OnPrem-Web` and `OnPrem-Linux-Web`.
 
-#### Agentless Migration Decision
+**Expected Result:** You can explain which component discovers machines and which component replicates their disks.
 
-```mermaid
-flowchart TD
-    Start{Is the workload<br/>stateless?} -->|Yes| Good["✅ Great candidate<br/>for agentless"]
-    Start -->|No| RPO{Can you tolerate<br/>RPO of minutes?}
-    RPO -->|Yes| OK["✅ Agentless OK<br/>Schedule maintenance window"]
-    RPO -->|No| Agent["❌ Use Agent-Based<br/>Go to Module 3"]
-
-    Good --> Replicate["Enable Replication"]
-    OK --> Replicate
-    Replicate --> Test["Test Migration"]
-    Test --> Validate{Tests<br/>passed?}
-    Validate -->|Yes| Cutover["🚀 Cutover"]
-    Validate -->|No| Fix["Fix issues<br/>Re-test"]
-    Fix --> Test
-
-    style Good fill:#4CAF50,color:white
-    style OK fill:#FF9800,color:white
-    style Agent fill:#f44336,color:white
-    style Cutover fill:#4CAF50,color:white
-```
+**CSA Why:** A correct platform choice prevents applying a different source platform's workflow to Hyper-V.
 
 ---
 
 ## 2. Migration Runbook — CSA Artifact
 
-A Cloud Solution Architect treats every migration as a **controlled operation**, not an ad-hoc activity. Before touching the portal, you produce a migration runbook. This section frames Module 2 as that runbook.
+### Concepts
+
+A Cloud Solution Architect treats every migration as a **controlled operation**, not an ad-hoc activity. Before touching the portal, define the migration runbook in your student notes.
 
 ### Pre-Migration Checklist
 
-- [ ] Assessment from Module 1 reviewed — VM compatibility confirmed, no blockers
-- [ ] Target Azure landing zone resources provisioned (Resource Group, VNet, Subnet, NSG)
-- [ ] Azure RBAC permissions verified — migration operator has Contributor on target RG
-- [ ] Rollback plan documented and reviewed with application owner
-- [ ] Source VM backup taken (Hyper-V checkpoint or independent backup)
-- [ ] Azure subscription quota confirmed for target VM SKUs
-- [ ] Network line-of-sight verified: appliance → Azure (HTTPS/443)
+- [ ] Module 1 assessment reviewed — compatibility and blockers understood
+- [ ] Target resource group, VNet, subnet, and NSG planned
+- [ ] Azure RBAC permissions confirmed for the project and target resources
+- [ ] Source backup and rollback procedure available; a checkpoint alone is not a database backup
+- [ ] Regional and VM-family quota checked for the actual selected sizes
+- [ ] Required host-to-Azure and guest management outbound connectivity verified against the lab network plan
+- [ ] All four application dependencies included in the isolated test and shared cutover
 
 ### Migration Window Planning
 
 | Factor | Workshop (This Lab) | In Production |
 |--------|-------------------|---------------|
-| **Window type** | Anytime | Scheduled maintenance window |
-| **Duration** | 1–2 hours | 2–4 hours (including validation) |
-| **Business hours?** | N/A | Avoid — migrate during off-peak |
-| **Approval required?** | No | CAB/change management ticket |
+| **Window type** | One coordinated four-VM window after the full test | Scheduled maintenance window |
+| **Duration** | Estimate from observed replication and test timings | Include final sync, validation, and rollback allowance |
+| **Business hours?** | Keep manual order entry paused during cutover | Agree service interruption with application owners |
+| **Approval required?** | Record your go/no-go decision | Follow change-management approval |
 
 ### Communication Plan
 
 | When | Who to Notify | Message |
 |------|---------------|---------|
-| **T-7 days** | Application owners, operations team | Migration scheduled for [date/time]. Maintenance window: [duration]. |
-| **T-1 hour** | Operations team, on-call engineers | Migration starting in 1 hour. Monitoring dashboards: [link]. |
-| **T-0 (start)** | All stakeholders | Migration in progress. Source VMs will be shut down. ETA: [time]. |
-| **T+complete** | All stakeholders | Migration complete. Validation in progress. |
-| **T+validated** | All stakeholders | Migration validated. Production traffic restored. |
+| **Before the window** | Application owner and operations | Scope, dependencies, expected interruption, rollback criteria |
+| **T-1 hour** | Operations and on-call team | Replication readiness and planned start |
+| **T-0** | Affected users | Order entry paused; migration starting |
+| **T+complete** | Application owner | Azure targets created; validation in progress |
+| **T+validated** | Affected users | Application accepted; traffic may resume |
 
 ### Success Criteria
 
-Define "done" before you start:
+- [ ] All four targets run in the selected target network with their intended OS and disks
+- [ ] IIS and Nginx static pages return expected content
+- [ ] The isolated full application test passes before final migration
+- [ ] Target SQL data matches the captured cutover baseline before additional writes
+- [ ] Tomcat SQL readiness, Nginx proxy, and one sample-order readback succeed
+- [ ] Source VMs are retained shut down until acceptance and the agreed rollback window closes
 
-- [ ] Azure VMs are running and reachable
-- [ ] Application responds with HTTP 200 and correct content
-- [ ] Internal network connectivity verified (VM-to-VM, VM-to-DNS)
-- [ ] Performance baseline is within acceptable range vs. on-premises
-- [ ] Monitoring and alerting are active on migrated VMs
-- [ ] Rollback window is established (48–72 hours)
+**Hands-On — Student Actions**
+
+1. Record the source VM names, target names, selected region, sizes, resource group, and networks in your student notes.
+2. Set acceptable recovery-point age, downtime, validation criteria, and rollback triggers for this exercise.
+3. Reserve one application-wide window; do not schedule the frontend pair as an independent final cutover.
+
+**Expected Result:** Your notes contain an actionable four-VM plan, not just a list of migration jobs.
+
+**CSA Why:** Teaching pairs make the exercise manageable; dependency groups determine the real service boundary.
 
 ---
 
 ## 3. Prerequisites
 
-- ✅ Module 1 completed — Azure Migrate project created and appliance deployed
-- ✅ All 4 guest VMs discovered in Azure Migrate
-- ✅ The following VMs are running inside Hyper-V on the host:
+### Concepts
 
-| VM Name             | OS                    | Role        | IP Address    |
-|---------------------|-----------------------|-------------|---------------|
-| OnPrem-Web          | Windows Server 2022   | IIS         | 192.168.0.10  |
-| OnPrem-Linux-Web    | Ubuntu 24.04          | Nginx       | 192.168.0.12  |
+The source is a single, nonclustered **HyperVHost** Azure VM: Windows Server 2022, **Standard_E8s_v7**, Generation 2. Its nested guests are separate source machines, not additional Azure VM allocations.
 
-- ✅ Azure subscription with regional and VM-family quota for the actual target SKUs (this pair's step 3 defaults: Standard_B2s + Standard_B1ms; see the full-workshop preflight in section 4.1)
-- ✅ A target Resource Group and Virtual Network in Azure — **you build these in section 4.1**
+| VM Name | OS | Role | Source IP |
+|---------|----|------|-----------|
+| `OnPrem-Web` | Windows Server 2022 | IIS static site, TCP 80 | `192.168.0.10` |
+| `OnPrem-Linux-Web` | Ubuntu 24.04 | Nginx static site 80; application proxy 8080 | `192.168.0.12` |
+
+The nested source network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`). The source Azure VNet is `10.0.0.0/16`; these are different address layers.
+
+**Hands-On — Student Actions**
+
+1. Confirm [Module 1](Module-1-Discovery.md) discovery and assessment are complete and all four source VMs appear in the correct Azure Migrate project.
+2. Confirm the source pair is running and you have approved access to the Hyper-V host and guests.
+3. Confirm permission to prepare migration, register the host, create target networks, and migrate VMs.
+4. For Azure test/target guests, plan **VM → Run command → RunPowerShellScript** on Windows or **RunShellScript** on Linux once the VM agent is ready. Alternatively, use already-approved RDP/SSH access. Run Command executes **inside the selected guest**, so localhost checks do not require a public IP. Your workstation is not assumed to reach `10.2.0.0/24`.
+
+**Expected Result:** The right project, discovered sources, permissions, and guest-access method are known before replication setup.
+
+**CSA Why:** Management access and application connectivity are separate requirements.
 
 ---
 
 ## 4. Step 1 — Prepare for Migration
 
-### 4.1 Build the target landing zone
+### Concepts
 
-Azure Migrate does not create the network your migrated VMs land in. It cannot — it has no way
-to know your address plan, your segmentation, or how traffic is meant to leave. Creating the
-Azure Migrate project does not create it either: the project, and the key vault and storage
-account that came with your appliance key, are the **management** side of the migration and sit
-alongside your source environment. What you are building now is the **destination**.
+Choose the actual target region before preparing the project's migration resources or registering the host. The target must be **different from the source HyperVHost VM's actual region** in this lab's regional design. **East US → West US 2 is an example only**, not an allocation or capacity guarantee. Project location and resource-group metadata location do not determine where the target VMs run.
 
-Build it before you start the replication wizard. In section 5.3 the wizard will let you create
-a resource group and a storage account inline, but the **virtual network and subnet are chosen
-from a dropdown** — if they do not exist, you cannot proceed without leaving the wizard.
+### Hands-On — Student Actions
 
-**Choose the migration target region and check quota first.**
+### 4.1 Choose the Region and Compute Plan
 
-Choose a region **different from the actual source Hyper-V host** Azure VM region to spread
-regional vCPU quota in student subscriptions. Read the source VM's actual **Location** in the
-portal (or `Get-AzVM`), not its resource group's metadata location. Select the target yourself;
-do not inherit the source or automatically choose a replacement. Region names/display names
-are validated against the current subscription's `Get-AzLocation` list by step 1.
+1. Open **Virtual machines → HyperVHost → Overview** and read its actual **Location**.
+2. Select a different target region. Review the Module 1 assessment for that region; assessment recommendations do not automatically bind this lab's chosen sizes.
+3. In **Subscriptions → Usage + quotas**, filter to the target region and check **Total Regional vCPUs**, the selected **VM-family quota**, and VM-count allowance. Check SKU eligibility in the portal's size selector as well.
+4. Plan the complete application, including any test/target overlap:
 
-Before provider registration or landing-zone creation, run the step 1 read-only quota
-heads-up for both regions, or check **Subscriptions → Usage + quotas** filtered by region.
-Both **Total Regional vCPUs** and each chosen **VM-family vCPU quota**, plus VM-count quota,
-are per subscription/per region. Reported usage includes other labs/VM scale sets and allocated
-and deallocated VMs. The nested guests/appliance are not separate Azure allocations; the host
-is already counted in source usage. Default step 3 sizing totals 6 additional vCPUs for a full
-four-VM target or test set; a full target/full test overlap needs 12 only if both new sets
-coexist. Do not double-count existing targets. Unknown/denied reads are not zero headroom.
-Recheck actual planned sizes/counts; quota and SKU eligibility are not capacity guarantees.
+| Exact Target VM Name | Default Size | vCPU / RAM | Alternate Plan if B-series Is Unavailable |
+|----------------------|--------------|------------|------------------------------------------|
+| `OnPrem-Web` | `Standard_B2s` | 2 / 4 GB | `Standard_D2as_v5` — 2 / 8 GB |
+| `OnPrem-SQL` | `Standard_B2ms` | 2 / 8 GB | `Standard_D2as_v5` — 2 / 8 GB |
+| `OnPrem-Linux-Web` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
+| `OnPrem-Linux-App` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
 
-**Choose this target before portal Create resources / Finalize discovery locks the project's
-migration target. All subsequent migrations and isolated test VNets must match.** Step 1 warns
-but does not verify that lock: inspect existing migration/recovery resources in the portal.
-An existing Azure Migrate project's data geography is independent and stays unchanged.
-The Module 1 assessment must use this same target region. Resource-group metadata does not
-bind child regions; existing VNet/NSG resources cannot be moved, so mismatches require a fresh
-landing zone. Step 1 stops conflicts before writes and offers reselect/network-only/cancel
-for quota warnings; `-AllowQuotaWarning` explicitly permits network-only setup, not VM allocation.
-[VM quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas)
+5. If the default B-series plan is unavailable, explicitly select the **all-four `Standard_D2as_v5` plan** in the portal after checking quota and eligibility. Record the choice; do not silently substitute another size. One complete default set needs 6 vCPUs; the alternate set needs 8. Count simultaneous test/target sets and existing allocations without double-counting them.
+6. Keep **Azure Hybrid Benefit / existing Windows Server license rights: No** unless you have confirmed eligible rights. Review current portal VM/disk pricing for the actual region; no fixed lab price is assumed.
 
-**Create the resource group.**
+### 4.2 Build the Target Landing Zone
 
-1. In the portal, search for **Resource groups** and select **Create**.
-2. **Subscription** — the one holding your Azure Migrate project.
-3. **Resource group** — `rg-ces-target-01`.
-4. **Region** — the chosen migration target region (different from the actual source host). For a new group this also sets metadata location; it does not bind child resource regions.
-5. **Review + create**, then **Create**.
+1. In the portal, open **Resource groups → Create**. Select the lab subscription, name the group `rg-ces-target-01`, choose the selected target region, then **Review + create → Create**. Reuse it if already correctly configured.
+2. Open **Virtual networks → Create**. Select `rg-ces-target-01`, name `rg-ces-target-01-vnet`, and explicitly set the same target region.
+3. On **IP addresses**, set address space `10.1.0.0/16`. Edit subnet `default` to `10.1.0.0/24`. Select **Review + create → Create**.
+4. Open **Network security groups → Create**. Create `rg-ces-target-01-nsg` in the same group and region.
+5. Open the NSG's **Inbound security rules → Add**. Add the required TCP rules below, choosing unused priorities ahead of default rules. Restrict sources and destinations to the approved management/client ranges or application peers; do not expose the demo application or SQL to the Internet.
 
-**Create the virtual network.**
+| Rule Purpose | Source | Destination / TCP Port |
+|--------------|--------|------------------------|
+| Windows management, if using RDP | Approved management range only | Windows guests / 3389 |
+| Linux management, if using SSH | Approved management range only | Linux guests / 22 |
+| Static web validation | Approved lab client range | Web and Linux-Web / 80 |
+| SQL dependencies | Web and Linux-App private addresses | SQL / 1433 |
+| Tomcat dependencies | Web and Linux-Web private addresses | Linux-App / 3000 |
+| Proxy dependency | Linux-App private address | Linux-Web / 8080 |
 
-1. Search for **Virtual networks** and select **Create**.
-2. **Resource group** — `rg-ces-target-01`. **Name** — `rg-ces-target-01-vnet`. **Region** — as above.
-3. On **IP addresses**, set the address space to `10.1.0.0/16`.
-4. Edit the default subnet so it is named `default` with range `10.1.0.0/24`.
-5. **Review + create**, then **Create**.
+6. Where guest IPs are not yet assigned, use the target subnet prefix for the internal application rules, then review their scope against the recorded peer addresses after VM creation. Do not add an Internet-wide application allow rule.
+7. Under **NSG → Subnets → Associate**, choose `rg-ces-target-01-vnet` and `default`. Review effective subnet/NIC rules, including Azure's default VNet rules, against the lab network plan.
+8. Review **VNet → Subnets**, routing, DNS, and the approved outbound path. Verify the required connectivity against the lab network plan. Do **not** assume Azure default outbound access or that the lab created a NAT gateway. If the approved path is missing, pause before relying on it.
 
-> **Why a different address space?** The source lab network is `10.0.0.0/16` and the test
-> migration network in section 8 is `10.2.0.0/16`. Overlapping ranges are one of the most common
-> reasons a real migration cannot cut over — the migrated VM works, and then cannot talk to
-> anything back on-premises. Plan the target space against what is already in use, not against
-> what is convenient.
+### 4.3 Open the Project and Prepare Hyper-V Migration
 
-**Create the network security group and attach it.**
+1. Open [Azure Portal](https://portal.azure.com), search **Azure Migrate**, select **All projects**, then the project from Module 1. Confirm its subscription and discovered machines.
+2. Open **Migration and modernization** (or **Azure Migrate: Server Migration**). Select **Prepare migration** / **Discover** for migration preparation, not the assessment tool.
+3. For **Are your machines virtualized?**, select **Yes, with Hyper-V**.
+4. Select the target region agreed in §4.1. Inspect any existing migration resources to confirm that region before proceeding. Reuse an existing correctly prepared project; do not register against a conflicting project or region.
+5. Select **Create resources** if preparation has not already created the required migration resources. Wait for completion. Use the resources managed through this Azure Migrate project; do not create a separate recovery vault or disaster-recovery policy.
 
-1. Search for **Network security groups** and select **Create**, in `rg-ces-target-01`, named
-   `rg-ces-target-01-nsg`, in the **same chosen target region as the VNet**.
-2. Once created, open it and add these **inbound** rules so the migrated workloads can be
-   reached and validated:
+### 4.4 Download, Install, and Register the Host Provider
 
-| Priority | Name | Port | Protocol | Purpose |
-|---|---|---|---|---|
-| 100 | `Allow-RDP` | 3389 | TCP | Reach the migrated Windows VMs |
-| 110 | `Allow-SSH` | 22 | TCP | Reach the migrated Linux VMs |
-| 120 | `Allow-HTTP` | 80 | TCP | Validate IIS and Nginx after cutover |
-| 130 | `Allow-HTTPS` | 443 | TCP | Validate TLS endpoints |
-| 140 | `Allow-Tomcat` | 3000 | TCP | Validate the Tomcat order desk |
+1. In the same project's Hyper-V preparation page, download the **Azure Site Recovery Provider** installer and the **registration key**. Keep the key private.
+2. Connect to **HyperVHost itself**, not the discovery appliance and not a nested workload VM. If this host is already registered to this project and target region and is healthy, **reuse that registration** and continue to step 6.
+3. Copy the downloaded files to HyperVHost. Run the provider installer **as Administrator**. Complete setup of the **Azure Site Recovery Provider** and **Azure Recovery Services agent** on this host, using the lab's approved proxy/outbound settings where needed.
+4. In the registration wizard, browse to the key downloaded from this project and register the host. Confirm the project-associated registration and selected target region rather than using another lab's key.
+5. Return to the Azure Migrate preparation page and refresh the registered Hyper-V host list. Complete **Finalize registration / Finalize discovery** if offered after the host is visible.
+6. Confirm **HyperVHost** is connected and available as the source replication host, and that the intended nested VM names are available. The registered discovery appliance alone is not proof of replication readiness.
 
-3. Under **Subnets**, select **Associate**, choose the VNet and the `default` subnet.
+**Expected Result:** The target landing zone exists, the region and compute plan are recorded, and HyperVHost is registered with the correct Azure Migrate migration resources. The isolated test VNet is created separately in §8.1 before any test VM boots.
 
-> **⚠️ These rules are deliberately open, and that is a lab decision.** Source is `Any` on every
-> rule, which means RDP and SSH are reachable from the internet. In an engagement you would scope
-> each source to a jump host, a bastion subnet or an on-premises range, and you would not expose
-> 3389 or 22 at all. You will tighten exactly these rules in **Module 5, section 4**, which is
-> the more realistic exercise.
-
-> **🏗️ In Production — egress.** This landing zone has no NAT gateway and no firewall, so
-> migrated VMs reach the internet only through Azure's **default outbound access** — which
-> Microsoft is retiring. A real landing zone gives its spoke explicit egress through a NAT
-> gateway or a firewall in the hub. Do not assume a new VNet has outbound internet.
-> [Azure outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
-
-**Expected result:** `rg-ces-target-01` contains a VNet with a `default` subnet on `10.1.0.0/24`,
-and an NSG carrying five inbound rules is associated with that subnet.
-
-> **Instructor note.** `.\scripts\migrate-step1-setup-project.ps1` builds this same landing zone
-> — identical names, ranges and rules — and also registers the `Microsoft.OffAzure`,
-> `Microsoft.Migrate` and `Microsoft.KeyVault` providers. Run it beforehand when time is short,
-> but the portal path above is the one that teaches the decisions.
-
-### 4.2 Open your Azure Migrate project
-
-Almost everything in Azure Migrate is **scoped to a project**. Searching for the service lands you
-on a hub page, and the migration tools do not appear until a project is selected — the project is
-what holds your discovered servers, your assessment and your appliance registration.
-
-1. Open the [Azure Portal](https://portal.azure.com).
-2. Search for **Azure Migrate** and select it under **Services**.
-3. Select **All projects** in the left pane, then choose the project you created in Module 1
-   (for example `ces-migrate-01`).
-4. Confirm the subscription shown matches the one holding that project. If your account can see
-   several subscriptions, the portal may open on a different one and the project list will look
-   empty.
-
-**Expected result:** the project opens and shows your discovered servers from Module 1. If the
-count is zero, discovery has not completed — return to Module 1 section 4 before continuing.
-
-> **Note: the portal is changing.** Azure Migrate is rolling out an **Explore / Decide /
-> Execute** experience, and it reaches tenants at different times. Steps here are described by
-> what you are doing rather than by the exact heading you will see. In the newer layout the
-> migration work sits under **Execute**; in the classic layout it is under **Servers, databases
-> and web apps**. If a name below does not match your portal, look for the operation, not the
-> label. [Create and manage projects](https://learn.microsoft.com/azure/migrate/create-manage-projects)
-
-### 4.3 Open the migration tool
-
-1. In the project, find the tool that performs **migration** — **Migration and modernization**
-   in the current experience, or **Azure Migrate: Server Migration** in the classic one. Either
-   way it is the tile that replicates servers, not the one that assesses them.
-2. Select **Discover**.
-
-> **Tip:** Two tiles look similar. **Discovery and assessment** is what you used in Module 1 to
-> find and size the servers. **Migration and modernization** is what replicates them. Selecting
-> the assessment tile here is the most common wrong turn in this module.
-
-### 4.4 Select Hyper-V as the Source
-
-1. In the **Discover** dialog, for **Are your machines virtualized?**, select **Yes, with Hyper-V**.
-2. Select the **Target region** chosen in section 4.1, matching the target VNet and Module 1 assessment. Verify before **Create resources / Finalize discovery**: subsequent migrations must use that project's locked target region.
-3. Confirm that the Azure Migrate appliance you deployed in Module 1 appears as registered.
-
-> **Note:** If the appliance does not appear, verify it is powered on and has network connectivity to Azure. You may need to wait a few minutes for registration to propagate.
-
-4. Click **Finalize discovery** once the appliance is confirmed.
-
-**Expected Outcome:** The Azure Migrate: Server Migration tool shows the appliance as registered and ready for replication.
+**CSA Why:** Host registration connects source replication to the correct project; landing-zone preparation controls where the recovered application will operate.
 
 ---
 
 ## 5. Step 2 — Configure Replication (OnPrem-Web)
 
+### Concepts
+
+Replication settings describe a future Azure VM. Starting the job does not mean the initial disk copy is complete.
+
+### Hands-On — Student Actions
+
 ### 5.1 Start the Replication Wizard
 
-1. In **Azure Migrate: Server Migration**, click **Replicate**.
-2. In the **Source settings** tab:
-   - **Are your machines virtualized?** → Select **Yes, with Hyper-V**
-   - **Azure Migrate Appliance** → Select your appliance from the dropdown
-3. Click **Next**.
+1. In the project's migration tool, select **Replicate**.
+2. Select **Yes, with Hyper-V** and the registered **HyperVHost** as the source host.
+3. Select **Next**.
 
 ### 5.2 Select the Virtual Machine
 
-1. In the **Virtual machines** tab, select **Yes** for **Import migration settings from an assessment** if you ran an assessment in Module 1, or select **No** to configure manually.
-2. Locate **OnPrem-Web** in the VM list and check the box next to it.
-3. Click **Next**.
+1. Choose whether to import settings from the Module 1 assessment. If imported, review every setting; recommendations are not the selected lab plan by default.
+2. Select exactly **`OnPrem-Web`**. Confirm the source host and identity, then **Next**.
 
 ### 5.3 Configure Target Settings
 
-1. **Subscription** — Select your Azure subscription.
-2. **Resource Group** — Select or create a resource group (e.g., `rg-ces-target-01`).
-3. **Replication Storage Account** — Select or create a storage account for replication data.
-4. **Virtual Network** — Select the target VNet for the migrated VM.
-5. **Subnet** — Select the appropriate subnet.
-6. Click **Next**.
-
-> **🏗️ In Production — Resource Group Strategy:**
-> Do not dump all migrated VMs into a single resource group. Align your RG strategy with your landing zone design:
-> - **By workload:** `rg-webapp-prod`, `rg-webapp-dev` — best for application teams with RBAC boundaries
-> - **By environment:** `rg-prod-migrate`, `rg-staging-migrate` — good for centralized operations
-> - **By migration wave:** `rg-wave1-migrate` — temporary, consolidate post-migration
->
-> The VNet/Subnet design should follow your **hub-spoke network topology**. Migrated VMs land in a spoke VNet with NSG rules pre-configured. Never migrate directly into a hub network.
+1. Select the lab subscription and **`rg-ces-target-01`**.
+2. Confirm the selected target region. Select the replication storage/cache account offered for this project's Hyper-V workflow, creating it through the wizard if required.
+3. Choose **`rg-ces-target-01-vnet` → `default` (`10.1.0.0/24`)** as the final target network.
+4. Continue to compute settings. Do not select the isolated test VNet as the final target.
 
 ### 5.4 Configure Compute Settings
 
-1. **VM Name** — Accept the default (`OnPrem-Web`) or customize.
-2. **Azure VM Size** — Select **Standard_B2s** (2 vCPUs, 4 GB RAM).
-3. **OS Type** — Select **Windows**.
-4. **OS Disk** — Select the boot disk.
-
-```
-Recommended VM Size: Standard_B2s
-  vCPUs: 2
-  Memory: 4 GB
-  Temporary Storage: 8 GB
-```
-
-5. Click **Next**.
-
-> **🏗️ In Production — Naming Conventions:**
-> Post-migration VM names should follow your organization's naming standard. Example: `vm-web-prod-001` rather than carrying over the on-premises name. Rename during this step, not after migration.
+1. Set **Target VM name: `OnPrem-Web`**.
+2. Choose **`Standard_B2s` (2 vCPU, 4 GB)**, or **`Standard_D2as_v5`** if you explicitly selected the alternate all-four plan.
+3. Set **OS type: Windows** and identify the correct **OS/boot disk**. Review the source's generation and the supported target settings; do not change generation merely to match a size choice.
+4. Leave existing-license/Azure Hybrid Benefit settings **No** unless eligible rights were confirmed.
 
 ### 5.5 Configure Disk Settings
 
-1. Review the list of disks attached to OnPrem-Web.
-2. Select all disks you want to replicate (typically all).
-3. Choose the **disk type** for each disk in Azure:
-   - **Standard HDD** — Cost-effective for dev/test
-   - **Standard SSD** — Recommended for most workloads
-   - **Premium SSD** — For production/high-performance workloads
-4. Click **Next**.
-
-> **🏗️ In Production — Storage Selection:**
-> Match the disk tier to workload requirements. Standard SSD (E-series) covers most web workloads. Reserve Premium SSD (P-series) for IOPS-sensitive applications. Choose **LRS** (Locally Redundant Storage) for non-critical workloads or **ZRS** for zone-resilient deployments.
+1. Review every source disk and include **all required VM disks**, including the boot disk and any application/data disk.
+2. Select the planned target disk type, using **Standard SSD** for the lab unless your assessment requires a reviewed alternative.
+3. Verify that no required volume was omitted. Disk tiers affect cost and performance independently of VM size.
 
 ### 5.6 Review and Start Replication
 
-1. Review all settings on the summary page.
-2. Click **Replicate** to begin replication.
+1. Review source VM, host, target name, region, resource group, VNet/subnet, size, OS type, boot disk, and selected disks.
+2. Select **Replicate** and open the resulting job.
 
-**Expected Outcome:** A replication job starts for OnPrem-Web. The status will show as **Enabling protection** initially.
+**Expected Result:** The portal shows a replication setup job for `OnPrem-Web`. Submission is not completed replication; review actual synchronization in §7.
+
+**CSA Why:** An explicit settings review catches wrong-target mistakes before disk replication begins.
 
 ---
 
 ## 6. Step 3 — Configure Replication (OnPrem-Linux-Web)
 
-Repeat the replication process for the Linux web server.
+### Concepts
+
+Nginx has two distinct functions: a **static site on 80** and an **application proxy on 8080** to Tomcat on Linux-App. Testing the static page does not validate the SQL-backed application.
+
+### Hands-On — Student Actions
 
 ### 6.1 Start Replication
 
-1. In **Azure Migrate: Server Migration**, click **Replicate** again.
-2. Configure source settings as before (Hyper-V, same appliance).
+1. Select **Replicate → Yes, with Hyper-V → HyperVHost**, using the same registered host as §5.
 
 ### 6.2 Select the Virtual Machine
 
-1. Locate **OnPrem-Linux-Web** in the VM list and select it.
-2. Click **Next**.
+1. Select exactly **`OnPrem-Linux-Web`** and review any imported assessment settings.
 
 ### 6.3 Configure Target Settings
 
-1. Use the same subscription, resource group, and VNet as OnPrem-Web.
-2. Click **Next**.
+1. Select the same subscription, target region, **`rg-ces-target-01`**, and project replication storage.
+2. Select final target **`rg-ces-target-01-vnet` → `default`**.
 
 ### 6.4 Configure Compute Settings
 
-1. **VM Name** — `OnPrem-Linux-Web`
-2. **Azure VM Size** — **Standard_B2s**
-3. **OS Type** — Select **Linux**
-4. Click **Next**.
-
-> **⚠️ Warning:** Ensure you select **Linux** as the OS type. Selecting the wrong OS type can cause boot issues after migration. Azure uses this to configure the boot loader, kernel drivers, and guest agent correctly.
+1. Set **Target VM name: `OnPrem-Linux-Web`**.
+2. Choose **`Standard_B1ms` (1 vCPU, 2 GB)**, or **`Standard_D2as_v5`** under the explicitly chosen alternate plan.
+3. Select **OS type: Linux**, and identify its OS/boot disk. The guest remains **Ubuntu 24.04**.
 
 ### 6.5 Configure Disks and Start Replication
 
-1. Select all disks for replication.
-2. Choose **Standard SSD** for disk type.
-3. Review and click **Replicate**.
+1. Include the boot disk and all other required source VM disks; select the planned **Standard SSD** target disk type.
+2. Review the complete summary and select **Replicate**.
 
-**Expected Outcome:** Both OnPrem-Web and OnPrem-Linux-Web now show replication jobs in progress.
+**Expected Result:** Both frontend VMs have replication jobs underway with the correct target configuration.
+
+**CSA Why:** The Linux OS selection and complete disk set are as important as choosing the right VM size.
 
 ---
 
 ## 7. Step 4 — Monitor Replication
 
+### Concepts
+
+The portal's Hyper-V migration details are the readiness evidence. Job submission, or a generic protection label by itself, does not establish a usable recovery point.
+
+| Portal Observation | Meaning | Action |
+|--------------------|---------|--------|
+| Setup in progress | Replication configuration is being applied | Review job progress and errors |
+| Initial sync in progress | Initial disk copy is incomplete | Wait and monitor the portal's progress |
+| Initial sync completed, healthy replication, recent recovery point | Candidate for test migration | Review the timestamp and test readiness |
+| Error, degraded health, missing/stale recovery point | Readiness not established | Review the reported issue; do not proceed |
+
+### Hands-On — Student Actions
+
 ### 7.1 View Replication Status
 
-1. In **Azure Migrate: Server Migration**, click **Replicating servers** (or the count displayed in the tile).
-2. You will see both VMs listed with their current replication status.
+1. Open **Azure Migrate project → Migration and modernization → Replicating servers**.
+2. Locate **`OnPrem-Web`** and **`OnPrem-Linux-Web`**.
 
-### 7.2 Understand Replication States
+### 7.2 Review Initial Synchronization
 
-| State                     | Description                                              | Action Required |
-|---------------------------|----------------------------------------------------------|-----------------|
-| **Enabling protection**   | Initial configuration is being applied                   | Wait |
-| **Initial replication**   | Full disk data is being copied to Azure                  | Monitor bandwidth |
-| **Protected**             | Initial replication complete; delta replication is active | Ready for test migration |
-| **Planned failover pending** | Ready for test or production migration                | Proceed to next step |
+1. Open each VM's replication details and related **Jobs**.
+2. Check disk-copy progress and completion, not just the setup-job state. Initial sync can take longer than this module's active exercise time.
 
 ### 7.3 Check Replication Health
 
-1. Click on a VM name to open the **replication details** blade.
-2. Review:
-   - **Replication health** — Should show **Healthy**
-   - **Latest recovery point** — Timestamp of the last successful sync
-   - **Infrastructure view** — Visual diagram of the replication pipeline
+1. Confirm each VM has healthy replication and inspect its latest available recovery-point timestamp.
+2. Compare recovery-point age with the acceptable age recorded in §2. Review warnings or failed jobs before proceeding.
 
-> **Note:** Initial replication can take **15–30 minutes** depending on disk size and network bandwidth. In a lab environment with nested virtualization, this may take longer.
+### 7.4 Confirm Test-Migration Readiness
 
-### 7.4 Monitor via PowerShell (Optional)
+1. Confirm the portal allows test migration for each selected VM after initial sync completes.
+2. Record health, initial-sync completion, and the reviewed recovery point in your student notes.
 
-```powershell
-# Connect to Azure (if not already connected)
-Connect-AzAccount
+**Expected Result:** Both frontends have completed initial synchronization, healthy replication, and reviewed recovery points suitable for the separate test migration. This is not application acceptance or a zero-loss guarantee.
 
-# List all replicating servers in the Azure Migrate project
-Get-AzMigrateServerReplication `
-    -ResourceGroupName "rg-ces-target-01" `
-    -ProjectName "your-migrate-project-name"
-```
-
-> **🏗️ In Production — Monitoring at Scale:**
-> For large migration waves, use Azure Monitor Workbooks or Power BI dashboards connected to Azure Migrate data to track replication health across dozens or hundreds of VMs. Set up Azure Monitor alerts for replication health degradation — do not rely on manual portal checks.
-
-**Expected Outcome:** Both VMs reach the **Protected** state, indicating initial replication is complete and they are ready for migration.
+**CSA Why:** Readiness is observed in the migration service, not inferred from a submitted request.
 
 ---
 
 ## 8. Step 5 — Test Migration (CRITICAL)
 
-> **🛡️ CSA Position: Test migration is NON-NEGOTIABLE.** It is the single most important risk mitigation step in any migration. Skipping test migration to "save time" is a false economy — the cost of a failed production cutover (downtime, data loss, rollback complexity) dwarfs the 30 minutes a test migration takes. Every production migration failure I have seen in the field could have been caught by a test migration.
+### Concepts
 
-Test migration creates a complete copy of the VM in Azure using an isolated test VNet. It does not affect the source VM, production replication, or production networking.
+Test migration creates separate copies while sources keep running. Isolation is required **before boot**: copied traffic tasks/services may start automatically, and copied hosts entries still point to source peers. This pair-only exercise validates **IIS and Nginx static HTTP on port 80**, not the complete Order Desk chain.
 
-### 8.1 Design the Isolated Test Network
+### Hands-On — Student Actions
 
-The test VNet must be **completely isolated** — no peering to production VNets, no DNS integration, no shared subnets. This prevents:
-- DNS pollution (test VMs registering in production DNS)
-- IP conflicts with production workloads
-- Unintended client traffic hitting test VMs
+### 8.1 Build the Isolated Test Network
 
-```powershell
-# Create a test VNet for test migrations
-New-AzVirtualNetwork `
-    -Name "vnet-migrate-test" `
-    -ResourceGroupName "rg-ces-target-01" `
-    -Location "your-azure-region" `
-    -AddressPrefix "10.100.0.0/16"
-
-# Add a subnet to the test VNet
-$vnet = Get-AzVirtualNetwork -Name "vnet-migrate-test" -ResourceGroupName "rg-ces-target-01"
-Add-AzVirtualNetworkSubnetConfig `
-    -Name "subnet-test" `
-    -VirtualNetwork $vnet `
-    -AddressPrefix "10.100.1.0/24"
-$vnet | Set-AzVirtualNetwork
-```
+1. Open **Virtual networks → Create** in **`rg-ces-target-01`**, using the same target region. Name it **`vnet-migrate-test`**.
+2. Set address space **`10.2.0.0/16`** and subnet **`default` → `10.2.0.0/24`**, then **Review + create → Create**.
+3. Create a separate **`nsg-migrate-test`** in that region and associate it with the test `default` subnet through **NSG → Subnets → Associate**.
+4. Add only the approved management/client and internal test-application rules corresponding to §4.2, using **test** ranges rather than source or final target addresses.
+5. Under **Outbound security rules**, add explicit deny rules to `192.168.0.0/24`, `10.0.0.0/16`, and `10.1.0.0/16`, with unused priorities ahead of default allow rules. Preserve the platform/management connectivity required by the lab's approved outbound plan.
+6. Before starting any test migration, inspect **Peerings**, **DNS servers**, subnet routes, and effective security rules. There must be **no peering, VPN/route path, or source DNS reachability** to source or live target networks. Do not configure source/private production DNS for test guests. Use the network plan's approved outbound method; a new test VNet does not imply outbound Internet access.
+7. Use portal Run Command when the guest agent is ready, or existing approved private RDP/SSH access. Do not add a public IP or connect test and source networks just to run a localhost check.
 
 ### 8.2 Test Migrate OnPrem-Web
 
-1. In the **Replicating machines** view, click on **OnPrem-Web**.
-2. Click **Test migration** in the toolbar.
-3. Select **vnet-migrate-test** as the virtual network.
-4. Click **Test migration** to start.
-
-5. Wait for the test migration job to complete (approximately 10–15 minutes).
+1. In **Replicating servers**, select **`OnPrem-Web` → Test migration**.
+2. Choose **`vnet-migrate-test` → `default`**; review the recovery point offered and submit **Test migration**.
+3. Open **Jobs** and wait for the test-migration job to complete.
+4. In **Virtual machines**, open exactly **`OnPrem-Web-test`**. Confirm its resource ID and test VNet, then record its actual private IP from **Networking → Network interface / IP configurations**. Never fall back to the unsuffixed source/target name.
 
 ### 8.3 Validate the Windows IIS Test VM
 
-1. Navigate to **Virtual Machines** in the Azure Portal.
-2. Locate the test VM (named `OnPrem-Web-test`).
-3. Assign a public IP or use Azure Bastion to connect.
-4. **RDP into the test VM** and run the validation checklist:
-
-**Validation Checklist — IIS Web Server:**
-
-| # | Check | Command | Expected Result |
-|---|-------|---------|-----------------|
-| 1 | IIS service running | `Get-Service -Name W3SVC` | Status: Running |
-| 2 | HTTP response | `Invoke-WebRequest -Uri http://localhost -UseBasicParsing \| Select-Object StatusCode` | StatusCode: 200 |
-| 3 | Correct content | `(Invoke-WebRequest -Uri http://localhost -UseBasicParsing).Content \| Select-String "IIS"` | Content contains expected text |
-| 4 | Network connectivity | `Test-NetConnection -ComputerName 8.8.8.8 -Port 443` | TcpTestSucceeded: True |
-| 5 | DNS resolution | `Resolve-DnsName www.microsoft.com` | Resolves successfully |
-| 6 | Disk integrity | `Get-Volume` | All volumes healthy |
+1. On **`OnPrem-Web-test`**, open **Run command → RunPowerShellScript**, or an elevated PowerShell session through approved RDP.
+2. Disable and stop only the known inherited traffic task if it exists; leave IIS and other application services running:
 
 ```powershell
-# Run all checks
+$task = Get-ScheduledTask -TaskName 'LabOrderDeskTraffic' -ErrorAction SilentlyContinue
+if ($task) {
+    Disable-ScheduledTask -TaskName 'LabOrderDeskTraffic' | Out-Null
+    Stop-ScheduledTask -TaskName 'LabOrderDeskTraffic'
+}
 Get-Service -Name W3SVC
-Invoke-WebRequest -Uri http://localhost -UseBasicParsing | Select-Object StatusCode
-Get-Volume | Format-Table DriveLetter, FileSystemLabel, HealthStatus, SizeRemaining
+$response = Invoke-WebRequest -Uri http://localhost:80 -UseBasicParsing
+$response.StatusCode
+$response.Content -match 'TD SYNNEX \| Windows Web'
 ```
 
-> **🏗️ In Production — Documenting Test Results:**
-> Capture test migration results in a structured format for audit and compliance. Include screenshots, command output, and sign-off from the application owner. For regulated industries (healthcare, finance), this documentation may be a compliance requirement.
+3. Record the result in your student notes. Do not generate orders or test cross-tier application writes in this pair-only test.
 
-**Expected Outcome:** IIS is running and serving the default website on the test VM.
+**Expected Result:** IIS is running; localhost port 80 returns HTTP 200 and the Windows Web content check is `True` on the **test** copy.
 
 ### 8.4 Test Migrate OnPrem-Linux-Web
 
-1. Return to **Replicating machines** and click on **OnPrem-Linux-Web**.
-2. Click **Test migration** → Select the test VNet → Click **Test migration**.
-3. Wait for the test migration to complete.
+1. Select **`OnPrem-Linux-Web` → Test migration** in the same project.
+2. Choose **`vnet-migrate-test` → `default`**, review, and submit.
+3. Wait for the job to complete. Open exactly **`OnPrem-Linux-Web-test`**, confirm its test-network resource ID, and record the private IP from its NIC configuration.
 
 ### 8.5 Validate the Linux Nginx Test VM
 
-1. Locate the test VM `OnPrem-Linux-Web-test`.
-2. **SSH into the test VM** and verify:
+1. On **`OnPrem-Linux-Web-test`**, use **Run command → RunShellScript** or approved SSH. Portal shell runs as root; `sudo` commands below are also usable through SSH.
+2. Stop/disable the known traffic service only if present, then check the static site:
 
 ```bash
-# Check Nginx status
-sudo systemctl status nginx
-
-# Verify HTTP response
-curl -s -o /dev/null -w "%{http_code}" http://localhost
-
-# Verify correct content is served
-curl -s http://localhost | head -20
-
-# Check disk health
-df -h
-lsblk
+if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
+  sudo systemctl disable --now contoso-orderdesk-traffic.service
+fi
+systemctl is-active nginx
+curl --fail --silent --show-error -o /dev/null -w '%{http_code}\n' http://localhost:80
+curl --fail --silent --show-error http://localhost:80 | grep -F 'TD SYNNEX | Linux Web'
 ```
 
-**Expected Outcome:** Nginx is running and serving the default web page on the test VM.
+3. Do not claim a successful port-8080 proxy or SQL-backed Order Desk test yet. The SQL/App test peers are added in Module 3.
 
-### 8.6 Clean Up Test Migrations
+**Expected Result:** Nginx is active and its port-80 static site returns HTTP 200 with Linux Web content. The full application test is still pending.
 
-1. Return to the **Replicating machines** view in Azure Migrate.
-2. For each VM, click **Clean up test migration**.
-3. Select **Testing is complete. Delete test virtual machine**.
-4. Click **Clean up test** to delete the test VMs.
+### 8.6 Retain for the Full Test or Clean Up Test Migrations
 
-> **⚠️ Warning:** Always clean up test migrations before performing the production migration. Leaving test VMs running incurs costs, creates resource sprawl, and may cause confusion during cutover.
+1. If continuing directly to Module 3, retain these two isolated copies, with generators disabled, for its four-VM test. Record their exact names, IDs, and test private IPs.
+2. If ending this session, in **Azure Migrate → Replicating servers**, select each of these two source records and **Clean up test migration**. Confirm **Testing is complete. Delete test virtual machine**, review the resources, and select **Clean up test**.
+3. Inspect names and resource IDs before cleanup. Delete **only the `-test` resources** belonging to that test job; do not delete unsuffixed live targets, source originals, or a resource group containing other workloads.
+4. If cleaned up, recreate these **same two** test migrations in Module 3 before its full-chain test. After cleanup, confirm continuing source replication in the portal.
 
-**Expected Outcome:** Test VMs are deleted and replication status returns to **Protected**.
+**Expected Result:** Either the identified pair is retained safely for the immediate full test, or only its test resources are removed and replication continues. Pair-only results do not authorize cutover.
+
+**CSA Why:** An isolated VM boot proves less than an isolated, correctly rewired application test.
 
 ---
 
 ## 9. Step 6 — Cutover Planning & Execution
 
-#### Cutover Timeline
+### Concepts
 
-```mermaid
-gantt
-    title Cutover Timeline
-    dateFormat HH:mm
-    axisFormat %H:%M
-    section Preparation
-    Reduce DNS TTL          :done, t1, 00:00, 30min
-    Notify stakeholders     :done, t2, 00:30, 15min
-    section Migration
-    Final delta sync        :active, t3, 00:45, 15min
-    Shutdown source VMs     :t4, after t3, 5min
-    Boot Azure VMs          :t5, after t4, 10min
-    section Validation
-    Smoke tests             :t6, after t5, 15min
-    Update DNS records      :t7, after t6, 10min
-    Monitor (rollback window):crit, t8, after t7, 120min
-```
+The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 → SQL:1433**, plus the app's optional HTTP generator to Nginx and Windows Web's optional SQL/App background traffic. The teaching pair is not an independent final migration wave.
+
+> **HOLD POINT — Do not perform final frontend cutover yet.** Complete Module 3 replication and its **full four-VM isolated test** first. Continue to Module 3 from here without migrating the frontends. The actions below are performed **once**, as the frontend phase of [Module 3 §11's shared cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), after SQL and App target preparation. Do not leave migrated frontends dependent on unreachable source SQL/App peers.
+
+### Hands-On — Student Actions
 
 ### 9.1 Cutover Checklist
 
-A CSA's cutover checklist goes beyond "click Migrate":
-
-**T-7 Days (One Week Before):**
-- [ ] Reduce DNS TTL to 300 seconds (5 minutes) for all records pointing to source VMs
-- [ ] Confirm rollback plan with application owner — signed off
-- [ ] Verify target NSG rules allow required traffic (HTTP/80, HTTPS/443)
-- [ ] Schedule maintenance window with all stakeholders
-- [ ] Prepare monitoring dashboards for migrated VMs
-
-**T-1 Hour (Pre-Cutover):**
-- [ ] Verify replication health is **Healthy** for all VMs
-- [ ] Confirm latest recovery point is within acceptable RPO
-- [ ] Notify stakeholders: *"Migration starting in 1 hour"*
-- [ ] Application team confirms users have been notified
-
-**T-0 (Cutover):**
-- [ ] Initiate migration with source VM shutdown
-- [ ] Monitor final delta sync completion
-- [ ] Verify Azure VMs are running
-- [ ] Run smoke tests on migrated VMs
-- [ ] Update DNS records to point to Azure VM IPs
-- [ ] Notify stakeholders: *"Migration complete — validation in progress"*
-
-**T+1 Hour (Post-Cutover):**
-- [ ] Application-level validation complete
-- [ ] Performance baseline comparison (before vs after)
-- [ ] Configure Azure Backup on migrated VMs
-- [ ] Enable Azure Monitor and configure alerts
-- [ ] Notify stakeholders: *"Migration validated — production traffic restored"*
+1. Confirm all four source records have healthy replication, acceptable recovery-point age, and a successful full isolated application test. Clean up all four test migrations before final migration.
+2. Agree the shared window and rollback triggers. Keep original source VMs for rollback.
+3. In Module 3 §11, stop new manual order writes and disable/stop the known source generators, capture the final source data baseline, and migrate SQL, then App. Do not stop SQL, Tomcat, or Nginx merely to stop traffic.
+4. Verify target network rules for the five dependency edges and the approved management path. Public DNS/FQDN updates are needed only if the lab actually uses them.
 
 ### 9.2 IP Address Management Strategy
 
-| Strategy | When to Use | Considerations |
-|----------|-------------|----------------|
-| **Retain IPs** | Site-to-site VPN/ExpressRoute with on-premises | Requires careful subnet planning; source VMs must be powered off |
-| **Reassign IPs** | Clean break from on-premises | Requires DNS updates and connection string changes |
-| **Azure Private DNS** | Long-term best practice | Decouple applications from IP addresses |
+| Strategy | Workshop Action | Consideration |
+|----------|-----------------|---------------|
+| **Reassign private IPs** | Record actual target `10.1.0.0/24` NIC addresses | They are not the nested source `192.168.0.x` addresses |
+| **Managed lab aliases** | Update the three application aliases on all four targets using Module 3 §10.4 | Use actual final target IPs, never test IPs |
+| **Private DNS / client DNS** | Update existing approved records if used | A new public endpoint is not required |
 
-### 9.3 Execute Migration — OnPrem-Web
+### 9.3 Execute Migration — OnPrem-Web (Shared Window Only)
 
-1. In **Replicating machines**, select **OnPrem-Web**.
-2. Click **Migrate** in the toolbar.
-3. In the migration dialog:
-   - **Shut down the source VM before migration?** → Select **Yes** (recommended for data consistency)
-   - Review the summary
-4. Click **Migrate**.
+1. After the SQL and App phases in Module 3 §11, select exactly **`OnPrem-Web`** in **Replicating servers → Migrate**.
+2. Confirm the reviewed target mapping and choose **Shut down the source VM before migration: Yes**.
+3. Review and select **Migrate**. The portal performs planned source shutdown and final synchronization; monitor its job rather than treating submission as completion.
 
-> **Note:** Shutting down the source VM ensures that no data changes are lost during the final delta sync. The source VM remains available on-premises for rollback — do not delete it yet.
+### 9.4 Execute Migration — OnPrem-Linux-Web (Same Shared Window)
 
-### 9.4 Execute Migration — OnPrem-Linux-Web
-
-1. Select **OnPrem-Linux-Web** and click **Migrate**.
-2. Choose to shut down the source VM → Click **Migrate**.
+1. Select exactly **`OnPrem-Linux-Web` → Migrate**.
+2. Review target settings and choose **Shut down the source VM before migration: Yes**, then submit.
+3. Keep order entry closed until all targets are rewired and the full target validation passes.
 
 ### 9.5 Monitor Migration Progress
 
-1. Click **Jobs** in the left menu of Azure Migrate to see migration job status.
-2. Wait for both migrations to show **Completed**.
+1. Open the project's **Jobs** and wait for both frontend migrations to complete successfully. Verify their selected Hyper-V sources are shut down.
+2. In **Virtual machines**, inspect the unsuffixed **`OnPrem-Web`** and **`OnPrem-Linux-Web`** in the target group; confirm their resource IDs, location, size, running state, and attached disks.
+3. Record actual target NIC private IPs. With all four targets created, perform Module 3 §11's all-target alias update, Tomcat restart, and Nginx configuration test/reload before functional traffic.
 
-The migration engine executes these steps automatically:
+**Expected Result:** During the one shared window, the frontends join the migrated SQL/App targets. Source copies remain shut down and retained; application traffic is not restored until full validation succeeds.
 
-1. **Final delta replication** — Captures all changes since last sync
-2. **Source VM shutdown** — Graceful OS shutdown (if selected)
-3. **Azure VM creation** — Provisions VM from replica managed disks
-4. **Azure VM boot** — Starts the VM with Azure Guest Agent
-
-**Expected Outcome:** Both VMs are migrated to Azure and showing as **Running** in the Virtual Machines blade.
+**CSA Why:** Planned shutdown and final sync protect the selected source's last changes; coordinated dependencies restore the service.
 
 ---
 
 ## 10. Step 7 — Post-Migration Validation
 
+### Concepts
+
+VM running state and static HTTP success are necessary but insufficient. Complete this frontend validation together with Module 3's SQL integrity, readiness, proxy, and sample-order checks. Backup and ongoing monitoring configuration belong to Module 5.
+
+### Hands-On — Student Actions
+
 ### 10.1 Verify VMs Are Running
 
-```powershell
-# List migrated VMs
-Get-AzVM -ResourceGroupName "rg-ces-target-01" -Status | `
-    Select-Object Name, PowerState, Location
-```
+1. In the target resource group, inspect the exact unsuffixed frontend VMs, their actual private IPs, OS types, selected sizes, and required disks.
+2. Use their portal Run Command or already-approved private RDP/SSH access; do not assume your workstation can route to them.
 
 ### 10.2 Application-Level Smoke Tests — IIS
 
-1. Connect to OnPrem-Web via RDP or Azure Bastion.
-2. Run the full validation suite:
+1. Run the §8.3 IIS service and localhost checks **inside target `OnPrem-Web`**, not the retained source or a test copy.
+2. Leave the known traffic task disabled while final data/application validation is in progress.
 
-```powershell
-# Service health
-Get-Service W3SVC | Select-Object Name, Status
-
-# IIS site configuration
-Get-IISSite
-
-# Local HTTP test
-Invoke-WebRequest -Uri http://localhost -UseBasicParsing | Select-Object StatusCode
-
-# Verify event logs for errors
-Get-EventLog -LogName Application -EntryType Error -After (Get-Date).AddHours(-1) -ErrorAction SilentlyContinue
-```
-
-3. From an external machine (if a public IP is assigned):
-
-```powershell
-Invoke-WebRequest -Uri http://<public-ip-of-web-vm> -UseBasicParsing | Select-Object StatusCode
-```
+**Expected Result:** Target IIS is running and its expected static page returns HTTP 200.
 
 ### 10.3 Application-Level Smoke Tests — Nginx
 
-1. Connect to OnPrem-Linux-Web via SSH or Azure Bastion.
+1. Run the §8.5 static checks **inside target `OnPrem-Linux-Web`**.
+2. After the Module 3 alias update, run `sudo nginx -t && sudo systemctl reload nginx` there. The existing 8080 upstream uses `onprem-app`; reloading resolves its new target address.
 
-```bash
-# Service health
-sudo systemctl status nginx
-
-# HTTP response verification
-curl -I http://localhost
-
-# Check listening ports
-sudo ss -tlnp | grep ':80'
-
-# Check system logs for errors
-sudo journalctl -u nginx --since "1 hour ago" --no-pager | tail -20
-```
+**Expected Result:** Static port 80 is unchanged; the separate proxy is ready for Module 3's full-chain validation.
 
 ### 10.4 Network Connectivity Verification
 
-```powershell
-# From the Windows VM — verify connectivity to Linux VM
-Test-NetConnection -ComputerName <private-ip-of-linux-vm> -Port 80
-```
-
-```bash
-# From the Linux VM — verify connectivity to Windows VM
-ping -c 4 <private-ip-of-windows-vm>
-curl -s http://<private-ip-of-windows-vm>
-```
+1. Validate only the relevant dependency edges using [Module 3 §10.5](Module-3-Agent-Based-Migration.md#105-validate-the-full-four-vm-application), substituting final target copies: Web → SQL:1433, Web → App:3000, App → SQL:1433, App → Nginx:8080, and Nginx → App:3000.
+2. Complete health, SQL readiness, existing-order comparison, and **one** sample-order create/readback in the shared procedure. Do not run a second write merely because the checks are referenced here.
 
 ### 10.5 Security Posture Verification
 
-> **🏗️ In Production — This step is mandatory, not optional.**
-
-- [ ] NSG rules reviewed — only required ports are open (no wildcard `*` rules)
-- [ ] Azure Defender for Servers enabled (or confirm organizational policy)
-- [ ] Disk encryption status verified (Azure-managed keys at minimum)
-- [ ] No public IPs assigned unless explicitly required and approved
-- [ ] Just-in-Time VM access configured for management ports (RDP/SSH)
+1. Review effective NSG rules and guest firewalls for those edges and approved management access. Confirm SQL and the unauthenticated demo application have no Internet exposure.
+2. Confirm no unnecessary public IP was introduced and disk protection meets the lab policy.
 
 ### 10.6 DNS Update & Validation
 
-1. Update DNS records to point to the new Azure private/public IPs.
-2. Verify resolution from client machines:
+1. Confirm the lab aliases on **all four targets** map to actual target private IPs, preserving unrelated hosts-file entries.
+2. If an existing approved client DNS/FQDN is used, update it and test from that approved client path. Otherwise, record private-IP/localhost results; public DNS is not required.
 
-```powershell
-Resolve-DnsName "webapp.contoso.com"
-```
+### 10.7 Record Acceptance and Continue
 
-3. Restore DNS TTL to standard values (e.g., 3600 seconds) after validation period.
+1. Record frontend results and the shared application/data acceptance in your student notes.
+2. Continue to [Module 5: Post-Migration Optimization](Module-5-Post-Migration.md) for monitoring, backup, and ongoing optimization after acceptance. Retain the rollback window agreed for the complete system.
 
-> **Tip:** Consider using Azure Private DNS Zones for name resolution within the VNet. This decouples your applications from IP addresses and simplifies future maintenance.
+**Expected Result:** Target frontends serve expected static content, and the complete target application passes the single shared validation before traffic is released.
 
-### 10.7 Backup & Monitoring Configuration
-
-- [ ] Enable **Azure Backup** with appropriate retention policy
-- [ ] Configure **Azure Monitor** agent and diagnostic settings
-- [ ] Set up **alerts** for VM availability, CPU, memory, disk
-- [ ] Verify VMs are visible in **Azure Monitor VM Insights**
-
-**Expected Outcome:** Both migrated VMs are fully functional in Azure with workloads (IIS and Nginx) serving content, security controls applied, and monitoring active.
+**CSA Why:** A green homepage does not prove database freshness or a correctly repointed proxy.
 
 ---
 
 ## 11. Rollback Strategy
 
-A CSA always has a rollback plan — and knows exactly when to trigger it.
+### Concepts
 
-### When to Rollback
+A CSA always has a rollback plan — and knows exactly when to trigger it. These frontends participate in the same stateful service as SQL and Tomcat; do not roll back only one teaching pair without checking its dependencies.
 
-| Trigger | Threshold | Action |
-|---------|-----------|--------|
-| Application errors | HTTP 5xx rate > 5% | Rollback |
-| Performance degradation | Latency > 200% of baseline | Investigate, rollback if unresolvable in 1 hour |
-| Data integrity issues | Any data corruption detected | Immediate rollback |
-| Network connectivity | Cannot reach dependent services | Investigate, rollback if unresolvable in 30 minutes |
+| Trigger | Example Threshold to Agree Before Cutover | Action |
+|---------|------------------------------------------|--------|
+| Application errors | Sustained HTTP errors beyond the agreed tolerance | Pause traffic; evaluate coordinated rollback |
+| Performance degradation | Response times materially worse than captured baseline | Compare against the agreed recovery window |
+| Data integrity issues | Missing or inconsistent committed data | Keep writes stopped; investigate and reconcile |
+| Dependency failure | App cannot reach SQL or proxy peers | Do not accept the migration |
 
-### How to Rollback
+### Hands-On — Student Actions
 
-1. **Power on the source VMs** on the Hyper-V host (they were shut down, not deleted).
-2. **Update DNS records** to point back to on-premises IPs.
-3. **Notify stakeholders:** *"Rollback initiated due to [reason]. Services restored to on-premises. Root cause analysis in progress."*
-4. **Deallocate (do not delete)** the Azure VMs — you may reattempt migration after fixing the issue.
+1. Stop new order entry and disable/stop the known Azure-side generators. Preserve the target state for analysis.
+2. Determine whether **any target writes** occurred. If so, follow [Module 3 §13](Module-3-Agent-Based-Migration.md#13-rollback-strategy-for-stateful-workloads): reconcile target data with the recovery destination before restoring service. Starting stale source SQL is not a safe rollback.
+3. If no target writes occurred and the agreed rollback decision is made, keep Azure copies from serving traffic, then start source SQL, App, and frontends in dependency order through **Hyper-V Manager** on HyperVHost.
+4. Restore source-side alias/client routing to the captured source mapping, validate the whole source application, and only then reopen order entry. Keep a single writable environment.
+5. Retain the shut-down source originals until application acceptance and the agreed rollback window closes (often 48–72 hours, adjusted to policy). Do not delete originals as part of test cleanup or immediate cutover.
 
-### Rollback Window
+**Expected Result:** The service is restored to one validated environment without silently discarding target transactions.
 
-- **Recommended:** Maintain source VMs in their shutdown state for **48–72 hours** after cutover.
-- **Do not decommission** source infrastructure until the application owner signs off on migration success.
-- After the rollback window expires, take a final snapshot of source VMs before decommissioning.
-
-> **🏗️ In Production:** For regulated environments, extend the rollback window to match your change management policy (often 5–7 business days). Document the decommission decision with timestamps and approvals.
+**CSA Why:** Returning traffic is easy; preserving the newest business data is the actual rollback requirement.
 
 ---
 
 ## Key Takeaways
 
-1. **Agentless = zero footprint, periodic sync.** Ideal for stateless workloads and quick wins in early migration waves.
-2. **Test migration is non-negotiable.** It is the cheapest insurance policy in your migration toolkit.
-3. **Migration is an operation, not a click.** Treat it with the same rigor as a production deployment: runbook, checklist, communication plan, rollback criteria.
-4. **Post-migration is half the work.** Security posture, monitoring, backup, and DNS are not optional follow-ups — they are part of the migration definition of done.
-5. **Keep source VMs for 48–72 hours.** The rollback window is not paranoia — it is professional risk management.
+1. **Guest-agentless does not mean host-software-free.** HyperVHost's registered provider replicates all four VMs.
+2. **A test migration is a separate portal action.** Static frontend checks are not full application acceptance.
+3. **Teaching pairs are not cutover boundaries.** Complete Module 3's four-VM test before the shared final window.
+4. **Use actual NIC addresses.** Source, test, and final target addresses are different; repoint every application peer.
+5. **Retain source VMs and protect target writes.** Rollback must account for the data created after cutover.
 
 ---
 
 ## Next Steps
 
-Proceed to **[Module 3: Agent-Based Migration](Module-3-Agent-Based-Migration.md)** to migrate the remaining VMs (OnPrem-SQL and OnPrem-Linux-App) using the agent-based approach — the right choice for stateful, mission-critical workloads requiring continuous replication and near-zero RPO.
+At the §9 hold point, continue to **[Module 3: Stateful Workload Migration (SQL/Tomcat)](Module-3-Agent-Based-Migration.md)** to replicate SQL and Tomcat through the same Hyper-V host provider, complete the full isolated test, and execute the coordinated four-VM cutover. Return to this module's frontend cutover and validation actions only within that shared window.
