@@ -2,23 +2,7 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-**This revision builds a new Ubuntu 24.04 lab.** Use a fresh dedicated source resource
- group/Hyper-V host and the full `azure-migrate-workshop-ubuntu2404.zip` checkout, not an
- overlay on the earlier Tomcat package. Never run provisioning on an existing 22.04 lab
- or reuse its nested names on one host. An incomplete same-revision build may resume;
- completed or unmarked/older builds are refused. The existing deployment is unaffected.
 
-Both Linux guests use Canonical Noble's moving `current` QCOW2 image and its exact-name
-SHA256SUMS (verified before conversion). Ubuntu2404 cache names isolate it from the old
-base. Tomcat `tomcat10`/`tomcat10-common`/`libtomcat10-java` are Noble Universe packages;
-Tomcat 10.1.x is checked on target and runs with explicit OpenJDK 17, not the distribution's
-other default Java version. Install repository security updates and record actual patches.
-Standard Main maintenance through May 2029 is not blanket security coverage for Universe;
-review the [Ubuntu lifecycle and coverage](https://ubuntu.com/about/release-cycle).
-
-KVP installation resolves the running kernel/flavour and requires its exact tools/binary;
-there is no virtual-flavour fallback or implicit kernel upgrade. After any later kernel
-change, verify matching tools and daemon activity after reboot, then the host CIM gate.
 
 
 In this module you build the on-premises environment that the rest of the workshop migrates: one Azure VM running Hyper-V, with four nested guest VMs standing in for a small business's servers. A single script provisions all of it, and you finish by verifying that every workload actually responds.
@@ -103,7 +87,7 @@ Missing/denied rows are unknown, not unused quota. [VM quotas](https://learn.mic
 The nested four workload VMs and `MigrateAppl` do **not** count as separate Azure VMs: their
 Azure Hyper-V host is the source allocation. Choose a **different migration target region**
 for Azure workload/test VMs to spread regional quotas, and check that region independently
-with step 1's read-only preflight before creating the landing zone. The step 3 planning sizes
+with step 1's read-only preflight before creating the landing zone. *(i.e. The default Region is East US. Therefore a suitable migration target region would be West US 2.)* The step 3 planning sizes
 normally need 6 additional vCPUs/four Azure VMs for a full target or test set; 12/eight is only
 an overlapping full target and full test set. Tests normally clean up before cutover. Do not
 add already-existing targets or the source host again to live usage; replication disks do not
@@ -118,7 +102,7 @@ reserve VM cores. Recheck actual chosen SKUs/counts before migration.
 | Criterion | Guidance |
 |---|---|
 | **Proximity** | Select a region close to you to minimize RDP latency. |
-| **Esv7 availability** | Not all regions offer Esv7. Verify: `Get-AzComputeResourceSku -Location "eastus" \| Where-Object { $_.Name -eq "Standard_E8s_v7" }` |
+| **Esv7 availability** | Not all regions offer Esv7. Verify: `Get-AzComputeResourceSku -Location "eastus" \| Where-Object { $_.Name -eq "Standard_E8s_v7" }` (If needed, a suitable replacement machine can be used.) |
 | **Nested virtualization** | Confirm **Nested Virtualization: Supported** in the [Esv7 specifications](https://learn.microsoft.com/azure/virtual-machines/sizes/memory-optimized/esv7-series) before committing to a size. Hardware and availability metadata alone do not establish support. |
 | **Cost** | Pricing varies by region. US regions are typically cost-effective. |
 | **Candidate regions** | `eastus`, `westus2`, `westeurope`, `northeurope` are examples only; verify subscription access, SKU restrictions, quota and capacity. |
