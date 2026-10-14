@@ -20,11 +20,14 @@
       - OnPrem-Web       (Windows Server + IIS)
       - OnPrem-SQL       (Windows Server + SQL Server Express)
       - OnPrem-Linux-Web (Ubuntu + Nginx)
-      - OnPrem-Linux-App (Ubuntu + Node.js API)
+      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
 
     Prerequisites:
       - Step 5 completed (all VMs migrated and running in Azure)
       - Az PowerShell modules installed
+      - Baseline application connectivity with post-migration-labtraffic.ps1 in its
+        read-only check mode before Step 6 hardening; guest firewall/subnet/routes are
+        diagnosed separately, not automatically changed here.
 
 .PARAMETER SourceResourceGroup
     Resource group that contained the original on-prem VMs.
@@ -33,6 +36,7 @@
     Resource group containing the migrated Azure VMs.
 
 .PARAMETER Location
+    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
     Azure region. Prompted when not supplied (example: eastus).
 
 .PARAMETER AutoShutdownTime
@@ -63,8 +67,12 @@ MODULE COVERAGE
     Not covered: section 1 (concepts), section 6 (Update Management), section 7 (Day 2
     Operations Runbook) and section 8 (Workshop Summary). Those are discussion and reading.
 
-    It tolerates a partial estate: the VM list is built from what actually exists in the target
-    resource group, so it works after only Module 2 or only Module 3 has been completed.
+    NSG hardening requires all four primary target roles, distinct private IPv4 addresses in
+    one VNet and dedicated NIC NSGs (or unused names for new NSGs). It preserves unrelated
+    rules and stops before network writes on ambiguous topology or priority conflicts.
+    Application rules use verified target peer /32 addresses; unavailable public IPv4 omits
+    RDP/SSH allows rather than opening management to the internet.
+    Guest firewall, subnet NSGs and routes are not changed by this hardening section.
 #>
 
 [CmdletBinding()]
@@ -800,6 +808,54 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -818,7 +874,15 @@ Write-Host ""
 Write-Host "Enter the values for your lab environment. A value in [brackets] is a lab default and Enter accepts it; an (example: ...) is a hint only and must be typed." -ForegroundColor Cyan
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+$Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+$existingBackupVaults = @(Get-AzResource -ResourceGroupName $TargetResourceGroup -ErrorAction Stop | Where-Object {
+    $_.ResourceType -eq 'Microsoft.RecoveryServices/vaults' -and $_.Name -eq "$TargetResourceGroup-rsv"
+})
+foreach ($backupVault in $existingBackupVaults) {
+    if ((ConvertTo-LabRegionKey $backupVault.Location) -ne (ConvertTo-LabRegionKey $Location)) {
+        throw "Existing backup vault '$($backupVault.Name)' is in '$($backupVault.Location)', not actual migration target '$Location'. No changes were made."
+    }
+}
 $AutoShutdownTime = Read-LabParameter -Name 'AutoShutdownTime' -Value $AutoShutdownTime -Kind Time24h -Prompt 'Daily auto-shutdown time, 24-hour HHmm' -Example '1900'
 $AutoShutdownTimezone = Read-LabParameter -Name 'AutoShutdownTimezone' -Value $AutoShutdownTimezone -Kind TimeZone -Prompt 'Auto-shutdown time zone (Windows time zone ID)' -Example 'Eastern Standard Time'
 $BackupRetentionDays = Read-LabNumber -Name 'BackupRetentionDays' -Prompt 'Backup retention in days' -Value $BackupRetentionDays -Supplied:($PSBoundParameters.ContainsKey('BackupRetentionDays')) -Minimum 7 -Maximum 9999 -Example '30'
@@ -902,6 +966,9 @@ $migratedVMs = @{}
 foreach ($vmName in $vmNames) {
     $vm = Get-AzVM -ResourceGroupName $TargetResourceGroup -Name $vmName -ErrorAction SilentlyContinue
     if ($vm) {
+        if ((ConvertTo-LabRegionKey $vm.Location) -ne (ConvertTo-LabRegionKey $Location)) {
+            throw "Migrated VM '$vmName' is in '$($vm.Location)', not target VNet region '$Location'. No changes were made."
+        }
         Write-StepInfo "  ✅ '$vmName' found. Size: $($vm.HardwareProfile.VmSize)"
         $migratedVMs[$vmName] = $vm
     } else {
@@ -1153,34 +1220,137 @@ Write-SectionHeader "3" "Harden NSG Rules (Zero Trust)"
 # following the Zero Trust principle: "Never trust, always verify."
 # Each VM should only accept traffic that is strictly necessary.
 
-# Get the participant's public IP for RDP/SSH access.
-# This ensures remote management is locked down to their IP only.
+# A failed/invalid public-IP lookup must never open management to the internet.
 Write-StepInfo "Detecting your public IP for RDP/SSH whitelisting..."
+$myPublicIp = $null
 try {
-    $myPublicIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -TimeoutSec 10 -UseBasicParsing).Content
-    Write-StepInfo "  Your public IP: $myPublicIp"
-} catch {
-    Write-WarningBanner "Could not detect public IP. Using '*' for management rules (less secure)."
-    $myPublicIp = "*"
-}
-
-# Collect private IPs of all VMs for inter-VM rules.
-$vmIPs = @{}
-foreach ($vmName in $vmNames) {
-    try {
-        $vm = $migratedVMs[$vmName]
-        if ($vm) {
-            $nic = Get-AzNetworkInterface -ResourceGroupName $TargetResourceGroup |
-                   Where-Object { $_.VirtualMachine.Id -eq $vm.Id }
-            $vmIPs[$vmName] = $nic.IpConfigurations[0].PrivateIpAddress
-        }
-    } catch {
-        Write-WarningBanner "Could not get IP for '$vmName'."
+    $candidate = [string](Invoke-WebRequest -Uri "https://api.ipify.org" -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop).Content
+    $candidate = $candidate.Trim()
+    $parsedPublicIp = $null
+    if (-not [Net.IPAddress]::TryParse($candidate, [ref]$parsedPublicIp) -or
+        $parsedPublicIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+        $parsedPublicIp.ToString() -cne $candidate) {
+        throw "Public-IP lookup did not return a canonical IPv4 address."
     }
+    $myPublicIp = $candidate + "/32"
+    Write-StepInfo "  Your public IP: $candidate"
+} catch {
+    Write-WarningBanner "Could not verify your public IPv4. Lab RDP/SSH allows will be omitted (existing lab management allows removed); no wildcard management access will be added."
 }
 
-# Define NSG rules for each VM.
-# Each entry specifies the inbound rules that should exist.
+# Read-only preflight of ALL four roles before ANY NSG/NIC writes. Use resource
+# references, not a resource-group-wide NIC search or the old on-prem addresses.
+$vmIPs = @{}
+$networkPlan = @{}
+$seenVmIds = @{}
+$seenNicIds = @{}
+$seenPrivateIPs = @{}
+$seenNsgIds = @{}
+$commonVNetId = $null
+foreach ($vmName in $vmNames) {
+    $vms = @($migratedVMs[$vmName] | Where-Object { $_ })
+    if ($vms.Count -ne 1 -or $vms[0].Name -ine $vmName) {
+        throw "NSG preflight: all four exact primary target VMs must be present and unique; verify '$vmName'. No Section 3 network changes were made."
+    }
+    $vm = $vms[0]
+    if ($vm.Id -notmatch '^/subscriptions/(?<Subscription>[^/]+)/resourceGroups/(?<ResourceGroup>[^/]+)/providers/Microsoft\.Compute/virtualMachines/(?<Name>[^/]+)$' -or
+        $Matches.Subscription -ine $subscriptionId -or $Matches.ResourceGroup -ine $TargetResourceGroup -or $Matches.Name -ine $vmName -or
+        $seenVmIds.ContainsKey($vm.Id)) {
+        throw "NSG preflight: '$vmName' has an unexpected or duplicate VM identity."
+    }
+    $seenVmIds[$vm.Id] = $true
+    $expectedOS = if ($vmName -in @('OnPrem-Web', 'OnPrem-SQL')) { 'Windows' } else { 'Linux' }
+    if ([string]$vm.StorageProfile.OsDisk.OsType -ine $expectedOS) {
+        throw "NSG preflight: '$vmName' must have OS type '$expectedOS'; verify the target role."
+    }
+
+    $nicRefs = @($vm.NetworkProfile.NetworkInterfaces | Where-Object { $_ })
+    if ($nicRefs.Count -ne 1) {
+        throw "NSG preflight: '$vmName' must have exactly one NIC for this lab. Multiple/missing NICs are ambiguous; review the topology before rerunning."
+    }
+    $nicId = [string]$nicRefs[0].Id
+    if ($nicId -notmatch '^/subscriptions/(?<Subscription>[^/]+)/resourceGroups/(?<ResourceGroup>[^/]+)/providers/Microsoft\.Network/networkInterfaces/(?<Name>[^/]+)$' -or
+        $Matches.Subscription -ine $subscriptionId -or $seenNicIds.ContainsKey($nicId)) {
+        throw "NSG preflight: '$vmName' has an invalid or shared NIC reference."
+    }
+    $nicResourceGroup = $Matches.ResourceGroup
+    $nicName = $Matches.Name
+    $nics = @(Get-AzNetworkInterface -ResourceGroupName $nicResourceGroup -Name $nicName -ErrorAction Stop)
+    if ($nics.Count -ne 1 -or $nics[0].Id -ine $nicId -or $nics[0].VirtualMachine.Id -ine $vm.Id) {
+        throw "NSG preflight: cannot uniquely verify NIC ownership for '$vmName'."
+    }
+    $nic = $nics[0]
+    $seenNicIds[$nicId] = $true
+    $ipConfigs = @($nic.IpConfigurations | Where-Object { $_ })
+    $primaryConfigs = @($ipConfigs | Where-Object { $_.Primary -eq $true })
+    # A sole IP configuration is unambiguous even when Azure omits Primary.
+    if ($ipConfigs.Count -eq 1) { $primaryConfigs = @($ipConfigs[0]) }
+    if ($primaryConfigs.Count -ne 1) {
+        throw "NSG preflight: '$vmName' has no unique primary IP configuration. Do not guess a secondary address."
+    }
+    $ipConfig = $primaryConfigs[0]
+    $privateIP = [string]$ipConfig.PrivateIpAddress
+    $parsedPrivateIp = $null
+    if ([string]::IsNullOrWhiteSpace($privateIP) -or
+        -not [Net.IPAddress]::TryParse($privateIP, [ref]$parsedPrivateIp) -or
+        $parsedPrivateIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+        $parsedPrivateIp.ToString() -cne $privateIP -or
+        $parsedPrivateIp.GetAddressBytes()[0] -in @(0, 127) -or $parsedPrivateIp.GetAddressBytes()[0] -ge 224 -or
+        $seenPrivateIPs.ContainsKey($privateIP)) {
+        throw "NSG preflight: '$vmName' needs a nonempty, distinct primary private IPv4. Application allows cannot use a wildcard fallback."
+    }
+    $subnetId = [string]$ipConfig.Subnet.Id
+    if ($subnetId -notmatch '^(?<VNetId>/subscriptions/(?<Subscription>[^/]+)/resourceGroups/[^/]+/providers/Microsoft\.Network/virtualNetworks/[^/]+)/subnets/[^/]+$' -or
+        $Matches.Subscription -ine $subscriptionId) {
+        throw "NSG preflight: '$vmName' has no verifiable target VNet/subnet reference."
+    }
+    $vnetId = $Matches.VNetId
+    if ($commonVNetId -and $commonVNetId -ine $vnetId) {
+        throw "NSG preflight: all four roles must share the same target VNet; routed/peered topologies require separate review."
+    }
+    $commonVNetId = $vnetId
+    $vmIPs[$vmName] = $privateIP
+    $seenPrivateIPs[$privateIP] = $true
+
+    $nsg = $null
+    $nsgName = "$vmName-nsg"
+    $nsgResourceGroup = $nicResourceGroup
+    if ($nic.NetworkSecurityGroup) {
+        $nsgId = [string]$nic.NetworkSecurityGroup.Id
+        if ($nsgId -notmatch '^/subscriptions/(?<Subscription>[^/]+)/resourceGroups/(?<ResourceGroup>[^/]+)/providers/Microsoft\.Network/networkSecurityGroups/(?<Name>[^/]+)$' -or
+            $Matches.Subscription -ine $subscriptionId) {
+            throw "NSG preflight: '$vmName' has an invalid NSG resource reference."
+        }
+        $nsgResourceGroup = $Matches.ResourceGroup
+        $nsgName = $Matches.Name
+        if ($seenNsgIds.ContainsKey($nsgId)) {
+            throw "NSG preflight: shared NSG '$nsgName' detected. Attach a separate NIC NSG to each lab role before rerunning; no rules were overwritten."
+        }
+        $seenNsgIds[$nsgId] = $true
+        $nsgs = @(Get-AzNetworkSecurityGroup -ResourceGroupName $nsgResourceGroup -Name $nsgName -ErrorAction Stop)
+        if ($nsgs.Count -ne 1 -or $nsgs[0].Id -ine $nsgId) {
+            throw "NSG preflight: cannot uniquely resolve '$vmName' NSG from its NIC resource ID."
+        }
+        $nsg = $nsgs[0]
+        $attachedNicIds = @($nsg.NetworkInterfaces | ForEach-Object { $_.Id })
+        $attachedSubnets = @($nsg.Subnets | Where-Object { $_ })
+        if ($attachedNicIds.Count -ne 1 -or $attachedNicIds[0] -ine $nicId -or $attachedSubnets.Count -ne 0) {
+            throw "NSG preflight: '$nsgName' is shared or subnet-attached. Use a dedicated NIC NSG for '$vmName'; shared/subnet policy is not modified."
+        }
+    } else {
+        # Never repurpose an unattached/unrelated NSG that happens to have this name.
+        $existing = @(Get-AzNetworkSecurityGroup -ResourceGroupName $nsgResourceGroup -ErrorAction Stop |
+            Where-Object { $_.Name -ieq $nsgName })
+        if ($existing.Count -gt 0) {
+            throw "NSG preflight: '$nsgName' already exists but is not attached to '$vmName'. Review/attach the correct dedicated NSG before rerunning."
+        }
+    }
+    $networkPlan[$vmName] = @{ Nic = $nic; Nsg = $nsg; NsgName = $nsgName; NsgResourceGroup = $nsgResourceGroup }
+    Write-StepInfo "  Verified '$vmName' primary target IPv4: $privateIP"
+}
+
+# Exact inbound application edges; no old 192.168.0.x assumptions or VNet-wide
+# application allows. Keep the existing public HTTP/HTTPS policy unchanged.
 $nsgRules = @{
     "OnPrem-Web" = @(
         @{ Name = "Allow-HTTP";  Priority = 100; Port = "80";  Source = "*"; Desc = "Allow HTTP from internet" },
@@ -1189,84 +1359,103 @@ $nsgRules = @{
         @{ Name = "Deny-All";    Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
     )
     "OnPrem-SQL" = @(
-        # SQL Server should ONLY accept connections from the web server -- never the internet.
-        @{ Name = "Allow-SQL-From-Web"; Priority = 100; Port = "1433"; Source = $vmIPs["OnPrem-Web"]; Desc = "SQL from web server only" },
-        @{ Name = "Allow-RDP";          Priority = 200; Port = "3389"; Source = $myPublicIp; Desc = "RDP from your IP only" },
-        @{ Name = "Deny-All";           Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
+        @{ Name = "Allow-SQL-From-Web"; Priority = 100; Port = "1433"; Source = ($vmIPs["OnPrem-Web"] + "/32"); Desc = "SQL from IIS only" },
+        @{ Name = "Allow-SQL-From-Linux-App"; Priority = 110; Port = "1433"; Source = ($vmIPs["OnPrem-Linux-App"] + "/32"); Desc = "SQL from Tomcat only" },
+        @{ Name = "Allow-RDP"; Priority = 200; Port = "3389"; Source = $myPublicIp; Desc = "RDP from your IP only" },
+        @{ Name = "Deny-All"; Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
     )
     "OnPrem-Linux-Web" = @(
         @{ Name = "Allow-HTTP";  Priority = 100; Port = "80";  Source = "*"; Desc = "Allow HTTP from internet" },
         @{ Name = "Allow-HTTPS"; Priority = 110; Port = "443"; Source = "*"; Desc = "Allow HTTPS from internet" },
-        @{ Name = "Allow-SSH";   Priority = 200; Port = "22";  Source = $myPublicIp; Desc = "SSH from your IP only" },
-        @{ Name = "Deny-All";    Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
+        @{ Name = "Allow-8080-From-Linux-App"; Priority = 120; Port = "8080"; Source = ($vmIPs["OnPrem-Linux-App"] + "/32"); Desc = "HTTP 8080 from Tomcat only" },
+        @{ Name = "Allow-SSH"; Priority = 200; Port = "22"; Source = $myPublicIp; Desc = "SSH from your IP only" },
+        @{ Name = "Deny-All"; Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
     )
     "OnPrem-Linux-App" = @(
-        # Node.js API should ONLY accept connections from the Nginx reverse proxy.
-        @{ Name = "Allow-API-From-Nginx"; Priority = 100; Port = "3000"; Source = $vmIPs["OnPrem-Linux-Web"]; Desc = "API from Nginx only" },
-        @{ Name = "Allow-SSH";            Priority = 200; Port = "22";   Source = $myPublicIp; Desc = "SSH from your IP only" },
-        @{ Name = "Deny-All";             Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
+        @{ Name = "Allow-API-From-Nginx"; Priority = 100; Port = "3000"; Source = ($vmIPs["OnPrem-Linux-Web"] + "/32"); Desc = "Tomcat from Nginx only" },
+        @{ Name = "Allow-API-From-Web"; Priority = 110; Port = "3000"; Source = ($vmIPs["OnPrem-Web"] + "/32"); Desc = "Tomcat from IIS only" },
+        @{ Name = "Allow-SSH"; Priority = 200; Port = "22"; Source = $myPublicIp; Desc = "SSH from your IP only" },
+        @{ Name = "Deny-All"; Priority = 4000; Port = "*"; Source = "*"; Desc = "Deny all other inbound"; Access = "Deny" }
     )
 }
 
+# Only known Step 5/6 rules with the expected shape are lab-managed. Preserve
+# every unrelated custom rule, and reject conflicting priorities BEFORE writes.
+$managedRuleNames = @{}
+foreach ($vmName in $vmNames) {
+    $managedSpecs = @{}
+    foreach ($rule in $nsgRules[$vmName]) { $managedSpecs[$rule.Name] = $rule }
+    if ($vmName -eq 'OnPrem-SQL') {
+        $managedSpecs['Allow-SQL-From-VNet'] = @{ Priority = 100; Port = '1433' }
+    }
+    if ($vmName -eq 'OnPrem-Linux-App') {
+        $managedSpecs['Allow-API-From-VNet'] = @{ Priority = 100; Port = '3000' }
+    }
+    $managedRuleNames[$vmName] = @($managedSpecs.Keys)
+    $nsgRules[$vmName] = @($nsgRules[$vmName] | Where-Object { $_.Name -notin @('Allow-RDP', 'Allow-SSH') -or $myPublicIp })
+    foreach ($rule in $nsgRules[$vmName]) {
+        if ([string]::IsNullOrWhiteSpace([string]$rule.Source)) {
+            throw "NSG preflight: '$vmName/$($rule.Name)' has no verified source. No wildcard fallback is permitted."
+        }
+    }
+    $nsg = $networkPlan[$vmName].Nsg
+    if (-not $nsg) { continue }
+    foreach ($existingRule in $nsg.SecurityRules) {
+        if ($managedSpecs.ContainsKey($existingRule.Name)) {
+            $spec = $managedSpecs[$existingRule.Name]
+            $expectedAccess = if ($spec.ContainsKey('Access')) { $spec.Access } else { 'Allow' }
+            if ($existingRule.Direction -ine 'Inbound' -or $existingRule.Protocol -ine 'Tcp' -or
+                $existingRule.Access -ine $expectedAccess -or $existingRule.Priority -ne $spec.Priority -or
+                $existingRule.SourcePortRange -ne '*' -or $existingRule.DestinationPortRange -ne $spec.Port) {
+                throw "NSG preflight: '$($nsg.Name)/$($existingRule.Name)' is not a recognized lab-rule shape; preserved. Review this control before rerunning."
+            }
+        } elseif ($existingRule.Direction -ieq 'Inbound' -and $existingRule.Priority -in @($nsgRules[$vmName] | ForEach-Object { $_.Priority })) {
+            throw "NSG preflight: unrelated rule '$($nsg.Name)/$($existingRule.Name)' conflicts with a required inbound priority. Preserved; review priorities before rerunning."
+        }
+    }
+}
+
+Write-StepInfo "All four roles and NSG rule scopes passed read-only preflight. Applying hardening..."
 foreach ($vmName in $vmNames) {
     Write-StepInfo "Hardening NSG for '$vmName'..."
-
     try {
-        $vm = $migratedVMs[$vmName]
-        if (-not $vm) {
-            Write-WarningBanner "VM '$vmName' not found. Skipping."
-            continue
+        $plan = $networkPlan[$vmName]
+        $nic = $plan.Nic
+        $nsg = $plan.Nsg
+        $createdNsg = $false
+        if (-not $nsg) {
+            $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $plan.NsgResourceGroup `
+                -Location $Location -Name $plan.NsgName -ErrorAction Stop
+            $createdNsg = $true
         }
-
-        # Get or create NSG.
-        $nic = Get-AzNetworkInterface -ResourceGroupName $TargetResourceGroup |
-               Where-Object { $_.VirtualMachine.Id -eq $vm.Id }
-
-        $nsgName = "$vmName-nsg"
-        if ($nic.NetworkSecurityGroup) {
-            $nsgResourceName = $nic.NetworkSecurityGroup.Id.Split("/")[-1]
-            $nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $TargetResourceGroup -Name $nsgResourceName
-        } else {
-            # Create NSG if none exists.
-            $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $TargetResourceGroup `
-                   -Location $Location -Name $nsgName
-            $nic.NetworkSecurityGroup = $nsg
-            Set-AzNetworkInterface -NetworkInterface $nic | Out-Null
+        foreach ($existingRule in @($nsg.SecurityRules | Where-Object { $_.Name -in $managedRuleNames[$vmName] })) {
+            $nsg | Remove-AzNetworkSecurityRuleConfig -Name $existingRule.Name -ErrorAction Stop | Out-Null
         }
-
-        # Remove existing custom rules to start clean.
-        # We keep Azure default rules (priority 65000+) untouched.
-        $customRules = $nsg.SecurityRules | Where-Object { $_.Priority -lt 65000 }
-        foreach ($rule in $customRules) {
-            $nsg | Remove-AzNetworkSecurityRuleConfig -Name $rule.Name | Out-Null
-        }
-
-        # Apply the hardened rules defined above.
-        $rules = $nsgRules[$vmName]
-        foreach ($rule in $rules) {
-            $access = if ($rule.ContainsKey("Access")) { $rule.Access } else { "Allow" }
-            $sourceAddr = if ($rule.Source) { $rule.Source } else { "*" }
-
+        $destinationAddr = $vmIPs[$vmName] + "/32"
+        foreach ($rule in $nsgRules[$vmName]) {
+            $access = if ($rule.ContainsKey('Access')) { $rule.Access } else { 'Allow' }
             $nsg | Add-AzNetworkSecurityRuleConfig `
                 -Name $rule.Name `
                 -Priority $rule.Priority `
                 -Direction Inbound `
                 -Access $access `
                 -Protocol Tcp `
-                -SourceAddressPrefix $sourceAddr `
+                -SourceAddressPrefix $rule.Source `
                 -SourcePortRange "*" `
-                -DestinationAddressPrefix "*" `
-                -DestinationPortRange $rule.Port | Out-Null
-
+                -DestinationAddressPrefix $destinationAddr `
+                -DestinationPortRange $rule.Port -ErrorAction Stop | Out-Null
             Write-StepInfo "    Rule: $($rule.Name) -- $($rule.Desc)"
         }
-
-        # Save the updated NSG.
-        Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg | Out-Null
+        # Configure a new NSG fully before attaching it to the verified NIC.
+        $nsg = Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg -ErrorAction Stop
+        if ($createdNsg) {
+            $nic.NetworkSecurityGroup = $nsg
+            Set-AzNetworkInterface -NetworkInterface $nic -ErrorAction Stop | Out-Null
+        }
         Write-StepInfo "  ✅ NSG hardened for '$vmName'."
-
     } catch {
         Write-Host "  ❌ NSG hardening failed for '$vmName': $_" -ForegroundColor Red
+        throw "NSG hardening is incomplete; earlier role updates may have succeeded. Review the failure and rerun; no completion summary will be shown."
     }
 }
 

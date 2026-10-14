@@ -40,6 +40,7 @@
     The target cloud resource group. Prompted when not supplied (example: rg-ces-target-01).
 
 .PARAMETER Location
+    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
     Azure region. Prompted when not supplied (example: eastus).
 
 .PARAMETER MigrateProjectName
@@ -797,6 +798,54 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -815,7 +864,7 @@ Write-Host ""
 Write-Host "Enter the values for your lab environment. A value in [brackets] is a lab default and Enter accepts it; an (example: ...) is a hint only and must be typed." -ForegroundColor Cyan
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+$Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
 $Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload group (All = four VMs; Agentless = the Module 2 pair; AgentBased = the Module 3 pair)'
 
@@ -873,7 +922,7 @@ function Write-NextSteps {
 # - OnPrem-Web (IIS):          Standard_B2s  -- light web server, 2 vCPU/4GB
 # - OnPrem-SQL (SQL Server):   Standard_B2ms -- database needs more memory, 2 vCPU/8GB
 # - OnPrem-Linux-Web (Nginx):  Standard_B1ms -- lightweight reverse proxy, 1 vCPU/2GB
-# - OnPrem-Linux-App (Node.js): Standard_B1ms -- small API server, 1 vCPU/2GB
+# - OnPrem-Linux-App (Tomcat): Standard_B1ms -- small API server, 1 vCPU/2GB
 #
 # OS disk type: StandardSSD_LRS balances cost and performance.
 # Premium_LRS would be better for production SQL workloads.
@@ -911,7 +960,7 @@ $vmConfigurations = @(
         IPAddress      = "192.168.0.12"
     },
     @{
-        # Node.js Express API -- runs a REST API on port 3000
+        # Tomcat JSP order desk -- runs a REST API on port 3000
         # Moderate CPU for request handling, small memory footprint
         DisplayName    = "OnPrem-Linux-App"
         TargetVMSize   = "Standard_B1ms"
@@ -1020,9 +1069,11 @@ $discoveredMachines = @()
 try {
     Write-Log "Querying Azure Migrate for discovered servers..."
 
+    # This lab discovers Hyper-V sources; select that inventory explicitly rather than leaving it unspecified.
     $discoveredServers = Get-AzMigrateDiscoveredServer `
         -ProjectName $MigrateProjectName `
         -ResourceGroupName $SourceResourceGroup `
+        -SourceMachineType 'HyperV' `
         -ErrorAction Stop
 
     if (-not $discoveredServers -or @($discoveredServers).Count -eq 0) {
@@ -1448,7 +1499,7 @@ Write-Host "  [+] Replication configured for all VMs:" -ForegroundColor Green
 Write-Host "       - OnPrem-Web       -> Standard_B2s  (Windows + IIS)" -ForegroundColor Cyan
 Write-Host "       - OnPrem-SQL       -> Standard_B2ms (Windows + SQL Server)" -ForegroundColor Cyan
 Write-Host "       - OnPrem-Linux-Web -> Standard_B1ms (Ubuntu + Nginx)" -ForegroundColor Cyan
-Write-Host "       - OnPrem-Linux-App -> Standard_B1ms (Ubuntu + Node.js)" -ForegroundColor Cyan
+Write-Host "       - OnPrem-Linux-App -> Standard_B1ms (Ubuntu + Tomcat 10.1)" -ForegroundColor Cyan
 Write-Host "  [+] Replication initiated -- disk data syncing to Azure" -ForegroundColor Green
 Write-Host "  [+] Replication progress monitored" -ForegroundColor Green
 Write-Host ""
@@ -1472,7 +1523,7 @@ Write-NextSteps @(
     ""
     "POST-MIGRATION CHECKLIST:"
     "  [ ] Verify each VM is running in the target resource group"
-    "  [ ] Test application connectivity (IIS, SQL, Nginx, Node.js)"
+    "  [ ] Test application connectivity (IIS, SQL, Nginx, Tomcat)"
     "  [ ] Assign public IPs if external access is needed"
     "  [ ] Configure Azure Backup for migrated VMs"
     "  [ ] Enable Microsoft Defender for Cloud"

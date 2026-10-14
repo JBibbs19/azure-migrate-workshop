@@ -16,7 +16,7 @@
       - OnPrem-Web       (Windows Server + IIS)
       - OnPrem-SQL       (Windows Server + SQL Server Express)
       - OnPrem-Linux-Web (Ubuntu + Nginx)
-      - OnPrem-Linux-App (Ubuntu + Node.js API)
+      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
 
     Prerequisites:
       - Steps 1-3 completed (Azure Migrate project exists, VMs discovered, replication enabled)
@@ -33,6 +33,7 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
+    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
     Azure region for test resources. Prompted when not supplied (example: eastus).
 
 .PARAMETER TestVNetName
@@ -54,7 +55,7 @@ MODULE COVERAGE
       -Workload All         Both, in one pass. The default.
 
     The in-guest validation in those sections - browsing the IIS site, querying SQL, calling the
-    Node.js API on the test VM - is not performed. The script confirms the test VMs exist and
+    Tomcat order desk on the test VM - is not performed. The script confirms the test VMs exist and
     reach a healthy state; whether the application works is yours to check.
 #>
 
@@ -797,6 +798,54 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -816,8 +865,14 @@ Write-Host "Enter the values for your lab environment. A value in [brackets] is 
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+$Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
 $TestVNetName = Read-LabParameter -Name 'TestVNetName' -Value $TestVNetName -Kind VMName -Prompt 'Isolated test VNet name' -Example 'test-migrate-vnet'
+$preflightTestNetworks = @(Get-AzVirtualNetwork -ResourceGroupName $TargetResourceGroup -ErrorAction Stop | Where-Object { $_.Name -eq $TestVNetName })
+foreach ($network in $preflightTestNetworks) {
+    if ((ConvertTo-LabRegionKey $network.Location) -ne (ConvertTo-LabRegionKey $Location)) {
+        throw "Existing test VNet '$TestVNetName' is in '$($network.Location)', not migration target '$Location'. Choose a fresh test VNet; no changes were made."
+    }
+}
 $TestVNetAddressSpace = Read-LabParameter -Name 'TestVNetAddressSpace' -Value $TestVNetAddressSpace -Kind Cidr -Prompt 'Test VNet address space (must not overlap 10.0.0.0/16 or 10.1.0.0/16)' -Example '10.2.0.0/16'
 $TestSubnetPrefix = Read-LabParameter -Name 'TestSubnetPrefix' -Value $TestSubnetPrefix -Kind Cidr -Prompt 'Test subnet prefix (inside the test VNet)' -Example '10.2.0.0/24'
 $Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload group (All = four VMs; Agentless = the Module 2 pair; AgentBased = the Module 3 pair)'
@@ -967,6 +1022,7 @@ try {
     $existingVNet = Get-AzVirtualNetwork -Name $TestVNetName -ResourceGroupName $TargetResourceGroup -ErrorAction SilentlyContinue
 
     if ($existingVNet) {
+        if ((ConvertTo-LabRegionKey $existingVNet.Location) -ne (ConvertTo-LabRegionKey $Location)) { throw "Existing test VNet region conflicts with migration target $Location." }
         Write-StepInfo "  Test VNet '$TestVNetName' already exists. Reusing it."
         $testVNet = $existingVNet
     } else {
@@ -976,7 +1032,7 @@ try {
             -AddressPrefix $TestSubnetPrefix
 
         # Create the VNet in the target resource group.
-        # We place it in the same region as the target RG for low latency.
+        # Test and cutover networks must use the same actual migration target region.
         $testVNet = New-AzVirtualNetwork `
             -Name $TestVNetName `
             -ResourceGroupName $TargetResourceGroup `
@@ -1248,20 +1304,22 @@ foreach ($vmName in $vmNames) {
             }
 
             "OnPrem-Linux-App" {
-                # Node.js Express API should respond on port 3000 at /api/health.
-                Write-StepInfo "  Testing Node.js API health endpoint on port 3000..."
+                Write-StepInfo "  Testing Tomcat health, SQL readiness and existing data on port 3000..."
                 try {
-                    $response = Invoke-WebRequest -Uri "http://${testIp}:3000/api/health" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
-                    if ($response.StatusCode -eq 200) {
-                        Write-StepInfo "  ✅ Node.js API returned HTTP 200."
-                        $validationResults[$vmName] = "PASSED"
-                    } else {
-                        Write-WarningBanner "  API returned HTTP $($response.StatusCode)."
-                        $validationResults[$vmName] = "HTTP $($response.StatusCode)"
+                    $health = Invoke-RestMethod "http://${testIp}:3000/api/health" -TimeoutSec 15 -ErrorAction Stop
+                    if ($health.status -ne 'healthy' -or $health.server -ne 'OnPrem-Linux-App' -or $health.app -ne 'Contoso Order Desk') {
+                        throw 'Wrong application or Tomcat liveness contract failed.'
                     }
+                    $ready = Invoke-RestMethod "http://${testIp}:3000/api/ready" -TimeoutSec 20 -ErrorAction Stop
+                    $orders = Invoke-RestMethod "http://${testIp}:3000/api/orders" -TimeoutSec 20 -ErrorAction Stop
+                    if ($ready.status -ne 'ready' -or $orders.customerCount -lt 1 -or $orders.count -lt 1) {
+                        throw 'Tomcat cannot read existing SQL data; repoint aliases to the matching migrated SQL VM.'
+                    }
+                    Write-StepInfo "  Tomcat health, SQL readiness and existing data passed."
+                    $validationResults[$vmName] = "PASSED (Tomcat + SQL data)"
                 } catch {
-                    Write-WarningBanner "  API health check failed: $_"
-                    $validationResults[$vmName] = "API UNREACHABLE (may be NSG)"
+                    Write-WarningBanner "  Tomcat/SQL validation failed; verify services, private routing and repointed lab aliases."
+                    $validationResults[$vmName] = "APP/SQL NOT READY"
                 }
             }
         }
@@ -1298,7 +1356,7 @@ Write-Host ""
 Write-Host "  [ ] OnPrem-Web       -- Can you see the Contoso website in a browser?" -ForegroundColor White
 Write-Host "  [ ] OnPrem-SQL       -- Can you connect with SSMS and see the ContosoApp database?" -ForegroundColor White
 Write-Host "  [ ] OnPrem-Linux-Web -- Can you see the Nginx welcome page in a browser?" -ForegroundColor White
-Write-Host "  [ ] OnPrem-Linux-App -- Does /api/health return { status: 'ok' }?" -ForegroundColor White
+Write-Host "  [ ] OnPrem-Linux-App -- Does /api/health return status healthy and app Contoso Order Desk; /api/ready must also be ready?" -ForegroundColor White
 Write-Host "  [ ] All VMs          -- Are VM sizes and disk configurations correct?" -ForegroundColor White
 Write-Host "  [ ] All VMs          -- Are OS versions matching the source?" -ForegroundColor White
 Write-Host ""

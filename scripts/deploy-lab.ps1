@@ -20,7 +20,7 @@ Maximum monitored wait for each Azure host, network or disk creation operation.
 Azure's execution limit for ConfigureWorkshop; individual installer limits also apply.
 .PARAMETER ApplianceStoreSizeGB
 Size of the dedicated partition carved out of the host OS disk for the Azure Migrate
-appliance. The guest VHDs never touch it, so the appliance has capacity of its own.
+appliance files. This is host-side storage, not the appliance guest's disk/partition capacity.
 .PARAMETER ApplianceStoreDriveLetter
 Drive letter for that partition inside HyperVHost. Leave it unset and deployment uses the
 first unassigned letter, which is E: on the default host size: C: is the OS disk and D: is
@@ -37,8 +37,13 @@ preparing a host before a session. When not supplied, the script asks once and d
 The SHA256 Microsoft publishes for the AZURE MIGRATE APPLIANCE VHD archive - the Hyper-V zip
 listed under 'Verify security' in the appliance article. Used only with -IncludeApplianceVhd
 Yes, and intended for unattended runs: when supplied, the host checks the archive against it
-during staging and deletes it on a mismatch. When omitted, the archive is staged and this
+during staging and retains a mismatching ZIP for inspection without extracting it. When omitted, the archive is staged and this
 script offers to verify it once deployment finishes.
+.PARAMETER TomcatJdbcJar
+Optional local official mssql-jdbc-13.6.0.jre11.jar when the guest cannot use Maven HTTPS.
+Supply -TomcatJdbcSha256 with a separately reviewed expected checksum. No new password prompt.
+.PARAMETER TomcatJdbcSha256
+Expected SHA256 for the explicit local JDBC JAR. Required together with -TomcatJdbcJar.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
@@ -53,8 +58,8 @@ MODULE COVERAGE
       Module 1, section 2   Prepare the Hyper-V host - applied in full (PHASE 7 of the
                             host payload). Nothing is left to do there on a script-deployed lab.
       Module 1, section 3.3 Download and verify the archive - the download and extract are
-                            started during deployment. You still compare the recorded SHA256
-                            against Microsoft's published value.
+                            started only when you opt in. The end-of-run check freshly hashes
+                            the exact ZIP; compare with the current official Hyper-V ZIP row.
 
     Left for you: Module 0 section 5 (verify inside HyperVHost), section 6 (start the sample
     traffic, optional), and all of Module 1 from section 1 onward.
@@ -74,6 +79,8 @@ param(
     [ValidatePattern('^([D-Zd-z])?$')][string]$ApplianceStoreDriveLetter = '',
     [ValidateSet('Yes','No')][string]$IncludeApplianceVhd,
     [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$ApplianceVhdSha256 = '',
+    [string]$TomcatJdbcJar = '',
+    [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$TomcatJdbcSha256 = '',
     [string]$HealthPath
 )
 $ErrorActionPreference = 'Stop'
@@ -443,6 +450,43 @@ function Read-LabHostConfiguration {
     $null = [System.Management.Automation.Language.Parser]::ParseInput($traffic, [ref]$trafficTokens, [ref]$trafficErrors)
     if ($trafficErrors.Count) { throw 'The lab traffic script has syntax errors. Obtain the reviewed workshop revision.' }
     $content = $content.Replace('__LAB_TRAFFIC_PAYLOAD__', (Compress-LabScript $traffic))
+    $appRoot = Join-Path (Split-Path $scriptsRoot -Parent) 'apps/contoso-orderdesk'
+    $runtimePath = Join-Path $appRoot 'dist/runtime.zip'
+    $runtimeHashPath = Join-Path $appRoot 'dist/runtime.sha256'
+    foreach ($marker in @('__TOMCAT_RUNTIME_PAYLOAD__','__TOMCAT_RUNTIME_SHA256__')) {
+        if (([regex]::Matches($content, [regex]::Escape($marker))).Count -ne 1) { throw 'Tomcat host runtime markers incompatible.' }
+    }
+    $expected = (Get-Content -LiteralPath $runtimeHashPath -Raw -ErrorAction Stop).Trim()
+    if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash -ine $expected) {
+        throw 'Tomcat runtime ZIP missing or checksum mismatch. Rebuild the complete reviewed checkout before deployment.'
+    }
+    $runtimeBytes = [IO.File]::ReadAllBytes($runtimePath)
+    if ([bool]$TomcatJdbcJar -ne [bool]$TomcatJdbcSha256) { throw 'Supply both -TomcatJdbcJar and -TomcatJdbcSha256, or neither.' }
+    if ($TomcatJdbcJar) {
+        if ([IO.Path]::GetFileName($TomcatJdbcJar) -cne 'mssql-jdbc-13.6.0.jre11.jar') { throw 'Local driver must be the pinned official mssql-jdbc-13.6.0.jre11.jar.' }
+        if ((Get-FileHash -LiteralPath $TomcatJdbcJar -Algorithm SHA256).Hash -ine $TomcatJdbcSha256) { throw 'Local JDBC prerequisite checksum mismatch.' }
+        Add-Type -AssemblyName System.IO.Compression
+        $memory = [IO.MemoryStream]::new()
+        $memory.Write($runtimeBytes, 0, $runtimeBytes.Length)
+        $memory.Position = 0
+        $archive = [IO.Compression.ZipArchive]::new($memory, [IO.Compression.ZipArchiveMode]::Update, $true)
+        try {
+            foreach ($pair in @(
+                @{ Name='jdbc/mssql-jdbc-13.6.0.jre11.jar'; Bytes=[IO.File]::ReadAllBytes($TomcatJdbcJar) },
+                @{ Name='jdbc/SHA256SUMS'; Bytes=[Text.Encoding]::UTF8.GetBytes($TomcatJdbcSha256.ToLowerInvariant() + '  mssql-jdbc-13.6.0.jre11.jar' + "`n") }
+            )) {
+                $entry = $archive.CreateEntry($pair.Name)
+                $stream = $entry.Open()
+                try { $stream.Write($pair.Bytes, 0, $pair.Bytes.Length) } finally { $stream.Dispose() }
+            }
+        } finally { $archive.Dispose() }
+        $runtimeBytes = $memory.ToArray()
+        $memory.Dispose()
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actualHash = ([BitConverter]::ToString($sha.ComputeHash($runtimeBytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+    $content = $content.Replace('__TOMCAT_RUNTIME_PAYLOAD__', [Convert]::ToBase64String($runtimeBytes))
+    $content = $content.Replace('__TOMCAT_RUNTIME_SHA256__', $actualHash)
     $tokens = $null; $errors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'The host configuration script has syntax errors. Obtain the reviewed workshop revision.' }
@@ -738,30 +782,45 @@ Write-Output 'APPLIANCE_STORE_READY'
     $setupPassed = $true
     Write-Host "Workload setup verified. Host public IP: $($pip.IpAddress). Host login: $AdminUsername."
     Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
+    Write-Host 'Contoso Order Desk runs on Tomcat 10.1 / OpenJDK 17 at .13:3000; initial SQL and Nginx proxy readiness passed.'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
     Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
     if ($IncludeApplianceVhd -eq 'Yes') {
-        # ------------------------------------------------------------------------------
-        # Verify the staged appliance
-        #
-        # Asking for the published hash at the start of the run was the wrong shape: there was
-        # nothing to compare it against yet. The host computed the archive's SHA256 while
-        # staging it, so it is read back here and this script does the comparison. No RDP is
-        # needed - the value is already recorded on the host.
-        # ------------------------------------------------------------------------------
+        # Rehash the actual ZIP: the completion record may predate a manual replacement.
         $stagedHash = $null
+        $stagedArchive = $null
         try {
-            $readHash = "if (Test-Path '$appliancePath\download-complete.json') { (Get-Content '$appliancePath\download-complete.json' -Raw | ConvertFrom-Json).ArchiveSha256 } else { 'NONE' }"
+            $readHash = @'
+$ErrorActionPreference = 'Stop'
+$root = '__ROOT__'
+$recordPath = Join-Path $root 'download-complete.json'
+$record = $null
+if (Test-Path -LiteralPath $recordPath) { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json }
+$archive = if ($record -and $record.Archive) { [string]$record.Archive } else { Join-Path $root 'MigrateAppl.zip' }
+$prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+$full = [IO.Path]::GetFullPath($archive)
+if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Recorded archive is outside ApplianceStore. Select and verify the correct ZIP manually.' }
+$item = Get-Item -LiteralPath $full -ErrorAction Stop
+if ($item.PSIsContainer -or $item.Extension -ne '.zip' -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Recorded archive is not a regular ZIP file.' }
+$hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+$recorded = if ($record) { [string]$record.ArchiveSha256 } else { '' }
+$result = [ordered]@{ Archive=$item.FullName; Bytes=$item.Length; ActualSha256=$hash; RecordedSha256=$recorded }
+Write-Output ('APPLIANCE_ARCHIVE_JSON|' + ($result | ConvertTo-Json -Compress))
+'@
+            $readHash = $readHash.Replace('__ROOT__', $appliancePath.Replace("'", "''"))
             $hashResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $readHash -ErrorAction Stop
             $hashText = (@($hashResult.Value | Where-Object { $_.Code -match 'StdOut' } | ForEach-Object { $_.Message }) -join "`n").Trim()
-            if ($hashText -match '(?m)^([0-9A-Fa-f]{64})\s*$') { $stagedHash = $Matches[1].ToUpperInvariant() }
-        } catch { Write-Warning "Could not read the staged appliance hash from the host: $($_.Exception.Message)" }
+            if ($hashText -match '(?m)^APPLIANCE_ARCHIVE_JSON\|([^\r\n]+)') {
+                $stagedArchive = $Matches[1] | ConvertFrom-Json
+                if ($stagedArchive.ActualSha256 -match '^[0-9A-Fa-f]{64}$') { $stagedHash = $stagedArchive.ActualSha256.ToUpperInvariant() }
+            }
+        } catch { Write-Warning 'Could not rehash the exact staged ZIP. Inspect its filename and completion record on the host; verify manually before import.' }
 
         Write-Host ''
         if (-not $stagedHash) {
-            Write-Warning "The appliance archive was not staged, or its record could not be read. Download it from your Azure Migrate project instead (docs/Module-1-Discovery.md, section 3.3)."
+            Write-Warning 'The actual appliance ZIP could not be rehashed. A missing/renamed ZIP or stale completion record is not proof of corruption. Select the exact file and verify it before import (Module 1, section 3.3).'
         } else {
             # Reference value, recorded from the 'Verify security' table in the appliance article
             # on 2026-09-27, in the same row as the download link the host used. It is ADVISORY,
@@ -772,24 +831,32 @@ Write-Output 'APPLIANCE_STORE_READY'
             $referenceDate = '2026-09-27'
 
             Write-Host 'Azure Migrate appliance staged on the host.' -ForegroundColor Cyan
-            Write-Host "  Location : $appliancePath"
-            Write-Host "  SHA256   : $stagedHash"
+            Write-Host "  ZIP file : $($stagedArchive.Archive)"
+            Write-Host "  Bytes    : $($stagedArchive.Bytes)"
+            Write-Host "  SHA256   : $stagedHash (freshly read from this ZIP)"
+            if (-not $stagedArchive.RecordedSha256) {
+                Write-Host '  Historical record: absent; not used as verification.'
+            } elseif ($stagedHash -eq $stagedArchive.RecordedSha256) {
+                Write-Host '  Historical record: MATCH to the freshly computed ZIP hash (not a current publisher check).'
+            } else {
+                Write-Warning "Historical record: MISMATCH ($($stagedArchive.RecordedSha256)). The ZIP or record may have been replaced; extraction provenance needs review."
+            }
             if ($stagedHash -eq $referenceHash) {
                 Write-Host "  Matches the appliance published as of $referenceDate." -ForegroundColor Green
             } else {
                 Write-Host ''
                 Write-Warning "This does not match the appliance recorded on $referenceDate ($($referenceHash.Substring(0,16))...)."
-                Write-Warning 'That means one of two things, and they need different responses:'
-                Write-Host '    1. Microsoft has published a newer appliance. Normal - confirm against the' -ForegroundColor White
-                Write-Host '       article below and carry on.' -ForegroundColor White
-                Write-Host '    2. The download is not what it should be. This link has served a stale build' -ForegroundColor White
-                Write-Host '       before. Do not import it until the published hash confirms it.' -ForegroundColor White
+                Write-Warning 'Possible causes include a different published version, artifact type, download source or changed/incomplete bytes. This comparison alone does not identify the cause.'
+                Write-Host '    Do not import until this exact ZIP matches the current official Hyper-V ZIP hash.' -ForegroundColor White
             }
             Write-Host '  Published value, "Verify security" table:' -ForegroundColor Gray
             Write-Host '  https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security' -ForegroundColor Gray
             if ($ApplianceVhdSha256) {
-                # Already checked on the host during staging; a mismatch would have deleted it.
-                Write-Host '  Checked against the hash supplied at the command line: MATCH.' -ForegroundColor Green
+                if ($stagedHash -eq $ApplianceVhdSha256.ToUpperInvariant()) {
+                    Write-Host '  Fresh ZIP comparison against the hash supplied at the command line: MATCH.' -ForegroundColor Green
+                } else {
+                    Write-Warning "Fresh ZIP comparison against the supplied hash: MISMATCH (expected $ApplianceVhdSha256, actual $stagedHash). Do not import; retain the ZIP for inspection."
+                }
             } elseif ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
                 Write-Host ''
                 $published = (Read-Host '  Paste the published SHA256 to verify now, or press Enter to verify later').Trim()
@@ -800,13 +867,13 @@ Write-Output 'APPLIANCE_STORE_READY'
                 } elseif ($published.ToUpperInvariant() -eq $stagedHash) {
                     Write-Host '  MATCH. The staged appliance is the published build.' -ForegroundColor Green
                     if ($published.ToUpperInvariant() -ne $referenceHash) {
-                        Write-Host "  Note: this differs from the value recorded on $referenceDate, so Microsoft has" -ForegroundColor Gray
-                        Write-Host '  republished the appliance. Worth updating the reference in deploy-lab.ps1.' -ForegroundColor Gray
+                        Write-Host "  Note: the supplied value differs from the advisory reference recorded on $referenceDate." -ForegroundColor Gray
+                        Write-Host '  Confirm its current official artifact row before updating the reference.' -ForegroundColor Gray
                     }
                 } else {
                     Write-Host ''
-                    Write-Warning 'MISMATCH. The staged archive is NOT the appliance Microsoft currently publishes.'
-                    Write-Warning "Do not import it. Delete $appliancePath\Extracted and the archive beside it, then download the appliance from your Azure Migrate project (Module 1, section 3.3)."
+                    Write-Warning "MISMATCH (expected $published, actual $stagedHash). Check the current Hyper-V ZIP row, exact artifact and source; the cause is not established."
+                    Write-Warning 'Do not import or bypass verification. Retain the ZIP for inspection; do not delete extracted folders that might contain VM disks (Module 1, section 3.3).'
                 }
             } else {
                 Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'

@@ -8,7 +8,7 @@
     that module's two workloads only:
 
       - OnPrem-SQL       (Windows Server + SQL Server Express)
-      - OnPrem-Linux-App (Ubuntu + Node.js API)
+      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
 
     It runs three existing scripts in order, each narrowed with -Workload AgentBased:
 
@@ -849,7 +849,7 @@ Write-Host "Enter the values for your lab environment. A value in [brackets] is 
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+# Pass Location through unchanged; stages resolve/validate the actual target VNet region.
 
 # Confirm this step's resources exist in the signed-in subscription before changing anything.
 Assert-LabResources -SourceResourceGroup $SourceResourceGroup -TargetResourceGroup $TargetResourceGroup -MigrateProjectName $MigrateProjectName
@@ -865,7 +865,7 @@ Write-Host "================================================================" -F
 Write-Host ""
 Write-Host "  This runs replicate -> test -> cutover for:" -ForegroundColor White
 Write-Host "    - OnPrem-SQL       (Windows Server + SQL Server Express)" -ForegroundColor White
-Write-Host "    - OnPrem-Linux-App (Ubuntu + Node.js API)" -ForegroundColor White
+Write-Host "    - OnPrem-Linux-App (Ubuntu + Tomcat order desk)" -ForegroundColor White
 Write-Host ""
 Write-Host "  Cutover SHUTS DOWN the matching source VMs on the Hyper-V host." -ForegroundColor Yellow
 Write-Host ""

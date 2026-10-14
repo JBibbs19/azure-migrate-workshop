@@ -1,0 +1,148 @@
+<%!
+private static final class DeskInputException extends Exception {
+    DeskInputException(String message) { super(message); }
+}
+private static String json(String value) {
+    if (value == null) return "null";
+    StringBuilder result = new StringBuilder("\"");
+    for (int i = 0; i < value.length(); i++) {
+        char c = value.charAt(i);
+        switch (c) {
+            case '"': result.append("\\\""); break;
+            case '\\': result.append("\\\\"); break;
+            case '\b': result.append("\\b"); break;
+            case '\f': result.append("\\f"); break;
+            case '\n': result.append("\\n"); break;
+            case '\r': result.append("\\r"); break;
+            case '\t': result.append("\\t"); break;
+            default:
+                if (c < 32 || Character.isSurrogate(c)) {
+                    result.append(String.format(java.util.Locale.ROOT, "\\u%04x", (int)c));
+                } else result.append(c);
+        }
+    }
+    return result.append('"').toString();
+}
+private static String html(String value) {
+    if (value == null) return "";
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&#39;");
+}
+private static javax.sql.DataSource database() throws javax.naming.NamingException {
+    javax.naming.InitialContext context = new javax.naming.InitialContext();
+    try { return (javax.sql.DataSource)context.lookup("java:comp/env/jdbc/ContosoApp"); }
+    finally { context.close(); }
+}
+private static java.sql.PreparedStatement statement(java.sql.Connection c, String sql) throws java.sql.SQLException {
+    java.sql.PreparedStatement s = c.prepareStatement(sql);
+    s.setQueryTimeout(5);
+    return s;
+}
+private static java.util.List<java.util.Map<String,String>> customers(java.sql.Connection c) throws java.sql.SQLException {
+    java.util.List<java.util.Map<String,String>> values = new java.util.ArrayList<>();
+    try (java.sql.PreparedStatement s = statement(c,
+            "SELECT TOP (20) CustomerID, FirstName, LastName FROM dbo.Customers ORDER BY CustomerID");
+         java.sql.ResultSet r = s.executeQuery()) {
+        while (r.next()) {
+            java.util.Map<String,String> row = new java.util.LinkedHashMap<>();
+            row.put("customerId", Integer.toString(r.getInt("CustomerID")));
+            row.put("name", r.getString("FirstName") + " " + r.getString("LastName"));
+            values.add(row);
+        }
+    }
+    return values;
+}
+private static java.util.List<java.util.Map<String,String>> orders(java.sql.Connection c) throws java.sql.SQLException {
+    java.util.List<java.util.Map<String,String>> values = new java.util.ArrayList<>();
+    try (java.sql.PreparedStatement s = statement(c,
+            "SELECT TOP (20) o.OrderID, o.CustomerID, c.FirstName, c.LastName, o.ProductName, " +
+            "o.Quantity, o.UnitPrice, o.OrderDate FROM dbo.Orders o " +
+            "JOIN dbo.Customers c ON c.CustomerID = o.CustomerID ORDER BY o.OrderID DESC");
+         java.sql.ResultSet r = s.executeQuery()) {
+        while (r.next()) {
+            java.util.Map<String,String> row = new java.util.LinkedHashMap<>();
+            row.put("orderId", Integer.toString(r.getInt("OrderID")));
+            row.put("customerId", Integer.toString(r.getInt("CustomerID")));
+            row.put("customer", r.getString("FirstName") + " " + r.getString("LastName"));
+            row.put("productName", r.getString("ProductName"));
+            row.put("quantity", Integer.toString(r.getInt("Quantity")));
+            java.math.BigDecimal storedPrice = r.getBigDecimal("UnitPrice");
+            row.put("unitPrice", storedPrice == null ? null : storedPrice.toPlainString());
+            java.sql.Timestamp date = r.getTimestamp("OrderDate");
+            row.put("orderDate", date == null ? null : date.toLocalDateTime().toString());
+            values.add(row);
+        }
+    }
+    return values;
+}
+private static long count(java.sql.Connection c, boolean customerCount) throws java.sql.SQLException {
+    String sql = customerCount ? "SELECT COUNT_BIG(*) FROM dbo.Customers" : "SELECT COUNT_BIG(*) FROM dbo.Orders";
+    try (java.sql.PreparedStatement s = statement(c, sql); java.sql.ResultSet r = s.executeQuery()) {
+        r.next(); return r.getLong(1);
+    }
+}
+private static String rowsJson(java.util.List<java.util.Map<String,String>> rows) {
+    StringBuilder result = new StringBuilder("[");
+    boolean firstRow = true;
+    for (java.util.Map<String,String> row : rows) {
+        if (!firstRow) result.append(','); firstRow = false;
+        result.append('{'); boolean firstField = true;
+        for (java.util.Map.Entry<String,String> entry : row.entrySet()) {
+            if (!firstField) result.append(','); firstField = false;
+            result.append(json(entry.getKey())).append(':');
+            String key = entry.getKey();
+            boolean numeric = key.equals("orderId") || key.equals("customerId") || key.equals("quantity") || key.equals("unitPrice");
+            result.append(numeric ? entry.getValue() : json(entry.getValue()));
+        }
+        result.append('}');
+    }
+    return result.append(']').toString();
+}
+private static String field(jakarta.servlet.http.HttpServletRequest request, String key) throws DeskInputException {
+    String[] values = request.getParameterValues(key);
+    if (values == null || values.length != 1) throw new DeskInputException("Supply each required field exactly once.");
+    return values[0].trim();
+}
+private static int positive(String value, int max, String message) throws DeskInputException {
+    if (!value.matches("[0-9]{1,10}")) throw new DeskInputException(message);
+    try { int n = Integer.parseInt(value); if (n >= 1 && n <= max) return n; }
+    catch (NumberFormatException ignored) { }
+    throw new DeskInputException(message);
+}
+private static int createOrder(jakarta.servlet.http.HttpServletRequest request) throws Exception {
+    int customerId = positive(field(request, "customerId"), Integer.MAX_VALUE, "Select an existing customer.");
+    String product = field(request, "productName");
+    if (product.isEmpty() || product.length() > 100 || product.chars().anyMatch(c -> Character.isISOControl(c)))
+        throw new DeskInputException("Product name must be 1 to 100 printable characters.");
+    int quantity = positive(field(request, "quantity"), 10, "Quantity must be 1 to 10.");
+    String priceText = field(request, "unitPrice");
+    if (!priceText.matches("[0-9]{1,4}(\\.[0-9]{1,2})?")) throw new DeskInputException("Price must be 0.01 to 1000.00, at most two decimal places.");
+    java.math.BigDecimal price = new java.math.BigDecimal(priceText).setScale(2);
+    if (price.signum() <= 0 || price.compareTo(new java.math.BigDecimal("1000.00")) > 0)
+        throw new DeskInputException("Price must be 0.01 to 1000.00.");
+    try (java.sql.Connection c = database().getConnection()) {
+        try (java.sql.PreparedStatement s = statement(c, "SELECT CustomerID FROM dbo.Customers WHERE CustomerID = ?")) {
+            s.setInt(1, customerId);
+            try (java.sql.ResultSet r = s.executeQuery()) {
+                if (!r.next()) throw new DeskInputException("Select an existing customer.");
+            }
+        }
+        try (java.sql.PreparedStatement s = statement(c,
+                "INSERT INTO dbo.Orders (CustomerID, ProductName, Quantity, UnitPrice) " +
+                "OUTPUT INSERTED.OrderID VALUES (?, ?, ?, ?)")) {
+            s.setInt(1, customerId); s.setNString(2, product); s.setInt(3, quantity); s.setBigDecimal(4, price);
+            try (java.sql.ResultSet r = s.executeQuery()) { r.next(); return r.getInt(1); }
+        }
+    }
+}
+private static boolean sameOrigin(jakarta.servlet.http.HttpServletRequest request) {
+    if ("cross-site".equalsIgnoreCase(request.getHeader("Sec-Fetch-Site"))) return false;
+    String origin = request.getHeader("Origin");
+    if (origin == null) return true; // Non-browser lab clients still work without authentication.
+    try {
+        java.net.URI uri = new java.net.URI(origin);
+        return ("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) &&
+            uri.getRawAuthority() != null && uri.getRawAuthority().equalsIgnoreCase(request.getHeader("Host"));
+    } catch (java.net.URISyntaxException ignored) { return false; }
+}
+%>

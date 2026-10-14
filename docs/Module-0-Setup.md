@@ -2,6 +2,25 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
+**This revision builds a new Ubuntu 24.04 lab.** Use a fresh dedicated source resource
+ group/Hyper-V host and the full `azure-migrate-workshop-ubuntu2404.zip` checkout, not an
+ overlay on the earlier Tomcat package. Never run provisioning on an existing 22.04 lab
+ or reuse its nested names on one host. An incomplete same-revision build may resume;
+ completed or unmarked/older builds are refused. The existing deployment is unaffected.
+
+Both Linux guests use Canonical Noble's moving `current` QCOW2 image and its exact-name
+SHA256SUMS (verified before conversion). Ubuntu2404 cache names isolate it from the old
+base. Tomcat `tomcat10`/`tomcat10-common`/`libtomcat10-java` are Noble Universe packages;
+Tomcat 10.1.x is checked on target and runs with explicit OpenJDK 17, not the distribution's
+other default Java version. Install repository security updates and record actual patches.
+Standard Main maintenance through May 2029 is not blanket security coverage for Universe;
+review the [Ubuntu lifecycle and coverage](https://ubuntu.com/about/release-cycle).
+
+KVP installation resolves the running kernel/flavour and requires its exact tools/binary;
+there is no virtual-flavour fallback or implicit kernel upgrade. After any later kernel
+change, verify matching tools and daemon activity after reboot, then the host CIM gate.
+
+
 In this module you build the on-premises environment that the rest of the workshop migrates: one Azure VM running Hyper-V, with four nested guest VMs standing in for a small business's servers. A single script provisions all of it, and you finish by verifying that every workload actually responds.
 
 Run the Azure commands from your own workstation or PowerShell Cloud Shell. Run the Hyper-V commands in an elevated Windows PowerShell session **inside HyperVHost**, the host VM you are about to create.
@@ -22,8 +41,8 @@ Instead, this module deploys a **self-contained simulation of an on-premises dat
 |---|---|---|---|---|---|
 | OnPrem-Web | Windows Server 2022 | IIS web server | 192.168.0.10 | 4 GB | 2 |
 | OnPrem-SQL | Windows Server 2022 | SQL Server 2022 Express | 192.168.0.11 | 4 GB | 2 |
-| OnPrem-Linux-Web | Ubuntu 22.04 | Nginx web server | 192.168.0.12 | 2 GB | 2 |
-| OnPrem-Linux-App | Ubuntu 22.04 | Tomcat 9 JSP order desk | 192.168.0.13 | 2 GB | 2 |
+| OnPrem-Linux-Web | Ubuntu 24.04 | Nginx web server | 192.168.0.12 | 2 GB | 2 |
+| OnPrem-Linux-App | Ubuntu 24.04 | Tomcat 10.1 JSP order desk | 192.168.0.13 | 2 GB | 2 |
 
 All four guests run on an internal Hyper-V switch (`intSwitch`) with NAT on the `192.168.0.0/24` subnet. The host is reachable from the guests at `192.168.0.1`. Addresses are DHCP reservations, not static guest configuration, so the guests keep working when they are later copied into an Azure VNet.
 
@@ -65,19 +84,34 @@ Get-AzRoleAssignment -SignInName (Get-AzContext).Account.Id | Select-Object Role
 
 ### 3.2 — Quota Verification
 
-The host requires 8 vCPUs from the `Standard_ESv7` family. Quota exhaustion is the most common cause of deployment failure. **Check before you deploy:**
+The default host needs 8 vCPUs; deployment resolves its actual SKU family and both regional
+and family quotas. These limits apply **per subscription, per region**, and VM count has a
+separate quota. **Check before deploying the source host:**
 
 ```powershell
-# Esv7 family quota in your target region
-Get-AzVMUsage -Location "eastus" | Where-Object { $_.Name.Value -like "*StandardESv7*" } |
-    Select-Object @{N='Family';E={$_.Name.LocalizedValue}}, CurrentValue, Limit
+# Source host region; use your selected region, not a presumed available default.
+Get-AzVMUsage -Location "eastus" |
+    Select-Object @{N='Quota';E={$_.Name.LocalizedValue}}, CurrentValue, Limit, Unit
 ```
 
-If `CurrentValue` is close to `Limit`, deallocate other VMs in that family, request a quota increase in the Azure portal, or choose a different region.
+Use the reported `CurrentValue` and `Limit`; usage includes **allocated and deallocated** VMs
+and other resources/VM scale sets in the region. Deallocating a VM is not a quota-release
+strategy. If insufficient, request an increase in **Subscriptions → Usage + quotas**, remove
+unneeded allocations only after reviewing their data/cleanup impact, or choose another region.
+Missing/denied rows are unknown, not unused quota. [VM quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas)
 
-> **Note:** Capacity and quota are separate constraints. Available quota does not guarantee the region can allocate the size, and either can stop a deployment.
+The nested four workload VMs and `MigrateAppl` do **not** count as separate Azure VMs: their
+Azure Hyper-V host is the source allocation. Choose a **different migration target region**
+for Azure workload/test VMs to spread regional quotas, and check that region independently
+with step 1's read-only preflight before creating the landing zone. The step 3 planning sizes
+normally need 6 additional vCPUs/four Azure VMs for a full target or test set; 12/eight is only
+an overlapping full target and full test set. Tests normally clean up before cutover. Do not
+add already-existing targets or the source host again to live usage; replication disks do not
+reserve VM cores. Recheck actual chosen SKUs/counts before migration.
 
-Reserve quota for four simultaneous test VMs and, later, four migrated VMs — separately from the host, which is already counted.
+> **Note:** Capacity and quota are separate constraints. Regional quota is independent, but
+> subscription policy, region access and SKU/zone restrictions still apply. SKU metadata and
+> available quota do not guarantee an allocatable VM. No region example guarantees availability.
 
 ### 3.3 — Region Selection
 
@@ -87,7 +121,7 @@ Reserve quota for four simultaneous test VMs and, later, four migrated VMs — s
 | **Esv7 availability** | Not all regions offer Esv7. Verify: `Get-AzComputeResourceSku -Location "eastus" \| Where-Object { $_.Name -eq "Standard_E8s_v7" }` |
 | **Nested virtualization** | Confirm **Nested Virtualization: Supported** in the [Esv7 specifications](https://learn.microsoft.com/azure/virtual-machines/sizes/memory-optimized/esv7-series) before committing to a size. Hardware and availability metadata alone do not establish support. |
 | **Cost** | Pricing varies by region. US regions are typically cost-effective. |
-| **Fallback regions** | `eastus`, `westus2`, `westeurope`, `northeurope` are reliable choices. |
+| **Candidate regions** | `eastus`, `westus2`, `westeurope`, `northeurope` are examples only; verify subscription access, SKU restrictions, quota and capacity. |
 
 To use a different host size, pass `-VMSize` to `deploy-lab.ps1`. Deployment checks your choice against the subscription's regional SKU metadata and against both the family and regional vCPU quotas, then stops with an error naming the size and the unmet requirement. It never substitutes a different size silently.
 
@@ -111,7 +145,7 @@ You also need your current internet-facing IPv4 address, including any VPN or co
 
 ### 3.6 — Downloads and Package Sources
 
-Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, Ubuntu Tomcat 9/OpenJDK 17 packages and the pinned Microsoft JDBC 13.6.0.jre11 JAR, and the Hyper-V guest daemon packages for the Linux guests from the Ubuntu archive.
+Setup retrieves a Windows Server marketplace disk, an Ubuntu cloud image and its SHA256 list, Windows ADK Deployment Tools, AzCopy, Chocolatey and QEMU, SQL Server 2022 Express, the SqlServer PowerShell module, Ubuntu Tomcat 10.1/OpenJDK 17 packages and the pinned Microsoft JDBC 13.6.0.jre11 JAR, and the Hyper-V guest daemon packages for the Linux guests from the Ubuntu archive.
 
 ADK and SQL installers receive Authenticode checks, and the Ubuntu image is verified against Canonical's published hash. These are online package sources, not a pinned offline distribution — a proxy that allows Microsoft endpoints but blocks Canonical, Chocolatey, Ubuntu or Maven HTTPS will break setup.
 
@@ -127,9 +161,9 @@ You build the Azure Migrate appliance in Module 1, not here. Deployment leaves r
 |---|---|
 | Appliance memory | 16 GB, unallocated on the host after the four guests take 12 GB |
 | Appliance vCPU | 8 virtual processors, oversubscribed against the host's 8 |
-| Appliance VM disk | Roughly **80 GB**, per Microsoft's documented requirement. The published VHD arrives at about 40 GB, so Module 1 grows it before first boot |
-| Appliance storage on the host | A dedicated 100 GB partition on the first free drive letter — `E:` on the default host size — created during deployment and untouched by the guest VHDs. It holds the download, the extracted VHD and the running VM |
-| Staging folder | `E:\Appliance`, created and permissioned during deployment |
+| Appliance VM disk | Roughly **80 GB**, per Microsoft's documented requirement. Module 1 imports the verified published configuration and checks capacity read-only; if it falls short, stop for instructor review, not learner disk/partition expansion |
+| Appliance storage on the host | A dedicated 100 GB partition on the first free drive letter — `E:` on the default host size — created during deployment and untouched by the guest VHDs. It holds the download, exported source and copied VM. Check actual physical copy size/headroom in Module 1; 100 GB is not a guarantee that every future package fits |
+| Staging folder | `<actual store letter>:\Appliance`, created and permissioned during deployment (`E:` is an example, not fixed) |
 | Network | Outbound HTTPS from the host for the appliance download, and from the appliance itself for Azure registration |
 
 > **Note:** Deployment takes the **first unassigned drive letter** rather than a fixed one, and reports which it used. On the default host size that is `E:` — `C:` is the OS disk, and because the size has no local temporary disk Windows gives `D:` to the virtual DVD drive. A host size that provides a temporary disk will also be using `E:`, so the store lands on `F:`. Nothing existing is moved or reassigned. Pass `-ApplianceStoreDriveLetter` only to override the choice.
@@ -249,7 +283,7 @@ Get-AzPublicIpAddress -ResourceGroupName $sourceRg | Select-Object Name, IpAddre
 ### Initial Tomcat prerequisite
 
 The complete checkout includes the WAR, source and minimal runtime ZIP. Deployment installs
-Tomcat 9/OpenJDK 17 on Linux-App and prepares SQL mixed mode plus the restricted shared
+Tomcat 10.1/OpenJDK 17 on Linux-App and prepares SQL mixed mode plus the restricted shared
 `labapp` login using the same protected deployment password. No extra password prompt,
 app install command or traffic setup is required. The guest retrieves pinned JDBC
 13.6.0.jre11 over HTTPS with bounded retries and structural checks; availability was not
@@ -401,7 +435,7 @@ Invoke-Sqlcmd -ServerInstance 192.168.0.11 -TrustServerCertificate -Database Con
 
 **Resolution:**
 1. Check current usage: `Get-AzVMUsage -Location "eastus" | Where-Object { $_.Name.Value -like "*StandardESv7*" }`
-2. If at the limit, either deallocate unused VMs in the same family, request an increase via **Azure Portal → Subscriptions → Usage + quotas → Request increase**, or switch to a fallback region (see 3.3).
+2. If at the regional or family limit, request an increase via **Azure Portal → Subscriptions → Usage + quotas → Request increase**, review safe deletion of unneeded allocations, or choose another eligible region (see 3.3). Deallocation alone does not release vCPU quota.
 
 ### Host Size Rejected Before Deployment
 

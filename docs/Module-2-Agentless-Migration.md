@@ -173,9 +173,9 @@ Define "done" before you start:
 | VM Name             | OS                    | Role        | IP Address    |
 |---------------------|-----------------------|-------------|---------------|
 | OnPrem-Web          | Windows Server 2022   | IIS         | 192.168.0.10  |
-| OnPrem-Linux-Web    | Ubuntu 22.04          | Nginx       | 192.168.0.12  |
+| OnPrem-Linux-Web    | Ubuntu 24.04          | Nginx       | 192.168.0.12  |
 
-- ✅ Azure subscription with sufficient quota for at least 2× Standard_B2s VMs
+- ✅ Azure subscription with regional and VM-family quota for the actual target SKUs (this pair's step 3 defaults: Standard_B2s + Standard_B1ms; see the full-workshop preflight in section 4.1)
 - ✅ A target Resource Group and Virtual Network in Azure — **you build these in section 4.1**
 
 ---
@@ -194,12 +194,40 @@ Build it before you start the replication wizard. In section 5.3 the wizard will
 a resource group and a storage account inline, but the **virtual network and subnet are chosen
 from a dropdown** — if they do not exist, you cannot proceed without leaving the wizard.
 
+**Choose the migration target region and check quota first.**
+
+Choose a region **different from the actual source Hyper-V host** Azure VM region to spread
+regional vCPU quota in student subscriptions. Read the source VM's actual **Location** in the
+portal (or `Get-AzVM`), not its resource group's metadata location. Select the target yourself;
+do not inherit the source or automatically choose a replacement. Region names/display names
+are validated against the current subscription's `Get-AzLocation` list by step 1.
+
+Before provider registration or landing-zone creation, run the step 1 read-only quota
+heads-up for both regions, or check **Subscriptions → Usage + quotas** filtered by region.
+Both **Total Regional vCPUs** and each chosen **VM-family vCPU quota**, plus VM-count quota,
+are per subscription/per region. Reported usage includes other labs/VM scale sets and allocated
+and deallocated VMs. The nested guests/appliance are not separate Azure allocations; the host
+is already counted in source usage. Default step 3 sizing totals 6 additional vCPUs for a full
+four-VM target or test set; a full target/full test overlap needs 12 only if both new sets
+coexist. Do not double-count existing targets. Unknown/denied reads are not zero headroom.
+Recheck actual planned sizes/counts; quota and SKU eligibility are not capacity guarantees.
+
+**Choose this target before portal Create resources / Finalize discovery locks the project's
+migration target. All subsequent migrations and isolated test VNets must match.** Step 1 warns
+but does not verify that lock: inspect existing migration/recovery resources in the portal.
+An existing Azure Migrate project's data geography is independent and stays unchanged.
+The Module 1 assessment must use this same target region. Resource-group metadata does not
+bind child regions; existing VNet/NSG resources cannot be moved, so mismatches require a fresh
+landing zone. Step 1 stops conflicts before writes and offers reselect/network-only/cancel
+for quota warnings; `-AllowQuotaWarning` explicitly permits network-only setup, not VM allocation.
+[VM quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas)
+
 **Create the resource group.**
 
 1. In the portal, search for **Resource groups** and select **Create**.
 2. **Subscription** — the one holding your Azure Migrate project.
 3. **Resource group** — `rg-ces-target-01`.
-4. **Region** — the region you are migrating into.
+4. **Region** — the chosen migration target region (different from the actual source host). For a new group this also sets metadata location; it does not bind child resource regions.
 5. **Review + create**, then **Create**.
 
 **Create the virtual network.**
@@ -219,7 +247,7 @@ from a dropdown** — if they do not exist, you cannot proceed without leaving t
 **Create the network security group and attach it.**
 
 1. Search for **Network security groups** and select **Create**, in `rg-ces-target-01`, named
-   `rg-ces-target-01-nsg`.
+   `rg-ces-target-01-nsg`, in the **same chosen target region as the VNet**.
 2. Once created, open it and add these **inbound** rules so the migrated workloads can be
    reached and validated:
 
@@ -291,7 +319,7 @@ count is zero, discovery has not completed — return to Module 1 section 4 befo
 ### 4.4 Select Hyper-V as the Source
 
 1. In the **Discover** dialog, for **Are your machines virtualized?**, select **Yes, with Hyper-V**.
-2. Select the **Target region** where you want to migrate VMs.
+2. Select the **Target region** chosen in section 4.1, matching the target VNet and Module 1 assessment. Verify before **Create resources / Finalize discovery**: subsequent migrations must use that project's locked target region.
 3. Confirm that the Azure Migrate appliance you deployed in Module 1 appears as registered.
 
 > **Note:** If the appliance does not appear, verify it is powered on and has network connectivity to Azure. You may need to wait a few minutes for registration to propagate.

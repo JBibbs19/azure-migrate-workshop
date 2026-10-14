@@ -25,6 +25,13 @@ if (Test-Path "$labRoot\setup-complete.json") {
     throw 'This host has already been provisioned. Use validation, not deployment, after migration starts.'
 }
 $labResuming = Test-Path "$labRoot\setup-log.txt"
+$labBuildMarker = 'LAB_BUILD|ubuntu2404-tomcat101-v1'
+$matchingBuild = $labResuming -and @(Get-Content -LiteralPath $logFile | Where-Object { $_ -ceq $labBuildMarker }).Count -gt 0
+if (($labResuming -and -not $matchingBuild) -or
+    (@(Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App -ErrorAction SilentlyContinue).Count -gt 0 -and -not $matchingBuild)) {
+    throw 'Ubuntu 24.04 requires a fresh separate host. Existing or unmarked lab guests must not be upgraded, adopted or replaced.'
+}
+if (-not $labResuming) { Set-Content -LiteralPath $logFile -Value $labBuildMarker -Encoding ASCII }
 # This directory contains unattended setup material; limit it to local administrators and SYSTEM.
 & icacls.exe $labRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not restrict setup directory permissions.' }
@@ -55,6 +62,103 @@ function Expand-LabTextTemplate {
     })
 }
 
+function Get-LabKvpReadinessRow {
+    param([string]$Name, [string]$VMId, [AllowNull()]$Component, [string]$Failure = '')
+    $row = [ordered]@{ Name = $Name; VMId = $VMId; EnabledState = $null; OperationalStatus = $null;
+        CommunicationStatus = $null; OSName = ''; OSVersion = ''; Ready = $false; Reason = '' }
+    try {
+        if ($Failure) { throw $Failure }
+        if ($null -eq $Component) { throw 'Missing KVP component' }
+        foreach ($field in @('EnabledState', 'OperationalStatus', 'CommunicationStatus')) {
+            $property = $Component.PSObject.Properties[$field]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            $values = @($property.Value)
+            if ($values.Count -eq 0) { continue }
+            if ($field -ne 'OperationalStatus' -and $values.Count -ne 1) { throw 'Invalid numeric KVP status' }
+            $value = $values[0]
+            if ($value -isnot [byte] -and $value -isnot [uint16] -and $value -isnot [int] -and
+                $value -isnot [uint32] -and $value -isnot [long]) { throw 'Invalid numeric KVP status' }
+            if ($value -lt 0 -or $value -gt 65535) { throw 'Invalid numeric KVP status' }
+            $row[$field] = [int]$value
+        }
+        if ($row.EnabledState -ne 2) { throw 'KVP disabled or enabled state unknown' }
+        # OperationalStatus is authoritative. CommunicationStatus is inherited and may be unimplemented.
+        if ($null -eq $row.OperationalStatus) { throw 'KVP operational status missing or not OK' }
+        if ($row.OperationalStatus -ne 2) {
+            switch ($row.OperationalStatus) {
+                3 { throw 'KVP Degraded (lab requires normal communication)' }
+                7 { throw 'KVP incompatible protocol' }
+                12 { throw 'KVP NoContact' }
+                13 { throw 'KVP LostCommunication' }
+                default { throw 'KVP operational status missing or not OK' }
+            }
+        }
+        if ($null -ne $row.CommunicationStatus -and $row.CommunicationStatus -notin @(0, 1, 2)) {
+            throw 'KVP CommunicationStatus reports lost/no contact or unknown failure'
+        }
+        $property = $Component.PSObject.Properties['GuestIntrinsicExchangeItems']
+        if ($null -eq $property) { throw 'Missing guest OS metadata' }
+        $metadata = @{}
+        foreach ($item in @($property.Value)) {
+            if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)) { throw 'Malformed guest OS metadata XML' }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $reader = [Xml.XmlReader]::Create([IO.StringReader]::new($item), $settings)
+            try { $xml = [Xml.XmlDocument]::new(); $xml.XmlResolver = $null; $xml.Load($reader) }
+            catch { throw 'Malformed guest OS metadata XML' }
+            finally { $reader.Dispose() }
+            $names = $xml.SelectNodes('/INSTANCE/PROPERTY[@NAME="Name"]/VALUE')
+            $data = $xml.SelectNodes('/INSTANCE/PROPERTY[@NAME="Data"]/VALUE')
+            if ($names.Count -ne 1 -or $data.Count -ne 1) { throw 'Malformed guest OS metadata XML' }
+            $key = $names[0].InnerText
+            if ($key -notin @('OSName', 'OSVersion')) { continue }
+            if ($metadata.ContainsKey($key)) { throw 'Duplicate guest OS metadata' }
+            $metadata[$key] = $data[0].InnerText.Trim()
+        }
+        foreach ($key in @('OSName', 'OSVersion')) {
+            if (-not $metadata.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($metadata[$key])) { throw 'Missing guest OS name/version' }
+            if ($metadata[$key].Length -gt 256 -or $metadata[$key] -match '[\x00-\x1f\x7f]') { throw 'Invalid guest OS metadata text' }
+            $row[$key] = $metadata[$key]
+        }
+        if ($Name -like 'OnPrem-Linux-*') {
+            if ($row.OSName -notmatch '(?i)\b(?:Linux|Ubuntu)\b') { throw 'Guest OS family is not recognized as Linux/Ubuntu' }
+        } elseif ($row.OSName -notmatch '(?i)\bWindows\b') { throw 'Guest OS family is not recognized as Windows' }
+        $row.Ready = $true
+        $row.Reason = 'KVP communication OK and guest OS metadata present'
+    } catch { $row.Reason = $_.Exception.Message }
+    return [pscustomobject]$row
+}
+
+function Get-LabGuestCommunicationRows {
+    $required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    foreach ($name in $required) {
+        $id = ''; $component = $null; $failure = ''
+        try {
+            $vms = @(Get-VM -Name $name -ErrorAction Stop)
+            if ($vms.Count -ne 1) { $failure = 'Missing or ambiguous VM'; throw $failure }
+            $vm = $vms[0]; $id = [string]$vm.Id
+            if ([string]$vm.State -cne 'Running') { $failure = 'VM not Running'; throw $failure }
+            $systems = @(Get-CimInstance -Namespace root/virtualization/v2 -ClassName Msvm_ComputerSystem -Filter "Name='$id'" -OperationTimeoutSec 15 -ErrorAction Stop)
+            if ($systems.Count -ne 1) { $failure = 'Missing or ambiguous VM CIM record'; throw $failure }
+            $components = @(Get-CimAssociatedInstance -InputObject $systems[0] -ResultClassName Msvm_KvpExchangeComponent -OperationTimeoutSec 15 -ErrorAction Stop)
+            if ($components.Count -ne 1) { $failure = 'Missing or ambiguous KVP component'; throw $failure }
+            $component = $components[0]
+        } catch { if (-not $failure) { $failure = 'VM/KVP read unavailable; check VM state and host CIM access' } }
+        Get-LabKvpReadinessRow -Name $name -VMId $id -Component $component -Failure $failure
+    }
+}
+
+function Assert-LabGuestCommunication {
+    $rows = @(Get-LabGuestCommunicationRows)
+    $bad = @($rows | Where-Object { -not $_.Ready })
+    if ($rows.Count -ne 4 -or $bad.Count) {
+        $details = ($bad | ForEach-Object { "$($_.Name): $($_.Reason)" }) -join '; '
+        throw "Guest communication not ready: $details. Check guest hv-kvp-daemon/current-kernel tools and host CIM access."
+    }
+    return $rows
+}
+
 function Assert-LabSourceWorkloads {
     foreach ($address in @('http://192.168.0.10','http://192.168.0.12')) {
         $page = Invoke-WebRequest $address -UseBasicParsing -TimeoutSec 10
@@ -63,7 +167,21 @@ function Assert-LabSourceWorkloads {
         }
     }
     $api = Invoke-RestMethod 'http://192.168.0.13:3000/api/health' -TimeoutSec 10
-    if ($api.status -ne 'healthy' -or $api.server -ne 'OnPrem-Linux-App') { throw 'Node API unhealthy or wrong application.' }
+    if ($api.status -ne 'healthy' -or $api.server -ne 'OnPrem-Linux-App' -or $api.app -ne 'Contoso Order Desk' -or -not $api.timestamp) {
+        throw 'Tomcat health contract failed or wrong application.'
+    }
+    $info = Invoke-RestMethod 'http://192.168.0.13:3000/api/info' -TimeoutSec 10
+    if ($info.app -ne 'Contoso Order Desk' -or -not $info.javaVersion) { throw 'Tomcat Java runtime contract failed.' }
+    $ready = Invoke-RestMethod 'http://192.168.0.13:3000/api/ready' -TimeoutSec 20
+    if ($ready.status -ne 'ready') { throw 'Tomcat SQL readiness failed.' }
+    $orders = Invoke-RestMethod 'http://192.168.0.13:3000/api/orders' -TimeoutSec 20
+    if ($orders.customerCount -lt 1 -or $orders.count -lt 1 -or @($orders.customers).Count -lt 1 -or @($orders.orders).Count -lt 1) {
+        throw 'Tomcat cannot read the existing ContosoApp seed data.'
+    }
+    $desk = Invoke-WebRequest 'http://192.168.0.13:3000/' -UseBasicParsing -TimeoutSec 20
+    if ($desk.StatusCode -ne 200 -or $desk.Content -notmatch 'Contoso Order Desk') { throw 'Named Tomcat order desk page missing.' }
+    $proxy = Invoke-RestMethod 'http://192.168.0.12:8080/api/ready' -TimeoutSec 20
+    if ($proxy.status -ne 'ready' -or $proxy.app -ne 'Contoso Order Desk') { throw 'Nginx-to-Tomcat SQL readiness failed.' }
     if (-not (Test-NetConnection 192.168.0.11 -Port 1433 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
         throw 'SQL TCP listener unavailable.'
     }
@@ -181,12 +299,12 @@ if ($IncludeApplianceVhd -ne 'Yes') {
 }
 try {
   if ($IncludeApplianceVhd -eq 'Yes') {
-    $storeVolume = Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue |
-                   Where-Object { $_.DriveLetter } | Select-Object -First 1
-    if (-not $storeVolume) {
-        Write-Log "No ApplianceStore volume found; the appliance VHD will not be pre-staged."
+    $storeVolumes = @(Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue |
+                      Where-Object { $_.DriveLetter })
+    if ($storeVolumes.Count -ne 1) {
+        Write-Log "Expected one ApplianceStore volume; the appliance VHD will not be pre-staged."
     } else {
-        $applianceRoot = "$($storeVolume.DriveLetter):\Appliance"
+        $applianceRoot = "$($storeVolumes[0].DriveLetter):\Appliance"
         New-Item -ItemType Directory -Path $applianceRoot -Force | Out-Null
         $applianceJob = Start-Job -Name 'LabApplianceDownload' -ScriptBlock {
             param($Root, $ExpectedSha256, $Url)
@@ -194,60 +312,71 @@ try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             $zip = Join-Path $Root 'MigrateAppl.zip'
             $done = Join-Path $Root 'download-complete.json'
-            if (Test-Path $done) { return 'ALREADY_PRESENT' }
-            # curl.exe, not Start-BitsTransfer: BITS fails in a non-interactive SYSTEM
-            # context, which is what this script runs as. --continue-at - resumes a partial
-            # file after a drop. This matches what migrate-step2 already does for the same
-            # archive.
-            $partial = "$zip.partial"
-            $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-            if (-not (Test-Path $curl)) { throw 'curl.exe was not found on this host.' }
-            $attempt = 0
-            while ($true) {
-                $attempt++
-                & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 `
-                        --continue-at - --output $partial $Url
-                if ($LASTEXITCODE -eq 0) { break }
-                if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
-                Start-Sleep -Seconds 30
+            if (Test-Path -LiteralPath $done) {
+                $record = Get-Content -LiteralPath $done -Raw | ConvertFrom-Json
+                $recordedZip = [IO.Path]::GetFullPath([string]$record.Archive)
+                $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+                if (-not $recordedZip.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+                    [IO.Path]::GetExtension($recordedZip) -ne '.zip' -or -not (Test-Path -LiteralPath $recordedZip -PathType Leaf)) {
+                    throw 'Existing appliance record does not identify a ZIP inside the store. Review manually; nothing was overwritten.'
+                }
+                $fresh = (Get-FileHash -LiteralPath $recordedZip -Algorithm SHA256).Hash
+                if ($fresh -ne $record.ArchiveSha256 -or ($ExpectedSha256 -and $fresh -ne $ExpectedSha256.ToUpperInvariant())) {
+                    throw "Existing ZIP hash changed or differs from the supplied hash: actual $fresh. Retained for inspection; do not import."
+                }
+                return "ARCHIVE_REHASHED|$recordedZip|$fresh|extracted files require separate verification"
             }
-            Move-Item -LiteralPath $partial -Destination $zip -Force
+            if (-not (Test-Path -LiteralPath $zip)) {
+                # curl.exe, not Start-BitsTransfer: BITS fails in a non-interactive SYSTEM
+                # context, which is what this script runs as. --continue-at - resumes a partial
+                # file after a drop. This matches what migrate-step2 already does for the same
+                # archive.
+                $partial = "$zip.partial"
+                $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+                if (-not (Test-Path $curl)) { throw 'curl.exe was not found on this host.' }
+                $attempt = 0
+                while ($true) {
+                    $attempt++
+                    & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 `
+                            --continue-at - --output $partial $Url
+                    if ($LASTEXITCODE -eq 0) { break }
+                    if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
+                    Start-Sleep -Seconds 30
+                }
+                Move-Item -LiteralPath $partial -Destination $zip -Force
+            }
             if (-not (Test-Path $zip)) { throw 'The appliance archive did not download.' }
-            $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
-            # When the published hash was supplied, a mismatch means the static link did not
-            # serve the appliance the project offers. Delete it rather than leave something
-            # unusable staged where it looks ready to import.
+            $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
             if ($ExpectedSha256 -and $hash -ne $ExpectedSha256.ToUpperInvariant()) {
-                Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-                throw "SHA256 mismatch: expected $ExpectedSha256, got $hash. The archive was deleted. Download the appliance from the Azure Migrate project instead."
+                throw "SHA256 mismatch: expected $ExpectedSha256, got $hash. ZIP retained for inspection; do not extract or import."
             }
             $extract = Join-Path $Root 'Extracted'
-            New-Item -ItemType Directory -Path $extract -Force | Out-Null
-            Expand-Archive -Path $zip -DestinationPath $extract -Force
-            $vhd = Get-ChildItem $extract -Recurse -Include *.vhd,*.vhdx -ErrorAction SilentlyContinue |
-                   Select-Object -First 1
-            if (-not $vhd) { throw 'No VHD was found inside the appliance archive.' }
-            # The static link is not guaranteed to serve the appliance the portal currently
-            # offers. The published VHD carries a Windows Server build in its file name, so
-            # that is read back as a cheap sanity check: Windows Server 2022 is build 20348,
-            # and Microsoft's support matrix blocks Server 2016 or earlier. A heuristic on a
-            # file name, not proof - the published hash is what actually decides.
-            $build = 0
-            if ($vhd.Name -match '^(\d+)\.') { $build = [int]$Matches[1] }
-            $looksCurrent = ($build -ge 20348)
+            if (Test-Path -LiteralPath $extract) { throw 'An extraction folder already exists without a usable completion record. Review it manually; no files were overwritten.' }
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $sourceZip = [IO.Compression.ZipFile]::OpenRead($zip)
+            try { $expandedBytes = ($sourceZip.Entries | Measure-Object Length -Sum).Sum }
+            finally { $sourceZip.Dispose() }
+            $free = (Get-Volume -DriveLetter $Root.Substring(0,1)).SizeRemaining
+            if ($free -lt ($expandedBytes + 10GB)) { throw 'Not enough ApplianceStore space for extraction plus 10 GB working headroom. Review capacity with the instructor.' }
+            Expand-Archive -LiteralPath $zip -DestinationPath $extract
+            $vhds = @(Get-ChildItem -LiteralPath $extract -Recurse -File | Where-Object { $_.Extension -in @('.vhd', '.vhdx') })
+            if ($vhds.Count -ne 1) { throw 'Expected exactly one appliance disk in the export. Review the current Microsoft package; no disk was guessed.' }
+            $vhd = $vhds[0]
+            $extractionFiles = @(Get-ChildItem -LiteralPath $extract -Recurse -File | ForEach-Object {
+                [ordered]@{ Path=$_.FullName; Sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            })
+            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $hash) { throw 'ZIP changed during extraction; do not use the extracted files.' }
             [ordered]@{
                 CompletedUtc = (Get-Date).ToUniversalTime().ToString('o')
                 Archive      = $zip
                 ArchiveSha256 = $hash
                 ExtractedVhd = $vhd.FullName
                 Source       = $Url
-                WindowsBuild = $build
-                LooksCurrent = $looksCurrent
+                ExtractionFiles = $extractionFiles
                 Verified     = [bool]$ExpectedSha256
-                Note         = if ($ExpectedSha256) { 'Checked against the SHA256 supplied at deployment.' } else { 'Staged from the static link and NOT checked against a published SHA256. Verify before importing.' }
-            } | ConvertTo-Json | Set-Content $done -Encoding UTF8
-            if (-not $looksCurrent) { return "STALE|$($vhd.FullName)|$hash|build $build" }
-            return "READY|$($vhd.FullName)|$hash"
+                Note         = if ($ExpectedSha256) { 'Checked against the SHA256 supplied at deployment. Rehash before import; verify OS inside the guest.' } else { 'Staged from the static link and NOT checked against a published SHA256. Verify before importing; OS must be checked inside the guest.' }
+            } | ConvertTo-Json -Depth 4 | Set-Content $done -Encoding UTF8
+            return "STAGED|$($vhd.FullName)|$hash|verify current published ZIP hash before import"
         } -ArgumentList $applianceRoot, $ApplianceVhdSha256, $applianceUrl
         Write-Log "Azure Migrate appliance download started in the background into $applianceRoot."
     }
@@ -274,9 +403,9 @@ if (-not (Test-Path $oscdimgPath)) {
     Write-Log "Windows ADK Deployment Tools already installed."
 }
 
-$ubuntuCloudUrl = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-$ubuntuQcow2    = "$vhdPath\Ubuntu2204-cloudimg.img"
-$ubuntuBaseVhd  = "$vhdPath\Ubuntu2204-Base.vhdx"
+$ubuntuCloudUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+$ubuntuQcow2    = "$vhdPath\Ubuntu2404-cloudimg.img"
+$ubuntuBaseVhd  = "$vhdPath\Ubuntu2404-Base.vhdx"
 
 $windowsBaseVhd = "$vhdPath\WindowsServer2022-Base.vhdx"
 
@@ -310,19 +439,19 @@ Write-Log "qemu-img available at: $qemuImg"
 
 # -- Ubuntu cloud image (download QCOW2, convert to VHDX via qemu-img) --
 if (-not (Test-Path $ubuntuBaseVhd)) {
-    # Download Ubuntu QCOW2 cloud image
-    if (Test-Path $ubuntuQcow2) { Remove-Item $ubuntuQcow2 -Force }
+    # A cached QCOW2 is accepted only after the same exact-name checksum check below.
     if (-not (Test-Path $ubuntuQcow2)) {
-        Write-Log "Downloading Ubuntu 22.04 cloud image (QCOW2 format, ~600MB)..."
+        Write-Log "Downloading Ubuntu 24.04 cloud image (QCOW2 format, ~600MB)..."
         Invoke-LabDownload -Uri $ubuntuCloudUrl -Destination $ubuntuQcow2 -Stage 'Download Ubuntu image'
-        $hashPath = "$vhdPath\SHA256SUMS"
-        Invoke-WebRequest -Uri 'https://cloud-images.ubuntu.com/jammy/current/SHA256SUMS' -OutFile $hashPath -UseBasicParsing -TimeoutSec 300
-        $hashLine = Get-Content $hashPath | Where-Object { $_ -match ' [ *]?jammy-server-cloudimg-amd64.img$' }
-        if (@($hashLine).Count -ne 1) { throw 'Cannot identify Ubuntu image checksum; retry if the current image changed.' }
-        $expectedHash = ($hashLine -split '\s+')[0]
-        if ((Get-FileHash $ubuntuQcow2 -Algorithm SHA256).Hash -ne $expectedHash) { Remove-Item $ubuntuQcow2 -Force; throw 'Ubuntu image checksum mismatch.' }
-        Write-Log "Ubuntu cloud image downloaded and SHA256 verified."
     }
+    # Verify cached downloads too. The publisher's current image/checksum can change together.
+    $hashPath = "$vhdPath\Ubuntu2404-SHA256SUMS"
+    Invoke-WebRequest -Uri 'https://cloud-images.ubuntu.com/noble/current/SHA256SUMS' -OutFile $hashPath -UseBasicParsing -TimeoutSec 300
+    $hashLine = Get-Content $hashPath | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?noble-server-cloudimg-amd64\.img$' }
+    if (@($hashLine).Count -ne 1) { throw 'Cannot identify the exact Noble image checksum; retry if the current image changed.' }
+    $expectedHash = ($hashLine -split '\s+')[0]
+    if ((Get-FileHash $ubuntuQcow2 -Algorithm SHA256).Hash -ne $expectedHash) { Remove-Item $ubuntuQcow2 -Force; throw 'Ubuntu 24.04 image checksum mismatch; download the matching current image again.' }
+    Write-Log "Ubuntu 24.04 cloud image SHA256 verified before conversion."
 
     # Convert QCOW2 to VHDX using qemu-img
     Write-Log "Converting Ubuntu QCOW2 to VHDX (this may take a few minutes)..."
@@ -499,7 +628,8 @@ function Create-LinuxGuestVM {
         [string]$VMName, [string]$IPAddress,
         [int]$MemoryMB = 2048, [int]$CPUs = 2, [int]$DiskGB = 30,
         [string[]]$ExtraPackages = @(),
-        [string]$ExtraRunCmdYaml = ""
+        [string]$ExtraRunCmdYaml = "",
+        [string]$ExtraWriteFilesYaml = ""
     )
 
     $existingVM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
@@ -563,7 +693,7 @@ ethernets:
     # dependency analysis. net-tools supplies netstat, iproute2 supplies ss, libcap2-bin
     # supplies getcap and plocate supplies locate -- none of which ship in a cloud image.
     $basePackages = @("openssh-server", "curl", "wget", "net-tools", "iproute2", "libcap2-bin",
-        "walinuxagent", "linux-cloud-tools-common", "plocate")
+        "walinuxagent", "linux-cloud-tools-common", "plocate", "python3")
     $allPackages  = $basePackages + $ExtraPackages
     $pkgYaml = ($allPackages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -590,47 +720,43 @@ ethernets:
     # and IP address. Azure Migrate reads guest OS details through the host, so without the
     # daemon the guest is discovered but its OS information is blank.
     #
-    # Two separate pieces are needed and both are missing from an Ubuntu cloud image as
-    # provisioned. The hv_utils kernel module publishes /dev/vmbus/hv_kvp; the daemon's
-    # systemd unit Requires that device, so starting the service before the module is
-    # loaded fails with 'A dependency job for hv-kvp-daemon.service failed'. Load the
-    # module first and persist it, then install the userspace daemons.
-    #
-    # hv_utils is distinct from hv_netvsc and hv_storvsc, which the image already loads --
-    # a guest can therefore have working network and disk while reporting nothing about
-    # itself to the host. The per-kernel package matches the running kernel and needs no
-    # reboot; the -virtual meta-packages are a fallback for images whose exact version is
-    # not in the archive, and that path does require a reboot to take effect.
+    # hv_utils can already be loaded while the userspace daemon for the running kernel is
+    # missing. Install BOTH exact-kernel tools packages; a -virtual fallback cannot repair a
+    # running -generic kernel. No kernel/OS replacement is attempted when packages are absent.
     $hyperVIntegration = @'
-  - modprobe hv_utils || true
   - |
     echo hv_utils > /etc/modules-load.d/hyperv.conf
   - |
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y "linux-cloud-tools-$(uname -r)" \
-      || apt-get install -y linux-cloud-tools-virtual linux-tools-virtual \
-      || true
+    kernel="$(uname -r)"
+    kvp_install_failed() {
+      echo "LAB_KVP_INSTALL_FAILED - install linux-tools-$kernel and linux-cloud-tools-$kernel from matching Ubuntu repositories; repair the guest before retrying"
+      # cloud-init may continue later runcmd items: prevent reboot from hiding this failure.
+      systemctl stop hv-kvp-daemon.service
+      systemctl mask hv-kvp-daemon.service
+      exit 1
+    }
+    apt-get install -y "linux-tools-$kernel" "linux-cloud-tools-$kernel" || kvp_install_failed
+    test -x "/usr/lib/linux-tools/$kernel/hv_kvp_daemon" || kvp_install_failed
+    systemctl unmask hv-kvp-daemon.service || kvp_install_failed
+    systemctl enable hv-kvp-daemon.service || kvp_install_failed
+    # Keep KVP stopped until the scheduled reboot; pre-reboot service success is not acceptance.
+    systemctl stop hv-kvp-daemon.service || kvp_install_failed
+  - modprobe hv_utils || true
   - udevadm control --reload-rules || true
   - udevadm trigger --subsystem-match=vmbus || true
   - udevadm settle || true
-  - systemctl enable hv-kvp-daemon.service || true
   - systemctl enable hv-vss-daemon.service || true
-  - systemctl start hv-kvp-daemon.service || true
   - systemctl start hv-vss-daemon.service || true
   - updatedb || true
   - |
     if systemctl is-active --quiet hv-kvp-daemon.service; then
-      echo 'LAB_KVP_DAEMON_RUNNING'
+      echo 'LAB_KVP_DAEMON_RUNNING - first-boot observation only; host communication gate still required'
     else
-      # Expected on first pass. The tools package installs udev rules that create
-      # /dev/vmbus/hv_kvp, and the daemon unit Requires that device, so the service cannot
-      # start until the rules have been applied to a fresh boot. The services are enabled,
-      # so the reboot below starts them. Record why for the log either way.
-      echo 'LAB_KVP_DAEMON_PENDING_REBOOT - services enabled; starting after the scheduled reboot'
+      echo 'LAB_KVP_DAEMON_PENDING_REBOOT - intentionally stopped until reboot; inspect any LAB_KVP_INSTALL_FAILED first'
       lsmod | grep -q hv_utils || echo 'LAB_KVP_CAUSE - hv_utils module is not loaded'
       test -e /dev/vmbus/hv_kvp || echo 'LAB_KVP_CAUSE - /dev/vmbus/hv_kvp does not exist yet'
-      command -v hv_kvp_daemon >/dev/null 2>&1 || ls /usr/lib/linux-tools/*/hv_kvp_daemon >/dev/null 2>&1 \
-        || echo 'LAB_KVP_CAUSE - daemon binary not installed for this kernel'
+      test -x "/usr/lib/linux-tools/$(uname -r)/hv_kvp_daemon" || echo 'LAB_KVP_CAUSE - current-kernel daemon binary missing'
     fi
   - |
     # Confirm the account and command set Azure Migrate needs over SSH, so a gap appears in
@@ -677,6 +803,7 @@ chpasswd:
       type: text
 packages:
 __PKGYAML__
+__WRITEFILES__
 runcmd:
 __RUNYAML__
 power_state:
@@ -691,6 +818,7 @@ power_state:
         '__USER__' = $guestUser
         '__PKGYAML__' = $pkgYaml
         '__RUNYAML__' = $runYaml
+        '__WRITEFILES__' = $ExtraWriteFilesYaml
     }
     [System.IO.File]::WriteAllText("$cloudInitDir\user-data", $userData, [System.Text.UTF8Encoding]::new($false))
 
@@ -756,7 +884,7 @@ $nginxRunCmdYaml = @'
                 <h3>Environment Details</h3>
                 <ul>
                     <li><strong>Server:</strong> OnPrem-Linux-Web</li>
-                    <li><strong>Platform:</strong> Ubuntu 22.04 + Nginx</li>
+                    <li><strong>Platform:</strong> Ubuntu 24.04 + Nginx</li>
                     <li><strong>IP Address:</strong> 192.168.0.12</li>
                     <li><strong>Status:</strong> On-Premises (Pre-Migration)</li>
                 </ul>
@@ -766,118 +894,71 @@ $nginxRunCmdYaml = @'
     </body>
     </html>
     HTMLEOF
-'@
-
-# Node.js + Express.js app setup
-$nodeJsRunCmdYaml = @'
-  - apt-get update -y
-  - curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh
-  - bash /tmp/nodesource_setup.sh
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-  - mkdir -p /opt/contoso-app
   - |
-    cat > /opt/contoso-app/package.json << 'PKGJSON'
-    {
-      "name": "contoso-app",
-      "version": "1.0.0",
-      "description": "Contoso sample Node.js application for Azure Migrate Workshop",
-      "main": "server.js",
-      "scripts": { "start": "node server.js" },
-      "dependencies": { "express": "5.2.1" }
+    cat >> /etc/hosts <<'HOSTSEOF'
+    192.168.0.11 onprem-sql
+    192.168.0.13 onprem-app
+    192.168.0.12 onprem-nginx
+    HOSTSEOF
+    cat > /etc/nginx/conf.d/lab-order-desk.conf <<'PROXYEOF'
+    server {
+        listen 8080;
+        server_name _;
+        location / {
+            proxy_pass http://onprem-app:3000;
+            proxy_set_header Host $http_host;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 20s;
+        }
     }
-    PKGJSON
-  - |
-    cat > /opt/contoso-app/server.js << 'SERVERJS'
-    const express = require('express');
-    const os = require('os');
-    const app = express();
-    const PORT = 3000;
-
-    app.get('/', (req, res) => {
-      res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>TD SYNNEX - Cloud Enablement Services</title>
-          <style>
-            body { font-family: 'Segoe UI', sans-serif; margin: 40px; background: #0d1117; color: #c9d1d9; }
-            .container { max-width: 800px; margin: 0 auto; background: #161b22; padding: 40px; border-radius: 8px; border: 1px solid #30363d; }
-            h1 { color: #58a6ff; }
-            pre { background: #0d1117; padding: 15px; border-radius: 4px; overflow-x: auto; }
-            .status { color: #3fb950; font-weight: bold; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h1>TD SYNNEX | Application Server</h1><p>Cloud Enablement Services</p>
-            <p class="status">&#x2705; Node.js API is running</p>
-            <h3>System Info</h3>
-            <pre>${JSON.stringify({
-              hostname: os.hostname(),
-              platform: os.platform(),
-              arch: os.arch(),
-              uptime: Math.floor(os.uptime()) + 's',
-              memory: Math.floor(os.totalmem() / 1024 / 1024) + 'MB',
-              nodeVersion: process.version
-            }, null, 2)}</pre>
-            <h3>API Endpoints</h3>
-            <ul>
-              <li><a href="/api/health" style="color:#58a6ff">/api/health</a> - Health check</li>
-              <li><a href="/api/info" style="color:#58a6ff">/api/info</a> - System information</li>
-            </ul>
-          </div>
-        </body>
-        </html>
-      `);
-    });
-
-    app.get('/api/health', (req, res) => {
-      res.json({ status: 'healthy', timestamp: new Date().toISOString(), server: 'OnPrem-Linux-App' });
-    });
-
-    app.get('/api/info', (req, res) => {
-      res.json({
-        hostname: os.hostname(),
-        platform: os.platform(),
-        arch: os.arch(),
-        uptime: os.uptime(),
-        memory: { total: os.totalmem(), free: os.freemem() },
-        cpus: os.cpus().length,
-        nodeVersion: process.version,
-        environment: 'on-premises'
-      });
-    });
-
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Contoso App Server running on port ${PORT}`);
-    });
-    SERVERJS
-  - cd /opt/contoso-app && npm install --omit=dev
-  - |
-    cat > /etc/systemd/system/contoso-app.service << 'SVCFILE'
-    [Unit]
-    Description=Contoso Node.js Application
-    After=network.target
-
-    [Service]
-    Type=simple
-    User=contosoapp
-    NoNewPrivileges=true
-    WorkingDirectory=/opt/contoso-app
-    ExecStart=/usr/bin/node server.js
-    Restart=on-failure
-    RestartSec=10
-    Environment=NODE_ENV=production
-
-    [Install]
-    WantedBy=multi-user.target
-    SVCFILE
-  - useradd --system --no-create-home --shell /usr/sbin/nologin contosoapp
-  - chown -R contosoapp:contosoapp /opt/contoso-app
-  - systemctl daemon-reload
-  - systemctl enable contoso-app
-  - systemctl start contoso-app
+    PROXYEOF
+    nginx -t
+    systemctl reload nginx
 '@
+
+# The deploy client embeds the reviewed checkout's minimal runtime ZIP, not a remote branch URL.
+$tomcatRuntime = '__TOMCAT_RUNTIME_PAYLOAD__'
+$tomcatRuntimeSha = '__TOMCAT_RUNTIME_SHA256__'
+$tomcatWriteFilesYaml = @'
+write_files:
+  - path: /root/contoso-runtime.zip
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: __RUNTIME__
+  - path: /root/contoso-sql-password.json
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: __SQL_SEED__
+'@
+$sqlSeedJson = ConvertTo-Json -InputObject $guestAdminPwd -Compress
+$tomcatWriteFilesYaml = Expand-LabTextTemplate $tomcatWriteFilesYaml @{
+    '__RUNTIME__' = $tomcatRuntime
+    '__SQL_SEED__' = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sqlSeedJson))
+}
+$tomcatRunCmdYaml = @'
+  - |
+    set -eu
+    trap 'rm -f /root/contoso-sql-password.json /root/contoso-runtime.zip' EXIT
+    install -d -m 0700 /opt/contoso-bootstrap
+    python3 - <<'PY'
+    import hashlib, zipfile
+    from pathlib import Path
+    source = Path('/root/contoso-runtime.zip')
+    if hashlib.sha256(source.read_bytes()).hexdigest() != '__RUNTIME_SHA__':
+        raise SystemExit('Initial Tomcat runtime payload checksum mismatch.')
+    with zipfile.ZipFile(source) as archive:
+        if archive.testzip() is not None:
+            raise SystemExit('Initial Tomcat runtime ZIP CRC failure.')
+        if any(name.startswith('/') or '..' in Path(name).parts for name in archive.namelist()):
+            raise SystemExit('Unsafe runtime archive path.')
+        archive.extractall('/opt/contoso-bootstrap')
+    PY
+    bash /opt/contoso-bootstrap/scripts/install-fresh.sh
+    rm -rf /opt/contoso-bootstrap
+'@
+$tomcatRunCmdYaml = Expand-LabTextTemplate $tomcatRunCmdYaml @{ '__RUNTIME_SHA__' = $tomcatRuntimeSha }
 
 # --- Create VMs ---
 Create-WindowsGuestVM -VMName "OnPrem-Web" -IPAddress "192.168.0.10" -MemoryMB 4096 -CPUs 2
@@ -886,7 +967,7 @@ Create-WindowsGuestVM -VMName "OnPrem-SQL" -IPAddress "192.168.0.11" -MemoryMB 4
 # published VHD, downloaded and imported by the instructor in Module 1; its host memory
 # and 192.168.0.20 reservation are deliberately left unused for that import.
 Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("nginx") -ExtraRunCmdYaml $nginxRunCmdYaml
-Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraRunCmdYaml $nodeJsRunCmdYaml
+Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("tomcat10", "openjdk-17-jre-headless") -ExtraRunCmdYaml $tomcatRunCmdYaml -ExtraWriteFilesYaml $tomcatWriteFilesYaml
 
 # =============================================================
 # PHASE 4 - Start VMs and wait for boot
@@ -1062,7 +1143,8 @@ Write-Log "--- Configuring OnPrem-SQL (192.168.0.11) ---"
 try {
     if (-not (Wait-ForGuestVM -VMName "OnPrem-SQL")) { throw "SQL guest not ready." }
 
-    $workloadJob = Invoke-Command -VMName "OnPrem-SQL" -Credential $winCred -AsJob -ScriptBlock {
+    $workloadJob = Invoke-Command -VMName "OnPrem-SQL" -Credential $winCred -AsJob -ArgumentList $guestAdminPwd -ScriptBlock {
+        param([string]$LabPassword)
         $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -1151,6 +1233,8 @@ Set-StrictMode -Version Latest
         Set-ItemProperty $tcpPath -Name Enabled -Value 1
         Set-ItemProperty "$tcpPath\IPAll" -Name TcpDynamicPorts -Value ''
         Set-ItemProperty "$tcpPath\IPAll" -Name TcpPort -Value '1433'
+        # SQL authentication is required by the initial Tomcat JVM, not by optional traffic setup.
+        Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\MSSQLServer" -Name LoginMode -Value 2
         Restart-Service 'MSSQL$SQLEXPRESS'
         if (-not (Get-NetFirewallRule -Name LabSql -ErrorAction SilentlyContinue)) {
             New-NetFirewallRule -Name LabSql -DisplayName 'Lab SQL from private networks' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -RemoteAddress 192.168.0.0/24,10.1.0.0/16,10.2.0.0/16 | Out-Null
@@ -1168,6 +1252,25 @@ Set-StrictMode -Version Latest
             Invoke-Sqlcmd -TrustServerCertificate -ServerInstance ".\SQLEXPRESS" -Query $createTables -ErrorAction Stop
             # Permit the Azure VM agent's SYSTEM identity to validate only this lab database.
             Invoke-Sqlcmd -TrustServerCertificate -ServerInstance ".\SQLEXPRESS" -Query "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name=N'NT AUTHORITY\SYSTEM') CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS; USE ContosoApp; IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name=N'NT AUTHORITY\SYSTEM') CREATE USER [NT AUTHORITY\SYSTEM] FOR LOGIN [NT AUTHORITY\SYSTEM]; ALTER ROLE db_owner ADD MEMBER [NT AUTHORITY\SYSTEM];" -ErrorAction Stop
+            $escapedPassword = $LabPassword.Replace("'", "''")
+            $loginQuery = @"
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'labapp')
+    CREATE LOGIN [labapp] WITH PASSWORD = N'$escapedPassword', CHECK_POLICY = OFF;
+ELSE
+    ALTER LOGIN [labapp] WITH PASSWORD = N'$escapedPassword', CHECK_POLICY = OFF;
+ALTER LOGIN [labapp] ENABLE;
+USE ContosoApp;
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'labapp')
+    CREATE USER [labapp] FOR LOGIN [labapp];
+ALTER ROLE db_datareader ADD MEMBER [labapp];
+ALTER ROLE db_datawriter ADD MEMBER [labapp];
+SELECT TOP (1) CustomerID FROM dbo.Customers;
+SELECT TOP (1) OrderID FROM dbo.Orders;
+"@
+            try {
+                Invoke-Sqlcmd -TrustServerCertificate -ServerInstance '.\SQLEXPRESS' -Query $loginQuery -ErrorAction Stop | Out-Null
+            } catch { throw 'Shared application SQL login preparation failed; inspect SQL locally without sharing credentials.' }
+            $LabPassword = $null; $escapedPassword = $null; $loginQuery = $null
             Write-Output "Sample database 'ContosoApp' created with Customers and Orders tables."
         } catch {
             throw "Could not create sample database: $_"
@@ -1183,18 +1286,23 @@ Set-StrictMode -Version Latest
 # The Linux guests reboot once at the end of cloud-init so the Hyper-V guest daemons start
 # against the udev rules their tools package installed. Validation already retries for 20
 # minutes, which absorbs that restart; a guest that is briefly unreachable here is normal.
-# Workload success must be observed, not inferred from VM heartbeat.
+# Workload and live host-observed KVP/OS metadata must both pass. This is not a direct
+# post-reboot guest daemon check or proof of appliance discovery/classification.
 Write-Log 'Validating sample applications...'
 $deadline = (Get-Date).AddMinutes(20)
 $healthy = $false
+$communicationPasses = 0
 while ((Get-Date) -lt $deadline) {
     try {
+        $guestCommunication = @(Assert-LabGuestCommunication)
         Assert-LabSourceWorkloads
-        $healthy = $true
-        break
-    } catch { Write-Log "Application readiness pending: $($_.Exception.Message)"; Start-Sleep -Seconds 20 }
+        $communicationPasses++
+        if ($communicationPasses -ge 3) { $healthy = $true; break }
+        Write-Log 'Applications and KVP/OS metadata ready; confirming stability across the reboot window...'
+    } catch { $communicationPasses = 0; Write-Log "Application/communication readiness pending: $($_.Exception.Message)" }
+    Start-Sleep -Seconds 20
 }
-if (-not $healthy) { throw 'Workload readiness timed out. Check guest services and cloud-init logs; setup is incomplete.' }
+if (-not $healthy) { throw 'Workload/KVP communication readiness timed out. Check guest hv-kvp-daemon, exact-kernel tools, cloud-init logs and host CIM access; setup is incomplete.' }
 # Delete Windows setup password material after successful first boot.
 foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
     Invoke-Command -VMName $name -Credential $winCred -ScriptBlock {
@@ -1240,7 +1348,7 @@ if ([string]::IsNullOrWhiteSpace($trafficScript)) { throw 'The staged lab traffi
         'onprem-app'   = '192.168.0.13'
     }
     SqlLogin         = 'labapp'
-    IntervalSeconds  = 20
+    IntervalSeconds  = 30
 } | ConvertTo-Json -Depth 4 | Set-Content $trafficSettingsPath -Encoding UTF8
 Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
 
@@ -1261,8 +1369,8 @@ Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
 #
 # Each step is applied directly and idempotently rather than by driving the interactive script,
 # because a Run Command session has no console to answer prompts on. Microsoft's script is then
-# run as a verifier if it can be fetched. The whole phase is best-effort: a failure is recorded
-# and setup continues, because the instructor can complete Module 1 section 2 by hand.
+# run as a verifier if it can be fetched. WinRM/verifier failures remain recorded for manual
+# repair. Guest KVP communication is mandatory and rechecked before setup can complete.
 Write-Log "PHASE 7: Preparing the host for Azure Migrate discovery..."
 
 $hostPrep = [ordered]@{}
@@ -1308,16 +1416,11 @@ try {
                                     else { "$AdminUsername already held the required group memberships" }
 } catch { $hostPrep['DiscoveryAccount'] = "Failed: $($_.Exception.Message)" }
 
-try {
-    $noIntegration = @()
-    foreach ($vm in $allVMs) {
-        $svc = Get-VMIntegrationService -VMName $vm -ErrorAction SilentlyContinue |
-               Where-Object { $_.Name -in @('Heartbeat', 'Key-Value Pair Exchange') -and -not $_.Enabled }
-        if ($svc) { $noIntegration += $vm }
-    }
-    $hostPrep['IntegrationServices'] = if ($noIntegration.Count) { "Incomplete on: $($noIntegration -join ', ')" }
-                                       else { 'Heartbeat and Key-Value Pair Exchange enabled on all four guests' }
-} catch { $hostPrep['IntegrationServices'] = "Unchecked: $($_.Exception.Message)" }
+# Fail closed on unknown/lost communication; Enabled/HealthState alone is not readiness.
+$guestCommunication = @(Assert-LabGuestCommunication)
+$hostPrep['IntegrationServices'] = 'Live KVP communication OK and OS metadata present on all four guests'
+$hostPrep['GuestCommunicationCheckedUtc'] = [DateTime]::UtcNow.ToString('o')
+$hostPrep['GuestCommunication'] = $guestCommunication
 
 $hostPrep['CredSSP'] = 'Not enabled (guest disks are local, not on SMB shares)'
 
@@ -1366,7 +1469,7 @@ try {
 }
 
 foreach ($item in $hostPrep.GetEnumerator()) { Write-Log "  $($item.Key): $($item.Value)" }
-$hostPrep | ConvertTo-Json -Depth 3 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
+$hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
 
 # Collect the appliance download started in PHASE 2.
 if ($applianceJob) {
@@ -1374,16 +1477,9 @@ if ($applianceJob) {
     try {
         $applianceResult = Receive-Job -Job $applianceJob -Wait -ErrorAction Stop
         Write-Log "Appliance staging: $applianceResult"
-        if ("$applianceResult" -like 'STALE|*') {
-            Write-Log "WARNING: the staged appliance does not look like a current build."
-            Write-Log "         The static link served an image whose name reports a Windows build older"
-            Write-Log "         than Server 2022, which the appliance support matrix does not accept."
-            Write-Log "         Do not import it. Download the appliance from your Azure Migrate project"
-            Write-Log "         instead (Module 1 section 3.3) and check the published SHA256."
-        } else {
-            Write-Log "         Staged from the static link and NOT verified against Microsoft's published"
-            Write-Log "         SHA256. Check it before importing - Module 1 section 3.3."
-        }
+        Write-Log "         Rehash the exact ZIP against the current official Hyper-V ZIP row before import."
+        Write-Log "         A completion record does not verify an existing extracted disk or the guest OS."
+        Write-Log "         Follow Module 1 section 3.3; keep the source ZIP for inspection."
     } catch {
         Write-Log "WARNING: the appliance download did not complete ($($_.Exception.Message))."
         Write-Log "         Module 1 section 3.3 downloads it by hand; nothing else is affected."
@@ -1391,6 +1487,12 @@ if ($applianceJob) {
         Remove-Job -Job $applianceJob -Force -ErrorAction SilentlyContinue
     }
 }
+
+# A download/verifier can take time: never mark completion on an old readiness snapshot.
+$hostPrep['GuestCommunication'] = @(Assert-LabGuestCommunication)
+Assert-LabSourceWorkloads
+$hostPrep['GuestCommunicationCheckedUtc'] = [DateTime]::UtcNow.ToString('o')
+$hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
 
 @{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
    TrafficScript = $trafficScriptPath } |

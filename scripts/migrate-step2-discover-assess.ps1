@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Step 2: Build or verify the Azure Migrate appliance, discover the four workloads and assess them.
 
@@ -35,31 +35,53 @@
 .PARAMETER SourceResourceGroup
     The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
 
+.PARAMETER TargetResourceGroup
+    Optional existing landing zone. Derives assessment region from its actual target VNet,
+    never from resource-group metadata; checks an explicitly supplied Location matches.
+
 .PARAMETER Location
-    Target Azure region used by the assessment. Prompted when not supplied (example: eastus).
+    Assessment target region chosen in step 1 (alias TargetLocation). If no target group is
+    supplied, explicitly prompts/validates against Get-AzLocation; never inherits source region.
 
 .PARAMETER MigrateProjectName
     Name of the Azure Migrate project (from Step 1). Prompted when not supplied (example: ces-migrate-01).
+
+.PARAMETER AssessmentMode
+    Classic (default) uses the grouped Azure VM MachineAssessment 2024-01-15 workflow.
+    Modern is explicit experimental opt-in, deferred pending further API information.
+    Neither mode silently falls back to the other. No application/PaaS retooling is performed.
+
+.PARAMETER AssessmentProjectName
+    Optional explicit existing classic assessment backend in the same subscription/resource group.
+    Normally resolved from the selected Migrate project's assessment solution, never inferred from
+    MigrateProjectName. Required when the solution has no verifiable backend reference.
+
+.PARAMETER AssessmentGroupName
+    Defaults to AllServers-Group. Existing groups are reused only with exactly the four workloads;
+    different or empty existing groups are preserved. Choose an unused name to create your own group.
+
+.PARAMETER AssessmentName
+    Defaults to Workshop-Assessment. Matching existing assessments are reused, never overwritten;
+    choose an unused name after reviewing a stale or differently configured assessment.
 
 .PARAMETER HyperVHostVMName
     Name of the Hyper-V host Azure VM. Prompted when not supplied (example: HyperVHost).
 
 .PARAMETER ApplianceVMName
-    Name of the appliance VM inside Hyper-V; must match the name used for the project key.
+    Name of the appliance VM inside Hyper-V. The Azure registration name is separate and must be alphanumeric, at most 14 characters.
     Prompted when not supplied (example: MigrateAppl).
 
 .PARAMETER ApplianceDownloadUrl
     Needed only when the appliance VM does not exist yet. The VHD download link shown in the project. Prompted when not supplied.
 
 .PARAMETER ApplianceSha256
-    Needed only when the appliance VM does not exist yet. The SHA256 Microsoft publishes for that archive, or SKIP (not recommended).
+    Needed only when the appliance VM does not exist yet. The current SHA256 Microsoft publishes for the Hyper-V ZIP. Required before extraction/import; no bypass.
 
 .PARAMETER DownloadTimeoutMinutes
     Needed only when the appliance VM does not exist yet. Minutes to wait for the download before asking whether to keep waiting.
 
 .PARAMETER ApplianceGeneration
-    Only needed for a .vhdx: 1 or 2, per the current Microsoft article.
-    A .vhd is always imported as Generation 1.
+    Optional compatibility assertion (1 or 2). The exported configuration determines generation; a mismatching assertion stops import.
 
 .PARAMETER AssessmentCurrency
     Currency for the assessment. Prompted when not supplied (example: USD).
@@ -82,7 +104,7 @@ MODULE COVERAGE
                             waits: the key is issued interactively in the portal.
       Module 1, section 3.2 Confirm the appliance store.
       Module 1, section 3.3 Download and verify the archive (already staged by deploy-lab.ps1).
-      Module 1, section 3.4 Import the VHD as a VM, including the resize to 80 GB.
+      Module 1, section 3.4 Copy-import the published VM configuration; check capacity without resizing.
       Module 1, section 3.5 First boot - printed as manual steps; the console is yours.
       Module 1, section 4   Register and discover - printed as manual steps. Registration is a
                             browser sign-in on the appliance and cannot be driven from here.
@@ -96,10 +118,20 @@ MODULE COVERAGE
 param(
     [string]$SourceResourceGroup,
 
+    [string]$TargetResourceGroup,
 
-    [string]$Location,
+    [Alias('TargetLocation')][string]$Location,
 
     [string]$MigrateProjectName,
+
+    [ValidateSet('Modern', 'Classic')]
+    [string]$AssessmentMode = 'Classic',
+
+    [string]$AssessmentProjectName,
+
+    [string]$AssessmentGroupName = 'AllServers-Group',
+
+    [string]$AssessmentName = 'Workshop-Assessment',
 
     [string]$HyperVHostVMName,
 
@@ -291,7 +323,7 @@ function Test-LabParameterValue {
             if ($Value -match '[\s"''`]' -or -not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https') { return 'Enter the full https:// download link, without quotes or spaces.' }
         }
         'Sha256' {
-            if ($Value -ne 'SKIP' -and $Value -notmatch '^[0-9A-Fa-f]{64}$') { return 'Enter the 64-character SHA256 value Microsoft publishes for this file, or SKIP.' }
+            if ($Value -notmatch '^[0-9A-Fa-f]{64}$') { return 'Enter the current official 64-character Hyper-V ZIP SHA256; no bypass.' }
         }
         'Generation' {
             if ($Value -notin @('1', '2')) { return 'Enter 1 or 2, matching the generation stated in the current Microsoft article for this VHD.' }
@@ -698,6 +730,1065 @@ function Wait-LabBeforeExit {
     } catch { }
 }
 
+function Get-LabAssessmentField {
+    param([AllowNull()]$Object, [string]$Name, [switch]$PreserveArray)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($PreserveArray) { return ,($Object[$Name]) }
+        return $Object[$Name]
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    if ($PreserveArray) { return ,($property.Value) }
+    return $property.Value
+}
+
+function Get-LabAssessmentContextStamp {
+    param([AllowNull()]$Context)
+    $subscription = Get-LabAssessmentField $Context 'Subscription'
+    $tenant = Get-LabAssessmentField $Context 'Tenant'
+    $account = Get-LabAssessmentField $Context 'Account'
+    $environment = Get-LabAssessmentField $Context 'Environment'
+    $parts = @((Get-LabAssessmentField $subscription 'Id'), (Get-LabAssessmentField $tenant 'Id'),
+        (Get-LabAssessmentField $account 'Id'), (Get-LabAssessmentField $account 'Type'),
+        (Get-LabAssessmentField $environment 'Name'), (Get-LabAssessmentField $environment 'ResourceManagerUrl'),
+        (Get-LabAssessmentField $environment 'ActiveDirectoryAuthority'))
+    foreach ($part in $parts) {
+        if ($part -isnot [string] -or [string]::IsNullOrWhiteSpace($part) -or $part.Contains('|')) {
+            throw 'Assessment context is incomplete. Verify the original lab sign-in, subscription, tenant and Azure environment, then rerun Step 2.'
+        }
+    }
+    return ($parts -join '|')
+}
+
+function Invoke-LabAssessmentRequest {
+    param([Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet('GET', 'PUT', 'POST')][string]$Method,
+        [AllowNull()][string]$Payload, [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$PinnedContext,
+        [Parameter(Mandatory = $true)][string]$ResourceGroup)
+
+    $result = [pscustomobject]@{ Success = $false; StatusCode = 0; Data = $null; Pending = $false; RetryAfter = 15;
+        FailureKind = 'Context'; ErrorCode = ''; Message = 'Assessment context could not be verified. Restore the original lab context and rerun Step 2.' }
+    try {
+        if ((Get-LabAssessmentContextStamp $Context) -cne $PinnedContext -or
+            (Get-LabAssessmentContextStamp (Get-AzContext -ErrorAction Stop)) -cne $PinnedContext) { return $result }
+    } catch { return $result }
+
+    if (-not (Test-LabAssessmentPath -Path $Path -Method $Method -Context $Context -ResourceGroup $ResourceGroup)) {
+        $result.FailureKind = 'Path'; $result.Message = 'Assessment request path is outside the selected lab subscription or expected assessment resource. No request sent.'
+        return $result
+    }
+    if (-not (Get-Command -Name 'Invoke-AzRestMethod' -ErrorAction SilentlyContinue)) {
+        $result.FailureKind = 'Prerequisite'; $result.Message = 'Invoke-AzRestMethod is unavailable. Update Az.Accounts (Update-Module Az.Accounts), open a new PowerShell session, verify the lab context and rerun Step 2.'
+        return $result
+    }
+
+    # Az.Accounts owns token acquisition/refresh and the current cloud ARM endpoint. Never unwrap or log tokens.
+    $parameters = @{ Path = $Path; Method = $Method; DefaultProfile = $Context; ErrorAction = 'Stop' }
+    if ($Method -in @('PUT', 'POST')) { $parameters.Payload = $Payload }
+    $data = $null; $requestThrew = $false; $rawFailure = ''
+    try {
+        $response = Invoke-AzRestMethod @parameters
+        $status = Get-LabAssessmentField $response 'StatusCode'
+        $numericStatus = 0
+        if ($null -eq $status -or -not [int]::TryParse([string]$status, [ref]$numericStatus) -or
+            $numericStatus -lt 100 -or $numericStatus -gt 599) {
+            $result.FailureKind = 'Response'; $result.Message = 'ARM returned no valid HTTP status. Request outcome is unverified; check the portal before retrying a write.'
+            return $result
+        }
+        $result.StatusCode = $numericStatus
+        $headers = Get-LabAssessmentField $response 'Headers'
+        $retryAfter = 0
+        if ([int]::TryParse([string](Get-LabAssessmentField $headers 'Retry-After'), [ref]$retryAfter) -and $retryAfter -gt 0) {
+            $result.RetryAfter = [Math]::Min(60, $retryAfter)
+        }
+        $content = Get-LabAssessmentField $response 'Content'
+        if (-not [string]::IsNullOrWhiteSpace([string]$content)) {
+            try { $data = ConvertFrom-Json -InputObject $content -ErrorAction Stop }
+            catch {
+                if ($numericStatus -ge 200 -and $numericStatus -lt 300) {
+                    $result.FailureKind = 'Response'; $result.Message = 'ARM returned unreadable JSON. Request outcome is unverified; check the portal before retrying a write.'
+                    return $result
+                }
+                $data = $null
+            }
+            if ($null -eq $data -or $data -is [string] -or $data -is [ValueType] -or $data -is [array]) {
+                if ($numericStatus -ge 200 -and $numericStatus -lt 300) {
+                    $result.FailureKind = 'Response'; $result.Message = 'ARM returned an unexpected JSON shape. Request outcome is unverified; check the portal before retrying a write.'
+                    return $result
+                }
+                $data = $null
+            }
+        }
+    } catch {
+        $requestThrew = $true
+        $exceptionResponse = Get-LabAssessmentField (Get-LabAssessmentField $_ 'Exception') 'Response'
+        $exceptionStatus = 0
+        if ([int]::TryParse([string](Get-LabAssessmentField $exceptionResponse 'StatusCode'), [ref]$exceptionStatus) -and
+            $exceptionStatus -ge 100 -and $exceptionStatus -le 599) { $result.StatusCode = $exceptionStatus }
+        # Parse only a structured service error, never display the exception/request/headers.
+        $details = Get-LabAssessmentField $_ 'ErrorDetails'
+        $rawFailure = [string](Get-LabAssessmentField $details 'Message')
+        try { $data = ConvertFrom-Json -InputObject $rawFailure -ErrorAction Stop } catch { $data = $null }
+        $rawFailure += ' ' + [string](Get-LabAssessmentField (Get-LabAssessmentField $_ 'Exception') 'Message')
+    }
+    $serviceError = Get-LabAssessmentField $data 'error'
+    $code = [string](Get-LabAssessmentField $serviceError 'code')
+    if ($code -match '^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$' -and $code -notmatch '(?i)^eyJ|bearer|password|secret|credential|[a-zA-Z0-9_+/=-]{64,}') { $result.ErrorCode = $code }
+    $authenticationFailed = $result.StatusCode -eq 401 -or $code -match '(?i)Authentication|TokenExpired|ExpiredToken|LoginRequired' -or
+        ($requestThrew -and $rawFailure -match '(?i)InvalidAuthenticationToken|ExpiredAuthenticationToken|Connect-AzAccount|authentication|\b401\b')
+    if ($requestThrew -or $serviceError -or $result.StatusCode -lt 200 -or $result.StatusCode -ge 300) {
+        $result.FailureKind = if ($authenticationFailed) { 'Authentication' } elseif ($result.StatusCode -eq 403 -or $code -match '(?i)Authorization|Forbidden') { 'Authorization' }
+            elseif ($code -match '^(InvalidApiVersionParameter|NoRegisteredProviderFound|InvalidResourceType|UnsupportedApiVersion)$') { 'ApiVersion' }
+            elseif ($code -match '^(ParentResourceNotFound|ResourceGroupNotFound|SubscriptionNotFound)$') { 'ScopeNotFound' }
+            elseif ($result.StatusCode -eq 404 -and $Method -eq 'GET' -and
+                ($code -in @('ResourceNotFound','NotFound') -or
+                 ($code -ieq 'GroupNotFound' -and $Path -match '/assessmentProjects/[^/?]+/groups/[^/?]+\?api-version=2024-01-15$') -or
+                 ($code -ieq 'AssessmentNotFound' -and $Path -match '/assessmentProjects/[^/?]+/(?:groups/[^/?]+/)?assessments/[^/?]+\?api-version=(?:2024-01-15|2024-03-03-preview)$'))) { 'NotFound' }
+            elseif ($result.StatusCode -eq 409) { 'Conflict' }
+            elseif ($result.StatusCode -in @(408, 429) -or $result.StatusCode -ge 500) { 'Transient' } elseif ($requestThrew) { 'Unknown' } else { 'Service' }
+        $result.Message = 'ARM request failed. Check the portal and the reported error code; do not assume the write completed or that no assessment exists.'
+        $message = [string](Get-LabAssessmentField $serviceError 'message')
+        if ($message -and $message.Length -le 400 -and $message -notmatch '(?i)bearer|token|password|secret|authorization|credential|eyJ|[a-zA-Z0-9_+/=-]{64,}|[\x00-\x1f]') {
+            $result.Message = $message
+        }
+        if ($authenticationFailed) { $result.Message = 'Azure authentication was rejected. Stop here; run Connect-AzAccount for the original lab tenant/environment, explicitly select the original lab subscription with Set-AzContext, then rerun Step 2. No automatic sign-in or write retry was attempted.' }
+        elseif ($result.FailureKind -eq 'Authorization') { $result.Message = 'Azure denied authorization. Verify assessment/group write permissions in the selected project and subscription; reconnecting alone does not grant RBAC access.' }
+        elseif ($result.FailureKind -eq 'ApiVersion') { $result.Message = 'Azure rejected this documented endpoint/API version. Stop and review the provider metadata and service error code for this route; no preview fallback, route conversion or automatic write retry was attempted.' }
+        elseif ($result.FailureKind -eq 'ScopeNotFound') { $result.Message = 'Azure reports the parent resource or scope is missing. Stop and reverify the existing assessment backend; no replacement project or child write was attempted.' }
+        return $result
+    }
+    if ($Method -eq 'GET' -and $result.StatusCode -ne 202 -and $null -eq $data) {
+        $result.FailureKind = 'Response'; $result.Message = 'ARM returned no JSON data for the read; assessment state is unverified.'
+        return $result
+    }
+    $properties = Get-LabAssessmentField $data 'properties'
+    $provisioning = [string](Get-LabAssessmentField $properties 'provisioningState')
+    if ($provisioning -match '^(Failed|Canceled|Cancelled)$') {
+        $result.FailureKind = 'Service'; $result.Message = 'ARM reports failed/canceled provisioning. Review the project in the portal before retrying Step 2.'
+        return $result
+    }
+    $result.Success = $true; $result.FailureKind = ''; $result.Message = ''; $result.Data = $data
+    $result.Pending = $result.StatusCode -eq 202 -or ($provisioning -and $provisioning -ne 'Succeeded')
+    return $result
+}
+
+function ConvertTo-LabAssessmentCanonicalId {
+    param([AllowNull()][string]$Id)
+    if ($null -eq $Id) { return '' }
+    return $Id.Replace(' ', '%20')
+}
+
+function ConvertTo-LabAssessmentSegment {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 260 -or
+        $Name -notmatch '^[-a-zA-Z0-9_.() ]+$' -or $Name -in @('.', '..') -or $Name -ne $Name.Trim()) {
+        throw 'Assessment resource name is blank or outside the supported safe ARM name characters.'
+    }
+    return [Uri]::EscapeDataString($Name)
+}
+
+function Test-LabAssessmentPath {
+    param([string]$Path, [string]$Method, $Context, [string]$ResourceGroup)
+    try { $rg = [regex]::Escape((ConvertTo-LabAssessmentSegment $ResourceGroup)) } catch { return $false }
+    $sub = [regex]::Escape([string](Get-LabAssessmentField (Get-LabAssessmentField $Context 'Subscription') 'Id'))
+    $name = '(?:[-a-zA-Z0-9_.()]|%20)+'
+    $root = '/subscriptions/' + $sub
+    $scope = $root + '/resourceGroups/' + $rg + '/providers/Microsoft\.Migrate/'
+    if ($Path -match '[\x00-\x20#\\]' -or $Path -match '/\.{1,2}(?:/|\?)') { return $false }
+    if ($Method -eq 'GET' -and $Path -match ('^' + $root + '/providers/Microsoft\.Migrate\?api-version=2021-04-01$')) { return $true }
+    if ($Method -eq 'GET' -and $Path -match ('^' + $scope + 'migrateProjects/' + $name + '/solutions/Servers-Assessment-ServerAssessment\?api-version=2018-09-01-preview$')) { return $true }
+    $project = $scope + 'assessmentProjects/' + $name
+    $group = $project + '/groups/' + $name
+    $assessment = $group + '/assessments/' + $name
+    $query = '\?api-version=2024-01-15'
+    $modern = $project + '/assessments/' + $name
+    $modernQuery = '\?api-version=2024-03-03-preview'
+    if ($Method -in @('GET','PUT') -and $Path -match ('^' + $modern + $modernQuery + '$')) { return $true }
+    if ($Method -eq 'PUT') { return $Path -match ('^(?:' + $group + '|' + $assessment + ')' + $query + '$') }
+    if ($Method -eq 'POST') { return $Path -match ('^' + $group + '/updateMachines' + $query + '$') }
+    if ($Method -ne 'GET') { return $false }
+    if ($Path -match ('^' + $project + '\?api-version=2023-03-15$')) { return $true }
+    if ($Path -match ('^(?:' + $group + '|' + $assessment + ')' + $query + '$')) { return $true }
+    # Only list endpoints can carry continuation metadata; never accept a filter or a new resource path.
+    $list = '(?:' + $scope + 'assessmentProjects|' + $project + '/machines|' + $assessment + '/assessedMachines|' + $modern + '/assessedMachines)'
+    $parts = $Path.Split('?')
+    if ($parts.Count -ne 2 -or $parts[0] -notmatch ('^' + $list + '$')) { return $false }
+    $listVersion = if ($parts[0] -match ('^' + $scope + 'assessmentProjects$')) { '2023-03-15' }
+        elseif ($parts[0] -match ('^' + $modern + '/assessedMachines$')) { '2024-03-03-preview' } else { '2024-01-15' }
+    $keys = @{}; $hasContinuation = $false
+    foreach ($pair in $parts[1].Split('&')) {
+        $entry = $pair.Split([char[]]'=', 2)
+        if ($entry.Count -ne 2 -or $keys.ContainsKey($entry[0])) { return $false }
+        $keys[$entry[0]] = $true
+        switch ($entry[0]) {
+            'api-version' { if ($entry[1] -cne $listVersion) { return $false } }
+            'pageSize' { if ($entry[1] -notmatch '^[1-9][0-9]{0,3}$') { return $false } }
+            'totalRecordCount' { if ($entry[1] -notmatch '^[0-9]{1,9}$') { return $false } }
+            { $_ -in @('continuationToken','skipToken','$skipToken') } {
+                if ($hasContinuation -or $entry[1] -notmatch '^[-a-zA-Z0-9_.~%+=]+$' -or $entry[1] -match '%(?![0-9a-fA-F]{2})') { return $false }
+                $hasContinuation = $true
+            }
+            default { return $false }
+        }
+    }
+    return $keys.ContainsKey('api-version')
+}
+
+function ConvertTo-LabAssessmentNextPath {
+    param([string]$Link, [string]$InitialPath, $Context, [string]$ResourceGroup)
+    if ([string]::IsNullOrWhiteSpace($Link) -or $Link -match '[\x00-\x20#\\]' -or $Link.StartsWith('//')) {
+        throw 'Assessment pagination returned an unsafe link; no linked request sent.'
+    }
+    $path = $Link
+    if (-not $Link.StartsWith('/')) {
+        $uri = $null; $arm = $null
+        if (-not [Uri]::TryCreate($Link, [UriKind]::Absolute, [ref]$uri) -or
+            -not [Uri]::TryCreate([string](Get-LabAssessmentField (Get-LabAssessmentField $Context 'Environment') 'ResourceManagerUrl'), [UriKind]::Absolute, [ref]$arm) -or
+            $uri.Scheme -ne 'https' -or $uri.Scheme -ne $arm.Scheme -or $uri.Authority -ine $arm.Authority -or $uri.UserInfo -or $uri.Fragment) {
+            throw 'Assessment pagination left the pinned cloud ARM endpoint; no linked request sent.'
+        }
+        # Keep the raw path to reject traversal that System.Uri would otherwise normalize away.
+        $path = $Link.Substring($Link.IndexOf('/', $Link.IndexOf('://') + 3))
+    }
+    $initialVersion = [regex]::Match($InitialPath, '[?&]api-version=([^&]+)(?:&|$)').Groups[1].Value
+    $nextVersion = [regex]::Match($path, '[?&]api-version=([^&]+)(?:&|$)').Groups[1].Value
+    if (-not $initialVersion -or $nextVersion -cne $initialVersion -or
+        $path.Split('?')[0] -ine $InitialPath.Split('?')[0] -or
+        -not (Test-LabAssessmentPath -Path $InitialPath -Method GET -Context $Context -ResourceGroup $ResourceGroup) -or
+        -not (Test-LabAssessmentPath -Path $path -Method GET -Context $Context -ResourceGroup $ResourceGroup)) {
+        throw 'Assessment pagination changed resource scope or API/query contract; no linked request sent.'
+    }
+    return $path
+}
+
+function Assert-LabAssessmentResponse {
+    param($Response, [string]$Stage)
+    if (-not $Response.Success) {
+        throw "${Stage} failed (HTTP $($Response.StatusCode); code $($Response.ErrorCode); $($Response.FailureKind)): $($Response.Message)"
+    }
+}
+
+function Invoke-LabAssessmentRead {
+    param([string]$Path, [hashtable]$Session)
+    $response = Invoke-LabAssessmentRequest -Path $Path -Method GET @Session
+    if (-not $response.Success -and $response.FailureKind -eq 'Transient') {
+        Write-Host '  Assessment: transient GET failure; one bounded read retry, no write resubmission.' -ForegroundColor Yellow
+        Start-Sleep -Seconds $response.RetryAfter
+        $response = Invoke-LabAssessmentRequest -Path $Path -Method GET @Session
+    }
+    return $response
+}
+
+function Get-LabAssessmentCollection {
+    param([string]$Path, [hashtable]$Session)
+    $items = @(); $seen = @{}; $next = $Path
+    while ($next) {
+        if ($seen.ContainsKey($next) -or $seen.Count -ge 100) { throw 'Assessment pagination repeated or exceeded 100 pages; collection remains unverified.' }
+        $seen[$next] = $true
+        $response = Invoke-LabAssessmentRead -Path $next -Session $Session
+        Assert-LabAssessmentResponse $response 'Assessment collection GET'
+        $collection = $response.Data.PSObject.Properties['value']
+        $value = $null
+        # Read the property directly: a helper pipeline unwraps singleton arrays and loses empty arrays.
+        if ($null -ne $collection) { $value = $collection.Value }
+        if ($response.Pending -or $null -eq $collection -or $null -eq $value -or $value -isnot [array]) { throw 'Assessment collection GET is pending or returned an invalid collection; no partial collection accepted.' }
+        $items += $value
+        if ($items.Count -gt 100000) { throw 'Assessment collection exceeded the safe inventory bound.' }
+        $link = Get-LabAssessmentField $response.Data 'nextLink'
+        $next = if ([string]::IsNullOrWhiteSpace([string]$link)) { '' } else {
+            ConvertTo-LabAssessmentNextPath -Link $link -InitialPath $Path -Context $Session.Context -ResourceGroup $Session.ResourceGroup
+        }
+    }
+    return ,$items
+}
+
+function Get-LabAssessmentCatalog {
+    param($Provider, [ValidateSet('Modern','Classic')][string]$Mode = 'Classic')
+    if ((Get-LabAssessmentField $Provider 'namespace') -ine 'Microsoft.Migrate' -or
+        (Get-LabAssessmentField $Provider 'registrationState') -ine 'Registered') {
+        throw 'Microsoft.Migrate provider is not verified registered. No provider registration or assessment write attempted.'
+    }
+    $relevant = @{
+        'assessmentProjects' = 'assessmentProjects'; 'assessmentProjects/machines' = 'assessmentProjects/machines'
+        'assessmentProjects/groups' = 'assessmentProjects/groups'; 'migrateProjects/solutions' = 'migrateProjects/solutions'
+    }
+    $required = @('assessmentProjects')
+    if ($Mode -eq 'Modern') {
+        $relevant['assessmentProjects/assessments'] = 'assessmentProjects/assessments'
+        $required += 'assessmentProjects/assessments'
+    } else {
+        $relevant['assessmentProjects/groups/assessments'] = 'assessmentProjects/groups/assessments'
+        $relevant['assessmentProjects/groups/assessments/assessedMachines'] = 'assessmentProjects/groups/assessments/assessedMachines'
+    }
+    $types = $null
+    if ($Provider -is [System.Collections.IDictionary]) { $types = $Provider['resourceTypes'] }
+    elseif ($null -ne $Provider) {
+        $property = $Provider.PSObject.Properties['resourceTypes']
+        if ($null -ne $property) { $types = $property.Value }
+    }
+    if ($types -isnot [array]) { throw 'Microsoft.Migrate provider metadata field resourceTypes must be an array. No write attempted.' }
+    $catalog = [System.Collections.Hashtable]::new([StringComparer]::OrdinalIgnoreCase); $duplicates = 0
+    for ($rowIndex = 0; $rowIndex -lt $types.Count; $rowIndex++) {
+        $row = $types[$rowIndex]; $rawType = Get-LabAssessmentField $row 'resourceType'
+        # Unused provider routes cannot establish or invalidate this assessment contract.
+        if ($rawType -isnot [string] -or -not $relevant.ContainsKey($rawType.Trim())) { continue }
+        $type = $relevant[$rawType.Trim()]
+        $versions = $null
+        # Preserve the JSON array shape, including empty/singleton arrays, without pipeline unrolling.
+        if ($row -is [System.Collections.IDictionary]) { $versions = $row['apiVersions'] }
+        else {
+            $property = $row.PSObject.Properties['apiVersions']
+            if ($null -ne $property) { $versions = $property.Value }
+        }
+        $problem = ''
+        if ($versions -isnot [array]) { $problem = 'apiVersions must be an array' }
+        elseif ($versions.Count -eq 0) { $problem = 'apiVersions must not be empty' }
+        $rowVersions = [System.Collections.Hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+        if (-not $problem) {
+            for ($versionIndex = 0; $versionIndex -lt $versions.Count; $versionIndex++) {
+                $version = $versions[$versionIndex]
+                if ($version -isnot [string]) { $problem = "apiVersions[$versionIndex] must be a string"; break }
+                $version = $version.Trim()
+                if ($version.Length -gt 128 -or $version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$') {
+                    $problem = "apiVersions[$versionIndex] must be a bounded nonempty metadata token"; break
+                }
+                if ($rowVersions.ContainsKey($version)) { $duplicates++ }
+                else { $rowVersions[$version] = $true }
+            }
+        }
+        if ($problem) {
+            $diagnostic = "Microsoft.Migrate provider metadata resourceTypes[$rowIndex] ($type): $problem."
+            if ($required -contains $type) { throw "$diagnostic No write attempted." }
+            Write-Host "  Assessment: $diagnostic Optional catalog row ignored; validating the fixed documented endpoint read-only before its associated writes; support remains unverified." -ForegroundColor Yellow
+            continue
+        }
+        if ($catalog.ContainsKey($type)) { $duplicates++ }
+        else { $catalog[$type] = @() }
+        foreach ($version in $rowVersions.Keys) {
+            if ($catalog[$type] -contains $version) { $duplicates++ }
+            else { $catalog[$type] += $version }
+        }
+    }
+    if ($duplicates -gt 0) {
+        Write-Host "  Assessment: normalized $duplicates harmless duplicate relevant catalog rows/API-version entries; endpoint/profile versions remain fixed." -ForegroundColor Gray
+    }
+    return $catalog
+}
+
+function Assert-LabAssessmentProvider {
+    param($Provider, [ValidateSet('Modern','Classic')][string]$Mode = 'Classic', [switch]$PassThru)
+    $catalog = Get-LabAssessmentCatalog -Provider $Provider -Mode $Mode
+    # The provider catalog is not an exhaustive inventory of nested assessment routes.
+    $requirements = [ordered]@{
+        'assessmentProjects' = '2023-03-15'; 'assessmentProjects/machines' = '2024-01-15'
+        'assessmentProjects/groups' = '2024-01-15'; 'assessmentProjects/groups/assessments' = '2024-01-15'
+        'assessmentProjects/groups/assessments/assessedMachines' = '2024-01-15'
+        'migrateProjects/solutions' = '2018-09-01-preview'
+    }
+    if (-not $catalog.ContainsKey('assessmentProjects') -or $catalog['assessmentProjects'] -notcontains '2023-03-15') {
+        throw 'Microsoft.Migrate provider metadata resourceType assessmentProjects field apiVersions does not advertise selected parent API 2023-03-15. No version fallback or write attempted.'
+    }
+    foreach ($type in $requirements.Keys) {
+        if ($type -eq 'assessmentProjects' -or ($Mode -eq 'Modern' -and $type -like 'assessmentProjects/groups/assessments*')) { continue }
+        if (-not $catalog.ContainsKey($type)) {
+            Write-Host "  Assessment: $type not advertised in the provider catalog; validating documented endpoint API $($requirements[$type]) read-only before its associated writes. Catalog absence is not proof of unsupported API." -ForegroundColor Yellow
+        } elseif ($catalog[$type] -notcontains $requirements[$type]) {
+            Write-Host "  Assessment: catalog row $type does not advertise documented API $($requirements[$type]); endpoint support is not verified. Validating the fixed documented endpoint read-only; no preview fallback." -ForegroundColor Yellow
+        }
+    }
+    if ($PassThru) { return $catalog }
+}
+
+function Get-LabAssessmentProfile {
+    param($Provider, [ValidateSet('Modern','Classic')][string]$Mode)
+    $catalog = Assert-LabAssessmentProvider -Provider $Provider -Mode $Mode -PassThru
+    if ($Mode -eq 'Classic') { return [pscustomobject]@{ Mode = 'Classic'; Version = '2024-01-15' } }
+    # Extend only with separately reviewed public request/response contracts, never date-sort APIs.
+    $profiles = @([pscustomobject]@{ Mode = 'Modern'; Version = '2024-03-03-preview' })
+    $versions = @()
+    if ($catalog.ContainsKey('assessmentProjects/assessments')) { $versions = $catalog['assessmentProjects/assessments'] }
+    $unimplemented = @($versions | Where-Object { $_ -notin @($profiles | ForEach-Object { $_.Version }) })
+    if ($unimplemented.Count -gt 0) {
+        Write-Host "  Assessment: assessmentProjects/assessments field apiVersions contains $($unimplemented.Count) unverified/unimplemented tokens; skipped, not selected by date." -ForegroundColor Yellow
+    }
+    if ($versions -contains '2025-09-09-preview') {
+        Write-Host '  Assessment: skipped advertised 2025-09-09-preview; unverified/unimplemented modern contract, not selected by date.' -ForegroundColor Yellow
+    }
+    foreach ($profile in $profiles) {
+        if ($versions -contains $profile.Version) {
+            Write-Host "  Assessment: Modern PREVIEW profile $($profile.Version) selected from actual provider metadata; no feature registration or Classic fallback." -ForegroundColor Yellow
+            return $profile
+        }
+    }
+    throw 'Microsoft.Migrate provider metadata resourceType assessmentProjects/assessments field apiVersions does not advertise Modern API 2024-03-03-preview. Stop before group writes; no automatic downgrade. Review service availability or explicitly choose -AssessmentMode Classic.'
+}
+
+function Resolve-LabAssessmentProject {
+    param([string]$MigrateProjectName, [string]$ExplicitName, [hashtable]$Session)
+    $sub = [string](Get-LabAssessmentField (Get-LabAssessmentField $Session.Context 'Subscription') 'Id')
+    $base = '/subscriptions/' + $sub + '/resourceGroups/' + (ConvertTo-LabAssessmentSegment $Session.ResourceGroup) + '/providers/Microsoft.Migrate'
+    Write-Host "  Assessment: resolving backend linked to Migrate project '$MigrateProjectName' (read-only)." -ForegroundColor Gray
+    $solutionId = $base + '/migrateProjects/' + (ConvertTo-LabAssessmentSegment $MigrateProjectName) + '/solutions/Servers-Assessment-ServerAssessment'
+    $solution = Invoke-LabAssessmentRead -Path ($solutionId + '?api-version=2018-09-01-preview') -Session $Session
+    $reference = ''
+    if ($solution.Success) {
+        if ($solution.Pending -or (ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $solution.Data 'id')) -ine $solutionId) { throw 'Selected Migrate project solution response identity/state is unverified.' }
+        $details = Get-LabAssessmentField (Get-LabAssessmentField $solution.Data 'properties') 'details'
+        $reference = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField (Get-LabAssessmentField $details 'extendedDetails') 'projectId')
+    } elseif ($solution.FailureKind -ne 'NotFound') { Assert-LabAssessmentResponse $solution 'Assessment solution GET' }
+    $pattern = '^' + [regex]::Escape($base) + '/assessmentProjects/((?:[-a-zA-Z0-9_.()]|%20)+)$'
+    $linkedName = ''
+    if ($reference -match $pattern -and $reference -notmatch '/\.{1,2}$') { $linkedName = [Uri]::UnescapeDataString($Matches[1]) }
+    if ($ExplicitName) { $null = ConvertTo-LabAssessmentSegment $ExplicitName }
+    if ($linkedName -and $ExplicitName -and $linkedName -ine $ExplicitName) {
+        throw 'Explicit AssessmentProjectName conflicts with the selected Migrate project solution reference. Existing projects are preserved.'
+    }
+    $name = if ($linkedName) { $linkedName } else { $ExplicitName }
+    if (-not $name) {
+        Write-Host '  Assessment: no verifiable solution projectId. Existing same-scope assessment backends (not automatically selected):' -ForegroundColor Yellow
+        $projects = Get-LabAssessmentCollection -Path ($base + '/assessmentProjects?api-version=2023-03-15') -Session $Session
+        foreach ($candidate in $projects) {
+            if ((ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $candidate 'id')) -notmatch $pattern -or
+                (Get-LabAssessmentField $candidate 'type') -ine 'Microsoft.Migrate/assessmentProjects') { throw 'Assessment-project listing contains a foreign or malformed resource; selection stopped.' }
+            $candidateName = [Uri]::UnescapeDataString($Matches[1])
+            $props = Get-LabAssessmentField $candidate 'properties'
+            Write-Host "    $candidateName | region $(Get-LabAssessmentField $candidate 'location') | type Microsoft.Migrate/assessmentProjects | $(Get-LabAssessmentField $props 'projectStatus') / $(Get-LabAssessmentField $props 'provisioningState')" -ForegroundColor Gray
+        }
+        if ($projects.Count -eq 0) { Write-Host '    No existing classic assessment backend was returned.' -ForegroundColor Yellow }
+        throw 'Backend association is missing or malformed. Review the listed actual names and rerun Step 2 with -AssessmentProjectName <existing-name>; even one candidate is never selected silently. No project is created.'
+    }
+    if (-not $linkedName) { Write-Host '  Assessment: explicit backend selected without a verified solution link; all four source ARM IDs must match its inventory before any write.' -ForegroundColor Yellow }
+    Write-Host "  Assessment: resolved assessment project '$name'; parent GET API 2023-03-15, shared machine/group API 2024-01-15 (read-only verification before writes)." -ForegroundColor Cyan
+    $projectId = $base + '/assessmentProjects/' + (ConvertTo-LabAssessmentSegment $name)
+    $project = Invoke-LabAssessmentRead -Path ($projectId + '?api-version=2023-03-15') -Session $Session
+    Assert-LabAssessmentResponse $project 'Resolved assessment project GET'
+    $props = Get-LabAssessmentField $project.Data 'properties'
+    if ($project.Pending -or (ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $project.Data 'id')) -ine $projectId -or
+        (Get-LabAssessmentField $project.Data 'type') -ine 'Microsoft.Migrate/assessmentProjects' -or
+        (Get-LabAssessmentField $props 'provisioningState') -ine 'Succeeded' -or (Get-LabAssessmentField $props 'projectStatus') -ine 'Active') {
+        throw 'Resolved assessment backend identity/type or Active/Succeeded state is unverified. No project or VM recreation attempted.'
+    }
+    return [pscustomobject]@{ Name = $name; Id = $projectId }
+}
+
+function Get-LabAssessmentMachineMap {
+    param([object[]]$Workloads, [object[]]$Inventory, [string]$ProjectId)
+    $expected = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    $sourceScope = $ProjectId.Substring(0, $ProjectId.IndexOf('/providers/', [StringComparison]::OrdinalIgnoreCase))
+    $sourcePattern = '^' + [regex]::Escape($sourceScope) + '/providers/Microsoft\.OffAzure/HyperVSites/(?:[-a-zA-Z0-9_.()]|%20)+/machines/(?:[-a-zA-Z0-9_.()]|%20)+$'
+    $machinePattern = '^' + [regex]::Escape($ProjectId) + '/machines/(?:[-a-zA-Z0-9_.()]|%20)+$'
+    if ($Workloads.Count -ne 4) { throw 'Assessment requires exactly the four selected workload records.' }
+    $seenSources = @{}; $seenAssessment = @{}; $seenNames = @{}; $mapped = @()
+    foreach ($workload in $Workloads) {
+        $source = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $workload 'Id'); $name = [string](Get-LabAssessmentField $workload 'DisplayName')
+        if ($source -notmatch $sourcePattern -or $source -match '/\.{1,2}(?:/|$)' -or $name -notin $expected -or
+            $seenSources.ContainsKey($source) -or $seenNames.ContainsKey($name)) { throw 'Selected workloads have duplicate/foreign/malformed source IDs or unexpected names; no assessment write attempted.' }
+        $rows = @($Inventory | Where-Object { (ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField (Get-LabAssessmentField $_ 'properties') 'discoveryMachineArmId')) -ieq $source })
+        if ($rows.Count -ne 1) { throw "Assessment inventory must have exactly one source-ID match for '$name'. Discovery may not have synchronized to the backend yet; rerun Step 2 later, not deployment. No IDs are fabricated." }
+        $row = $rows[0]; $id = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $row 'id'); $props = Get-LabAssessmentField $row 'properties'
+        $displayName = [string](Get-LabAssessmentField $props 'displayName')
+        if ($id -notmatch $machinePattern -or $id -match '/\.{1,2}$' -or (Get-LabAssessmentField $row 'type') -ine 'Microsoft.Migrate/assessmentProjects/machines' -or
+            $seenAssessment.ContainsKey($id) -or ($displayName -and $displayName -ine $name)) { throw 'Matched assessment machine has a duplicate/foreign ID, wrong type or mismatching display name; no write attempted.' }
+        $seenSources[$source] = $true; $seenAssessment[$id] = $true; $seenNames[$name] = $true
+        $mapped += [pscustomobject]@{ Name = $name; SourceId = $source; AssessmentId = $id }
+    }
+    return ,$mapped
+}
+
+function Get-LabAssessmentMembership {
+    param([object[]]$Inventory, [string]$GroupId, [object[]]$Machines)
+    $members = @{}; $expected = @{}
+    foreach ($machine in $Machines) { $expected[$machine.AssessmentId] = $true }
+    $projectId = $GroupId.Substring(0, $GroupId.IndexOf('/groups/', [StringComparison]::OrdinalIgnoreCase))
+    foreach ($row in $Inventory) {
+        $groups = @(Get-LabAssessmentField (Get-LabAssessmentField $row 'properties') 'groups' | ForEach-Object { ConvertTo-LabAssessmentCanonicalId $_ })
+        if ($groups -icontains $GroupId) {
+            $id = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $row 'id')
+            if ($id -notmatch ('^' + [regex]::Escape($projectId) + '/machines/(?:[-a-zA-Z0-9_.()]|%20)+$') -or $id -match '/\.{1,2}$' -or
+                (Get-LabAssessmentField $row 'type') -ine 'Microsoft.Migrate/assessmentProjects/machines' -or $members.ContainsKey($id)) {
+                throw 'Group membership inventory contains malformed/foreign/duplicate machine records.'
+            }
+            $members[$id] = $true
+        }
+    }
+    foreach ($id in $members.Keys) { if (-not $expected.ContainsKey($id)) { return 'Conflict' } }
+    if ($members.Count -eq 4 -and $expected.Count -eq 4) { return 'Exact' }
+    if ($members.Count -eq 0) { return 'Empty' }
+    return 'Partial'
+}
+
+function Get-LabAssessmentSettings {
+    param([string]$Location, [string]$Currency, [string]$Offer, [string]$HybridBenefit,
+        [ValidateSet('Modern','Classic')][string]$Mode = 'Classic')
+    $currencies = @('USD','DKK','CAD','IDR','JPY','KRW','NZD','NOK','RUB','SAR','ZAR','SEK','TRY','GBP','MXN','MYR','INR','HKD','BRL','TWD','EUR','CHF','ARS','AUD','CNY')
+    $offers = @('MSAZR0003P','MSAZR0044P','MSAZR0059P','MSAZR0060P','MSAZR0062P','MSAZR0063P','MSAZR0064P','MSAZR0029P','MSAZR0022P','MSAZR0023P','MSAZR0148P','MSAZR0025P','MSAZR0036P','MSAZR0120P','MSAZR0121P','MSAZR0122P','MSAZR0123P','MSAZR0124P','MSAZR0125P','MSAZR0126P','MSAZR0127P','MSAZR0128P','MSAZR0129P','MSAZR0130P','MSAZR0111P','MSAZR0144P','MSAZR0149P','MSMCAZR0044P','MSMCAZR0059P','MSMCAZR0060P','MSMCAZR0063P','MSMCAZR0120P','MSMCAZR0121P','MSMCAZR0125P','MSMCAZR0128P','MSAZRDE0003P','MSAZRDE0044P','MSAZRUSGOV0003P','EA','MSAZR0243P','SavingsPlan1Year','SavingsPlan3Year')
+    if ($Mode -eq 'Modern') {
+        $offers = @('EA','MSAZR0003P','MSAZR0023P','MSAZRUSGOV0003P','MSMCAZR0044P','MSMCAZR0059P','MSMCAZR0060P','MSMCAZR0063P','SavingsPlan1Year','SavingsPlan3Year')
+    }
+    $normalizedOffer = $Offer.Replace('-', '')
+    $wireOffer = @($offers | Where-Object { $_ -ieq $normalizedOffer })
+    if ($Currency -notin $currencies -or $wireOffer.Count -ne 1 -or $HybridBenefit -notin @('Yes','No') -or $Location -notmatch '^[a-zA-Z0-9]+$') {
+        throw 'Assessment pricing/region input is outside the supported API enum contract. Specify a published currency/offer and Yes/No benefit; Unknown is never substituted.'
+    }
+    if ($Mode -eq 'Modern') {
+        return @{ sizingCriterion = 'AsOnPremises'; azureLocation = $Location; currency = $Currency.ToUpperInvariant()
+            azureHybridUseBenefit = $HybridBenefit; linuxAzureHybridUseBenefit = 'No'; azurePricingTier = 'Standard'
+            azureStorageRedundancy = 'LocallyRedundant'; scalingFactor = [int]1; discountPercentage = [int]0
+            savingsSettings = @{ azureOfferCode = $wireOffer[0]; savingsOptions = 'None' }; environmentType = 'Production' }
+    }
+    return @{ sizingCriterion = 'AsOnPremises'; azureLocation = $Location; currency = $Currency.ToUpperInvariant()
+        azureOfferCode = $wireOffer[0]; azureHybridUseBenefit = $HybridBenefit; linuxAzureHybridUseBenefit = 'No'
+        reservedInstance = 'None'; azurePricingTier = 'Standard'; azureStorageRedundancy = 'LocallyRedundant'
+        scalingFactor = 1.0; discountPercentage = 0.0 }
+}
+
+function Assert-LabAssessmentIdentity {
+    param($Resource, [string]$Id, [string]$Type)
+    if ((ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $Resource 'id')) -ine $Id -or (Get-LabAssessmentField $Resource 'type') -ine $Type) {
+        throw 'Assessment resource GET returned a different identity/type; requested resource remains unverified.'
+    }
+}
+
+function Assert-LabAssessmentSettings {
+    param($Resource, [string]$AssessmentId, [hashtable]$Settings)
+    Assert-LabAssessmentIdentity $Resource $AssessmentId 'Microsoft.Migrate/assessmentProjects/groups/assessments'
+    $props = Get-LabAssessmentField $Resource 'properties'
+    if ((Get-LabAssessmentField $props 'assessmentType') -ine 'MachineAssessment' -or
+        (Get-LabAssessmentField $props 'groupType') -ine 'Default') { throw 'Existing assessment is not the requested classic MachineAssessment/Default group type. It is preserved.' }
+    foreach ($key in $Settings.Keys) {
+        if ($null -eq (Get-LabAssessmentField $props $key) -or (Get-LabAssessmentField $props $key) -ine $Settings[$key]) {
+            throw "Assessment settings differ from the requested $key. Existing assessment is preserved; review it or select an unused -AssessmentName."
+        }
+    }
+    $status = [string](Get-LabAssessmentField $props 'status')
+    if ($status -notin @('Created','Updated','Running','Completed')) { throw 'Assessment is invalid, stale, out-of-sync, deleted or has an unknown status. Review it or select an unused -AssessmentName; no overwrite attempted.' }
+}
+
+function Assert-LabModernSettingSubset {
+    param($Actual, [hashtable]$Expected)
+    foreach ($key in $Expected.Keys) {
+        $value = Get-LabAssessmentField $Actual $key
+        if ($Expected[$key] -is [hashtable]) { Assert-LabModernSettingSubset -Actual $value -Expected $Expected[$key] }
+        elseif ($null -eq $value -or $value -is [array] -or $value -is [System.Collections.IDictionary] -or
+            [string]$value -ine [string]$Expected[$key]) {
+            throw "Modern settings differ or are missing at $key. Preserve the assessment; review it or select an unused -AssessmentName."
+        }
+    }
+}
+
+function Assert-LabModernAssessment {
+    param($Resource, [string]$AssessmentId, [string]$GroupId, [hashtable]$Settings)
+    Assert-LabAssessmentIdentity $Resource $AssessmentId 'Microsoft.Migrate/assessmentProjects/assessments'
+    $props = Get-LabAssessmentField $Resource 'properties'
+    $scope = Get-LabAssessmentField $props 'scope'
+    if ((Get-LabAssessmentField $scope 'scopeType') -ine 'ServerGroupId' -or
+        (ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $scope 'serverGroupId')) -ine $GroupId) {
+        throw 'Modern assessment scope differs from the verified exact-four ServerGroupId. Existing assessment preserved; no overwrite.'
+    }
+    Assert-LabModernSettingSubset -Actual (Get-LabAssessmentField $props 'settings') -Expected $Settings
+    $status = [string](Get-LabAssessmentField (Get-LabAssessmentField $props 'details') 'status')
+    if ($status -notin @('Created','Updated','Running','Completed')) {
+        throw 'Modern details.status is terminal, stale or Unverified (unknown/missing response shape). Preserve the assessment; no fallback/recompute PUT.'
+    }
+    # Public GET example exposes details.status, not a mandatory provisioningState. Never require a phantom field.
+    $provisioning = [string](Get-LabAssessmentField $props 'provisioningState')
+    if ($provisioning -and $provisioning -notin @('Succeeded','Provisioning','Updating','Accepted')) {
+        throw 'Modern optional provisioningState is failed, canceled, deleting or Unverified. No handoff.'
+    }
+    return $status
+}
+
+function Get-LabModernArray {
+    param($Object, [string]$Name, [switch]$Required)
+    $value = $null
+    if ($Object -is [System.Collections.IDictionary]) { $value = $Object[$Name] }
+    elseif ($null -ne $Object) {
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -ne $property) { $value = $property.Value }
+    }
+    if ($null -eq $value) {
+        if ($Required) { throw "SourceUnverified: missing modern $Name array; no result handoff." }
+        return ,@()
+    }
+    if ($value -isnot [array]) { throw "Unverified: modern $Name has an unexpected non-array shape; no result handoff." }
+    return ,$value
+}
+
+function Assert-LabModernAssessedMachines {
+    param([object[]]$Results, [object[]]$Machines, [string]$AssessmentId)
+    if ($Results.Count -ne 4 -or $Machines.Count -ne 4) { throw 'SourceUnverified: modern Completed assessment requires exactly four fully paginated results.' }
+    $seen = @{}; $seenIds = @{}; $adapted = @()
+    foreach ($row in $Results) {
+        $id = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $row 'id')
+        $props = Get-LabAssessmentField $row 'properties'
+        if ($id -notmatch ('^' + [regex]::Escape($AssessmentId) + '/assessedMachines/(?:[-a-zA-Z0-9_.()]|%20)+$') -or
+            $id -match '/\.{1,2}$' -or $seenIds.ContainsKey($id) -or
+            (Get-LabAssessmentField $row 'type') -ine 'Microsoft.Migrate/assessmentProjects/assessments/assessedMachines') {
+            throw 'SourceUnverified: modern result has a duplicate/foreign/malformed resource identity or type.'
+        }
+        $matches = @{}
+        foreach ($link in (Get-LabModernArray -Object $props -Name linkages -Required)) {
+            $armId = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $link 'armId')
+            foreach ($machine in $Machines) {
+                if ($armId -ieq $machine.SourceId -or $armId -ieq $machine.AssessmentId) { $matches[$machine.SourceId] = $machine }
+            }
+        }
+        if ($matches.Count -ne 1) {
+            $fields = @($props.PSObject.Properties.Name | Where-Object { $_ -match '^[a-zA-Z][a-zA-Z0-9]{0,60}$' }) -join ', '
+            Write-Host "  Modern result shape fields: $fields (no IDs or full response logged)." -ForegroundColor Yellow
+            $kinds = @(Get-LabAssessmentField $props 'linkages' | ForEach-Object { Get-LabAssessmentField $_ 'kind' } | Where-Object { $_ -is [string] -and $_ -match '^[a-zA-Z][a-zA-Z0-9_.-]{0,40}$' }) -join ', '
+            Write-Host "  Modern result linkage-kind labels: $kinds (semantics not assumed)." -ForegroundColor Yellow
+            throw 'SourceUnverified: modern Completed result linkages.armId does not match exactly one known source/assessment machine. Creation may have completed; do not redo PUT or use name-only matching. Review linkages in the portal.'
+        }
+        $machine = @($matches.Values)[0]
+        if ($seen.ContainsKey($machine.SourceId)) { throw 'SourceUnverified: duplicate modern machine linkage; no four-result handoff.' }
+        $seen[$machine.SourceId] = $true; $seenIds[$id] = $true
+        $workloadType = Get-LabAssessmentField $props 'workloadType'
+        if (-not $workloadType) { $workloadType = 'NoData' }
+        $recommendations = Get-LabModernArray -Object $props -Name recommendations
+        foreach ($recommendation in $recommendations) {
+            $null = Get-LabModernArray -Object $recommendation -Name skus
+            $null = Get-LabModernArray -Object (Get-LabAssessmentField $recommendation 'recommendedFor') -Name strategies
+            foreach ($cost in (Get-LabModernArray -Object $recommendation -Name totalCost)) {
+                $null = Get-LabModernArray -Object $cost -Name costDetail
+            }
+        }
+        $adapted += [pscustomobject]@{ Name = $machine.Name; WorkloadType = $workloadType; Recommendations = $recommendations }
+    }
+    return ,$adapted
+}
+
+function Show-LabModernRecommendations {
+    param([object[]]$Results)
+    foreach ($machine in $Results) {
+        Write-Host "  VM: $($machine.Name) | returned workloadType: $($machine.WorkloadType)" -ForegroundColor White
+        if ($machine.Recommendations.Count -eq 0) { Write-Host '    Recommendations: NoData' -ForegroundColor Yellow }
+        foreach ($recommendation in $machine.Recommendations) {
+            $configuration = Get-LabAssessmentField $recommendation 'configuration'
+            $target = Get-LabAssessmentField $configuration 'azureTarget'
+            $sizing = Get-LabAssessmentField $configuration 'sizingCriterion'
+            $readiness = Get-LabAssessmentField (Get-LabAssessmentField $recommendation 'migrationSuitability') 'readiness'
+            $strategies = @(Get-LabAssessmentField (Get-LabAssessmentField $recommendation 'recommendedFor') 'strategies') -join ', '
+            if (-not $target) { $target = 'NoData' }; if (-not $sizing) { $sizing = 'NoData' }
+            if (-not $readiness) { $readiness = 'NoData' }; if (-not $strategies) { $strategies = 'NoData' }
+            Write-Host "    Returned target: $target | sizing: $sizing | readiness: $readiness | strategies: $strategies" -ForegroundColor Gray
+            $skus = @(Get-LabAssessmentField $recommendation 'skus' | Where-Object { $null -ne $_ })
+            if ($skus.Count -eq 0) { Write-Host '    SKU: NoData' -ForegroundColor Gray }
+            foreach ($sku in $skus) {
+                $name = Get-LabAssessmentField (Get-LabAssessmentField $sku 'details') 'skuName'
+                if (-not $name) { $name = 'NoData' }
+                Write-Host "    Returned SKU: $name" -ForegroundColor Gray
+            }
+            $costs = @(Get-LabAssessmentField $recommendation 'totalCost' | Where-Object { $null -ne $_ })
+            if ($costs.Count -eq 0) { Write-Host '    Cost details: NoData' -ForegroundColor Gray }
+            foreach ($cost in $costs) {
+                $details = @(Get-LabAssessmentField $cost 'costDetail' | Where-Object { $null -ne $_ })
+                if ($details.Count -eq 0) { Write-Host '    Cost details: NoData' -ForegroundColor Gray }
+                foreach ($detail in $details) {
+                    $name = Get-LabAssessmentField $detail 'name'; $value = Get-LabAssessmentField $detail 'value'
+                    $savings = Get-LabAssessmentField $detail 'savingsOptions'
+                    if (-not $name) { $name = 'NoData' }; if ($null -eq $value) { $value = 'NoData' }; if (-not $savings) { $savings = 'NoData' }
+                    Write-Host "    Returned cost detail: $name = $value | savingsOptions: $savings (units/period not inferred)" -ForegroundColor Gray
+                }
+            }
+        }
+    }
+    Write-Host '  Alternatives are not summed. Target/strategy codes are not translated without a verified enum contract.' -ForegroundColor Gray
+}
+
+function Assert-LabAssessmentMachineMapStable {
+    param([object[]]$Expected, [object[]]$Current)
+    foreach ($old in $Expected) {
+        $mapMatches = @($Current | Where-Object { $_.SourceId -ieq $old.SourceId -and $_.AssessmentId -ieq $old.AssessmentId })
+        if ($mapMatches.Count -ne 1) { throw 'Source-to-assessment machine mapping changed during this run. No stale IDs may be written or handed off.' }
+    }
+}
+
+function Get-LabAssessmentArray {
+    param([AllowNull()]$Object, [string]$Name, [switch]$AllowMissing)
+    $value = $null
+    if ($Object -is [System.Collections.IDictionary]) { $value = $Object[$Name] }
+    elseif ($null -ne $Object) {
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -ne $property) { $value = $property.Value }
+    }
+    if ($null -eq $value -and $AllowMissing) { return $null }
+    if ($value -isnot [array]) { throw "Assessment field $Name must be an array; state remains unverified." }
+    # Preserve empty/singleton JSON arrays in Windows PowerShell 5.1.
+    return ,$value
+}
+
+function Test-LabAssessmentGroupReady {
+    param($Resource, [string]$GroupId, [bool]$Pending = $false, [switch]$RequireMembership, [switch]$RequireIdle)
+    Assert-LabAssessmentIdentity $Resource $GroupId 'Microsoft.Migrate/assessmentProjects/groups'
+    $props = Get-LabAssessmentField $Resource 'properties' -PreserveArray
+    $type = Get-LabAssessmentField $props 'groupType' -PreserveArray
+    $status = Get-LabAssessmentField $props 'groupStatus' -PreserveArray
+    $provisioning = Get-LabAssessmentField $props 'provisioningState' -PreserveArray
+    if ($type -isnot [string] -or $type -ine 'Default') { throw 'Group type is missing or not Default; existing group preserved.' }
+    if ($status -isnot [string] -or $status -notin @('Created','Updated','Running','Completed')) {
+        throw 'Group status is failed, canceled, deleting, malformed or unknown; existing group preserved.'
+    }
+    if ($null -ne $provisioning -and ($provisioning -isnot [string] -or
+        $provisioning -notin @('Succeeded','Accepted','Provisioning','Updating','Creating','Running'))) {
+        throw 'Group provisioningState is failed, canceled, deleting, malformed or unknown; Completed cannot override it.'
+    }
+    $capabilities = Get-LabAssessmentArray $props 'supportedAssessmentTypes' -AllowMissing
+    $capabilityLabels = @()
+    foreach ($capability in $capabilities) {
+        if ($capability -isnot [string] -or $capability -notmatch '^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$') {
+            throw 'Group supportedAssessmentTypes contains a malformed value; no assessment write or handoff.'
+        }
+        $capabilityLabels += $capability
+    }
+    $count = Get-LabAssessmentField $props 'machineCount' -PreserveArray
+    if (($count -isnot [int] -and $count -isnot [long]) -or $count -lt 0) { throw 'Group machineCount is missing or malformed; existing group preserved.' }
+    $provisioningLabel = if ($null -eq $provisioning) { '<absent/null>' } else { $provisioning }
+    $capabilityLabel = if ($null -eq $capabilities) { '<absent/null>' } elseif ($capabilities.Count -eq 0) { '<empty>' } else { $capabilityLabels -join ', ' }
+    Write-Host "  Assessment: Default group status $status; provisioning $provisioningLabel; supported types $capabilityLabel; machineCount $count." -ForegroundColor Gray
+    if ($Pending -or $status -eq 'Running') { return $false }
+    # Live Completed group GETs omit provisioningState. Without it, Created/Updated are still pending.
+    if ($null -eq $provisioning) { if ($status -ine 'Completed') { return $false } }
+    elseif ($provisioning -ine 'Succeeded') { return $false }
+    if ($RequireMembership) {
+        if ($count -ne 4) { return $false }
+        if ($null -ne $capabilities -and $capabilities -notcontains 'MachineAssessment') { return $false }
+        if ($null -eq $capabilities) { Write-Host '  Assessment: capability field absent; exact membership and the assessment service response must establish the requested contract.' -ForegroundColor Yellow }
+    }
+    if ($RequireIdle) {
+        $running = Get-LabAssessmentField $props 'areAssessmentsRunning' -PreserveArray
+        if ($running -isnot [bool]) { throw 'Group assessment activity is missing or malformed; state remains unverified.' }
+        if ($running) { return $false }
+    }
+    return $true
+}
+
+function Wait-LabAssessmentGroup {
+    param([string]$Path, [hashtable]$Session, [ValidateRange(1,10)][int]$MaxAttempts = 10)
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $response = Invoke-LabAssessmentRead -Path $Path -Session $Session
+        if (-not $response.Success -and $response.FailureKind -eq 'NotFound') {
+            Write-Host "  Assessment: group visibility pending (HTTP 404), attempt $attempt/$MaxAttempts." -ForegroundColor Gray
+        } else {
+            Assert-LabAssessmentResponse $response 'Server group GET'
+            if ($null -ne $response.Data -and (Test-LabAssessmentGroupReady -Resource $response.Data -GroupId $Path.Split('?')[0] -Pending $response.Pending)) { return $response.Data }
+        }
+        if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds $response.RetryAfter }
+    }
+    return $null
+}
+
+function Initialize-LabAssessmentGroup {
+    param($Outcome, $Project, [string]$GroupName, [object[]]$Workloads, [hashtable]$Session)
+    $groupId = $Outcome.GroupPath.Split('?')[0]
+    $outcome.Stage = 'Assessment machine mapping'
+    Write-Host '  Assessment: reading all inventory pages and mapping exactly four discovery ARM IDs to assessment machine ARM IDs.' -ForegroundColor Gray
+    $inventory = Get-LabAssessmentCollection -Path $outcome.MachinePath -Session $Session
+    $outcome.Machines = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $project.Id
+    foreach ($machine in $outcome.Machines) { Write-Host "    $($machine.Name): unique source/assessment inventory match." -ForegroundColor Green }
+    $outcome.Stage = 'Server group preflight GET'
+    $groupRead = Invoke-LabAssessmentRead -Path $outcome.GroupPath -Session $Session
+    $owned = $false
+    if (-not $groupRead.Success -and $groupRead.FailureKind -eq 'NotFound') {
+        $outcome.Stage = 'Server group PUT'
+        Write-Host "  Assessment: creating new Default group '$GroupName' (no machines in create payload)." -ForegroundColor Gray
+        $body = @{ properties = @{ groupType = 'Default' } } | ConvertTo-Json -Depth 5
+        $write = Invoke-LabAssessmentRequest -Path $outcome.GroupPath -Method PUT -Payload $body @Session
+        Assert-LabAssessmentResponse $write 'Server group PUT'
+        if ($null -ne $write.Data) { Assert-LabAssessmentIdentity $write.Data $groupId 'Microsoft.Migrate/assessmentProjects/groups' }
+        $owned = $true
+    } else { Assert-LabAssessmentResponse $groupRead 'Server group preflight GET' }
+    $outcome.Stage = 'Server group provisioning'
+    $group = Wait-LabAssessmentGroup -Path $outcome.GroupPath -Session $Session
+    if ($null -eq $group) { $outcome.State = 'GroupPending'; $outcome.Message = 'Group provisioning did not complete in ten reads. No assessment PUT sent; review the group before rerunning Step 2.'; return $null }
+    $outcome.Stage = 'Server group membership preflight'
+    $inventory = Get-LabAssessmentCollection -Path $outcome.MachinePath -Session $Session
+    $currentMap = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $project.Id
+    Assert-LabAssessmentMachineMapStable -Expected $outcome.Machines -Current $currentMap
+    $membership = Get-LabAssessmentMembership -Inventory $inventory -GroupId $groupId -Machines $outcome.Machines
+    $groupProps = Get-LabAssessmentField $group 'properties'
+    if ($membership -ne 'Exact') {
+        $running = Get-LabAssessmentField $groupProps 'areAssessmentsRunning' -PreserveArray
+        if (-not $owned -or $membership -ne 'Empty' -or $running -isnot [bool] -or $running -or
+            (Get-LabAssessmentArray $groupProps 'assessments').Count -gt 0 -or
+            (Get-LabAssessmentField $groupProps 'machineCount') -ne 0) {
+            throw 'Existing or concurrently changed group does not contain exactly the four workloads. Empty/different/extra members and active assessments are preserved; select an unused -AssessmentGroupName. No remove, replacement or DELETE attempted.'
+        }
+        $outcome.Stage = 'Server group updateMachines POST'
+        Write-Host '  Assessment: adding four assessment namespace machine IDs to the newly created group.' -ForegroundColor Gray
+        $ids = @($outcome.Machines | ForEach-Object { $_.AssessmentId })
+        $body = @{ properties = @{ operationType = 'Add'; machines = $ids } } | ConvertTo-Json -Depth 5
+        # updateMachines has an optional payload eTag, not a documented Group GET eTag. No wildcard or concurrency claim.
+        $update = Invoke-LabAssessmentRequest -Path ($groupId + '/updateMachines?api-version=2024-01-15') -Method POST -Payload $body @Session
+        Assert-LabAssessmentResponse $update 'Server group updateMachines POST'
+        $outcome.Stage = 'Server group membership confirmation'
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $group = Wait-LabAssessmentGroup -Path $outcome.GroupPath -Session $Session -MaxAttempts 1
+            if ($null -eq $group) {
+                if ($attempt -lt 10) { Start-Sleep -Seconds $update.RetryAfter }
+                continue
+            }
+            $inventory = Get-LabAssessmentCollection -Path $outcome.MachinePath -Session $Session
+            $currentMap = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $project.Id
+            Assert-LabAssessmentMachineMapStable -Expected $outcome.Machines -Current $currentMap
+            $membership = Get-LabAssessmentMembership -Inventory $inventory -GroupId $groupId -Machines $outcome.Machines
+            Write-Host "  Assessment: group membership $membership, observation $attempt/10 (expected exact four)." -ForegroundColor Gray
+            if ($membership -eq 'Exact' -and (Test-LabAssessmentGroupReady -Resource $group -GroupId $groupId -RequireMembership -RequireIdle)) { break }
+            if ($membership -eq 'Conflict') { throw 'Group acquired unexpected extra members; existing resources preserved. No assessment PUT sent.' }
+            if ($attempt -lt 10) { Start-Sleep -Seconds $update.RetryAfter }
+        }
+        if ($null -eq $group -or $membership -ne 'Exact' -or
+            -not (Test-LabAssessmentGroupReady -Resource $group -GroupId $groupId -RequireMembership -RequireIdle)) {
+            $outcome.State = 'MembershipPending'; $outcome.Message = 'Exact four membership, idle state, count or requested MachineAssessment capability did not confirm within the bounded wait. Unknown/empty capabilities may be transient after Add. Do not resubmit POST blindly; review the group or choose an unused group name.'; return $null
+        }
+    } else {
+        Write-Host '  Assessment: existing group has exactly the four matching workload IDs; reused without membership writes.' -ForegroundColor Green
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            if ($null -ne $group -and (Test-LabAssessmentGroupReady -Resource $group -GroupId $groupId -RequireMembership)) { break }
+            if ($attempt -lt 10) {
+                Start-Sleep -Seconds 15
+                $group = Wait-LabAssessmentGroup -Path $outcome.GroupPath -Session $Session -MaxAttempts 1
+                if ($null -eq $group) { continue }
+                $inventory = Get-LabAssessmentCollection -Path $outcome.MachinePath -Session $Session
+                $currentMap = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $project.Id
+                Assert-LabAssessmentMachineMapStable -Expected $outcome.Machines -Current $currentMap
+                if ((Get-LabAssessmentMembership -Inventory $inventory -GroupId $groupId -Machines $outcome.Machines) -ne 'Exact') { throw 'Existing group membership changed; preserved without assessment writes.' }
+            }
+        }
+        if ($null -eq $group -or -not (Test-LabAssessmentGroupReady -Resource $group -GroupId $groupId -RequireMembership)) {
+            $outcome.State = 'MembershipPending'; $outcome.Message = 'Existing exact-four group count/state or explicit MachineAssessment capability remains unverified after bounded reads. Existing group preserved; no assessment PUT sent.'; return $null
+        }
+    }
+    return $group
+}
+
+function Invoke-LabAssessmentCreation {
+    param([string]$MigrateProjectName, [string]$ProjectName, [string]$GroupName, [string]$AssessmentName,
+        [object[]]$Workloads, [hashtable]$Settings, [hashtable]$Session,
+        [ValidateSet('Modern','Classic')][string]$Mode = 'Classic')
+    $outcome = [pscustomobject]@{ State = 'Failed'; Stage = 'Provider API verification'; Message = ''; ProjectName = '';
+        GroupPath = ''; AssessmentPath = ''; MachinePath = ''; Machines = @(); Settings = $Settings; Mode = $Mode; Version = '' }
+    try {
+        Write-Host '  Assessment: verifying registered provider and endpoint-specific API plan (read-only; nested catalog entries may be absent).' -ForegroundColor Gray
+        $sub = [string](Get-LabAssessmentField (Get-LabAssessmentField $Session.Context 'Subscription') 'Id')
+        $provider = Invoke-LabAssessmentRead -Path ("/subscriptions/$sub/providers/Microsoft.Migrate?api-version=2021-04-01") -Session $Session
+        Assert-LabAssessmentResponse $provider 'Microsoft.Migrate provider GET'
+        if ($provider.Pending) { throw 'Microsoft.Migrate provider metadata is pending; no write attempted.' }
+        $profile = Get-LabAssessmentProfile -Provider $provider.Data -Mode $Mode
+        $outcome.Version = $profile.Version
+        $outcome.Stage = 'Assessment backend resolution'
+        $project = Resolve-LabAssessmentProject -MigrateProjectName $MigrateProjectName -ExplicitName $ProjectName -Session $Session
+        $outcome.ProjectName = $project.Name
+        $groupId = $project.Id + '/groups/' + (ConvertTo-LabAssessmentSegment $GroupName)
+        $assessmentParent = if ($Mode -eq 'Modern') { $project.Id } else { $groupId }
+        $assessmentId = $assessmentParent + '/assessments/' + (ConvertTo-LabAssessmentSegment $AssessmentName)
+        $outcome.GroupPath = $groupId + '?api-version=2024-01-15'
+        $outcome.AssessmentPath = $assessmentId + '?api-version=' + $profile.Version
+        $outcome.MachinePath = $project.Id + '/machines?api-version=2024-01-15'
+        $group = Initialize-LabAssessmentGroup -Outcome $outcome -Project $project -GroupName $GroupName -Workloads $Workloads -Session $Session
+        if ($null -eq $group) { return $outcome }
+        $groupProps = Get-LabAssessmentField $group 'properties'
+        $outcome.Stage = 'Assessment preflight GET'
+        $existing = Invoke-LabAssessmentRead -Path $outcome.AssessmentPath -Session $Session
+        if ($existing.Success) {
+            if ($existing.Pending -and $null -eq $existing.Data) { throw 'Existing assessment identity/settings are pending and cannot be verified; preserved without PUT.' }
+            if ($Mode -eq 'Modern') {
+                $null = Assert-LabModernAssessment -Resource $existing.Data -AssessmentId $assessmentId -GroupId $groupId -Settings $Settings
+            } else { Assert-LabAssessmentSettings -Resource $existing.Data -AssessmentId $assessmentId -Settings $Settings }
+            Write-Host "  Assessment: matching existing '$AssessmentName' reused. No overwrite/recompute PUT." -ForegroundColor Green
+        } elseif ($existing.FailureKind -eq 'NotFound') {
+            $running = Get-LabAssessmentField $groupProps 'areAssessmentsRunning' -PreserveArray
+            if ($running -isnot [bool] -or $running) { throw 'Group has active or unverified assessments. No new assessment PUT sent; wait for them or choose your own group.' }
+            $outcome.Stage = 'Assessment PUT'
+            if ($Mode -eq 'Modern') {
+                Write-Host "  Assessment: submitting Modern MachineAssessmentV2 PREVIEW '$AssessmentName'; target $($Settings.azureLocation)." -ForegroundColor Yellow
+                Write-Host '  ServerGroupId interoperability requires live validation. Service rejection is reported without Classic fallback; no ARG scope is invented.' -ForegroundColor Yellow
+                $body = @{ properties = @{ scope = @{ scopeType = 'ServerGroupId'; serverGroupId = $groupId }; settings = $Settings } } | ConvertTo-Json -Depth 10
+            } else {
+                Write-Host "  Assessment: submitting classic Azure VM MachineAssessment '$AssessmentName'; offer $($Settings.azureOfferCode), target $($Settings.azureLocation)." -ForegroundColor Gray
+                $body = @{ properties = $Settings } | ConvertTo-Json -Depth 5
+            }
+            $write = Invoke-LabAssessmentRequest -Path $outcome.AssessmentPath -Method PUT -Payload $body @Session
+            Assert-LabAssessmentResponse $write 'Assessment PUT'
+            if ($null -ne $write.Data) {
+                if ($Mode -eq 'Modern') { $null = Assert-LabModernAssessment -Resource $write.Data -AssessmentId $assessmentId -GroupId $groupId -Settings $Settings }
+                else { Assert-LabAssessmentSettings -Resource $write.Data -AssessmentId $assessmentId -Settings $Settings }
+            }
+            Write-Host '  Assessment: request accepted; this is not proof of completed computation. Proceeding directly to resource/status verification.' -ForegroundColor Yellow
+        } else { Assert-LabAssessmentResponse $existing 'Assessment preflight GET' }
+        $outcome.State = 'Submitted'; $outcome.Stage = 'Assessment computation'
+    } catch {
+        $outcome.State = 'Failed'
+        $message = [string](Get-LabAssessmentField (Get-LabAssessmentField $_ 'Exception') 'Message')
+        $outcome.Message = if ($message.Length -le 800 -and $message -notmatch '(?i)bearer|password|secret|credential|eyJ|[a-zA-Z0-9_+/=-]{64,}|[\x00-\x1f]') { $message } else { 'Assessment operation failed safely. Review the selected backend, inventory and API contract in the portal; request outcome is unverified.' }
+    }
+    return $outcome
+}
+
+function Assert-LabAssessedMachines {
+    param([object[]]$Results, [object[]]$Machines, [string]$AssessmentId)
+    if ($Results.Count -ne 4 -or $Machines.Count -ne 4) { throw 'Completed assessment must return exactly four fully paginated machine results; partial results are not ready.' }
+    $seen = @{}; $seenIds = @{}
+    foreach ($row in $Results) {
+        $id = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $row 'id'); $props = Get-LabAssessmentField $row 'properties'
+        $sourceId = ConvertTo-LabAssessmentCanonicalId (Get-LabAssessmentField $props 'datacenterMachineArmId')
+        $sourceMatches = @($Machines | Where-Object { $_.SourceId -ieq $sourceId })
+        if ($id -notmatch ('^' + [regex]::Escape($AssessmentId) + '/assessedMachines/(?:[-a-zA-Z0-9_.()]|%20)+$') -or $id -match '/\.{1,2}$' -or
+            (Get-LabAssessmentField $row 'type') -ine 'Microsoft.Migrate/assessmentProjects/groups/assessments/assessedMachines' -or
+            (Get-LabAssessmentField $props 'type') -ine 'AssessedMachine' -or $sourceMatches.Count -ne 1 -or $seen.ContainsKey($sourceId) -or $seenIds.ContainsKey($id)) {
+            throw 'Assessed-machine collection has duplicate, foreign or malformed result/source identity; no ResultsReady claim.'
+        }
+        if ((Get-LabAssessmentField $props 'displayName') -ine $sourceMatches[0].Name) { throw 'Assessed-machine result name does not match its validated source ID.' }
+        $seen[$sourceId] = $true; $seenIds[$id] = $true
+    }
+}
+
+function Get-LabModernAssessmentCompletion {
+    param($Creation, [object[]]$Workloads, [hashtable]$Session)
+    $outcome = [pscustomobject]@{ State = 'Submitted'; Confirmed = $false; Ready = $false; Stage = 'Modern assessment resource GET'; Message = ''; Results = @() }
+    try {
+        if ($Creation.Version -cne '2024-03-03-preview') { throw 'Unverified modern profile; no results request sent.' }
+        $assessmentId = $Creation.AssessmentPath.Split('?')[0]; $groupId = $Creation.GroupPath.Split('?')[0]
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $resource = Invoke-LabAssessmentRead -Path $Creation.AssessmentPath -Session $Session
+            if (-not $resource.Success -and $resource.FailureKind -eq 'NotFound' -and -not $outcome.Confirmed) {
+                Write-Host "  Modern: accepted resource not visible (404), observation $attempt/10; not confirmed complete." -ForegroundColor Gray
+            } else {
+                Assert-LabAssessmentResponse $resource 'Modern assessment GET'
+                if ($null -ne $resource.Data) {
+                    $status = Assert-LabModernAssessment -Resource $resource.Data -AssessmentId $assessmentId -GroupId $groupId -Settings $Creation.Settings
+                    $outcome.Confirmed = $true; $outcome.State = 'Created'
+                    Write-Host "  Modern: resource confirmed; details.status $status, observation $attempt/10." -ForegroundColor Gray
+                    if (-not $resource.Pending -and $status -eq 'Completed') {
+                        $outcome.Stage = 'Modern assessedMachines source verification'
+                        $results = Get-LabAssessmentCollection -Path ($assessmentId + '/assessedMachines?api-version=' + $Creation.Version) -Session $Session
+                        $adapted = Assert-LabModernAssessedMachines -Results $results -Machines $Creation.Machines -AssessmentId $assessmentId
+                        $outcome.Stage = 'Final modern scope/membership/status verification'
+                        $group = Invoke-LabAssessmentRead -Path $Creation.GroupPath -Session $Session
+                        Assert-LabAssessmentResponse $group 'Final server group GET'
+                        if (-not (Test-LabAssessmentGroupReady -Resource $group.Data -GroupId $groupId -Pending $group.Pending -RequireMembership -RequireIdle)) { throw 'Final modern server group is busy or unverified; no handoff.' }
+                        $inventory = Get-LabAssessmentCollection -Path $Creation.MachinePath -Session $Session
+                        $projectId = $Creation.MachinePath.Split('?')[0].Substring(0, $Creation.MachinePath.Split('?')[0].Length - '/machines'.Length)
+                        $currentMap = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $projectId
+                        Assert-LabAssessmentMachineMapStable -Expected $Creation.Machines -Current $currentMap
+                        if ((Get-LabAssessmentMembership -Inventory $inventory -GroupId $groupId -Machines $currentMap) -ne 'Exact') { throw 'Final modern membership changed; no partial or stale handoff.' }
+                        $final = Invoke-LabAssessmentRead -Path $Creation.AssessmentPath -Session $Session
+                        Assert-LabAssessmentResponse $final 'Final modern assessment GET'
+                        $finalStatus = Assert-LabModernAssessment -Resource $final.Data -AssessmentId $assessmentId -GroupId $groupId -Settings $Creation.Settings
+                        $details = Get-LabAssessmentField (Get-LabAssessmentField $resource.Data 'properties') 'details'
+                        $finalDetails = Get-LabAssessmentField (Get-LabAssessmentField $final.Data 'properties') 'details'
+                        if ($final.Pending -or $finalStatus -ine 'Completed' -or
+                            (Get-LabAssessmentField $details 'updatedTimestamp') -ine (Get-LabAssessmentField $finalDetails 'updatedTimestamp')) {
+                            throw 'Modern assessment changed or is not Completed after reading results. No handoff.'
+                        }
+                        $outcome.Results = $adapted; $outcome.Ready = $true; $outcome.State = 'ManualReview'
+                        $outcome.Message = 'Modern assessment Completed; four source-linked results and current scope verified. Manual IaaS review required: Azure target/strategy enum selection is not verified by this profile. Review a suitable Azure VM recommendation for each VM before Step 3; no automatic handoff or assumed SKU/cost units.'
+                        return $outcome
+                    }
+                }
+            }
+            if ($attempt -lt 10) { Start-Sleep -Seconds $resource.RetryAfter }
+        }
+        $outcome.Message = 'Bounded Modern wait expired; Accepted/Running is not Completed. Preserve the assessment and review in the portal; no fallback/recompute PUT or Step 3 handoff.'
+    } catch {
+        $message = [string](Get-LabAssessmentField (Get-LabAssessmentField $_ 'Exception') 'Message')
+        $outcome.State = if ($message -like 'SourceUnverified:*') { 'SourceUnverified' } else { 'Unverified' }
+        $outcome.Message = if ($message.Length -le 800 -and $message -notmatch '(?i)bearer|password|secret|credential|eyJ|[a-zA-Z0-9_+/=-]{64,}|[\x00-\x1f]') { $message } else { 'Modern verification failed safely; preserve the resource and review the portal. No fallback or handoff.' }
+    }
+    return $outcome
+}
+
+function Get-LabClassicAssessmentState {
+    param($Response)
+    $props = Get-LabAssessmentField $Response.Data 'properties' -PreserveArray
+    $provisioning = Get-LabAssessmentField $props 'provisioningState' -PreserveArray
+    if ($null -ne $provisioning -and $provisioning -isnot [string]) {
+        throw 'Classic optional provisioningState is malformed (expected a scalar string or null); no handoff.'
+    }
+    $normalized = if ($null -eq $provisioning) { '' } else { $provisioning.Trim() }
+    if ($normalized -and $normalized -notin @('Succeeded','Provisioning','Updating','Accepted')) {
+        throw 'Classic optional provisioningState is failed, canceled, deleting or unknown; computation status cannot override it. No handoff.'
+    }
+    $status = Get-LabAssessmentField $props 'status' -PreserveArray
+    if ($status -isnot [string] -or $status -notin @('Created','Updated','Running','Completed')) {
+        throw 'Classic computation status is missing, malformed or unknown; no handoff.'
+    }
+    $label = if ($null -eq $provisioning) { '<absent/null; optional>' } elseif (-not $normalized) { '<blank; optional>' } else { $normalized }
+    $pending = $Response.Pending -or $Response.StatusCode -eq 202
+    # The shared adapter uses the untrimmed string to mark Pending. Normalize only that
+    # metadata-derived flag on a successful HTTP 200 GET; never clear HTTP 202 or in-progress metadata.
+    if ($Response.StatusCode -eq 200 -and $provisioning -is [string] -and $provisioning -cne $normalized -and
+        ($normalized -eq '' -or $normalized -ieq 'Succeeded')) { $pending = $false }
+    $gate = if ($pending) { 'assessment GET is pending' }
+        elseif ($normalized -and $normalized -ine 'Succeeded') { 'optional provisioning metadata is in progress' }
+        elseif ($status -ine 'Completed') { 'computation status is not Completed' }
+        else { 'Completed; exact-four results and final verification still required' }
+    return [pscustomobject]@{ Status = $status; ProvisioningLabel = $label; Gate = $gate
+        Completed = (-not $pending -and ($normalized -eq '' -or $normalized -ieq 'Succeeded') -and $status -ieq 'Completed') }
+}
+
+function Get-LabAssessmentCompletion {
+    param($Creation, [object[]]$Workloads, [hashtable]$Session)
+    if ((Get-LabAssessmentField $Creation 'Mode') -eq 'Modern') { return Get-LabModernAssessmentCompletion -Creation $Creation -Workloads $Workloads -Session $Session }
+    $outcome = [pscustomobject]@{ State = 'Submitted'; Confirmed = $false; Ready = $false; Stage = 'Assessment resource GET'; Message = ''; Results = @() }
+    try {
+        $assessmentId = $Creation.AssessmentPath.Split('?')[0]
+        $lastObservation = 'Assessment resource/state has not been verified.'
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $resource = Invoke-LabAssessmentRead -Path $Creation.AssessmentPath -Session $Session
+            if (-not $resource.Success -and $resource.FailureKind -eq 'NotFound' -and -not $outcome.Confirmed) {
+                $lastObservation = 'Assessment GET returned HTTP 404; creation remains unconfirmed.'
+                Write-Host "  Assessment: accepted resource not visible yet (HTTP 404), attempt $attempt/10; creation remains unconfirmed." -ForegroundColor Gray
+            } else {
+                Assert-LabAssessmentResponse $resource 'Assessment resource GET'
+                if ($null -ne $resource.Data) {
+                    Assert-LabAssessmentSettings -Resource $resource.Data -AssessmentId $assessmentId -Settings $Creation.Settings
+                    $props = Get-LabAssessmentField $resource.Data 'properties'
+                    $state = Get-LabClassicAssessmentState -Response $resource
+                    $lastObservation = "Computation status $($state.Status); optional provisioning $($state.ProvisioningLabel); completion gate: $($state.Gate)."
+                    $outcome.Confirmed = $true; $outcome.State = 'Created'
+                    Write-Host "  Assessment: creation confirmed; $lastObservation Attempt $attempt/10." -ForegroundColor Gray
+                    # stage is the user review workflow, not the computation status.
+                    if ($state.Completed) {
+                        if ((Get-LabAssessmentField $props 'numberOfMachines') -ne 4) { throw 'Completed assessment numberOfMachines is not four; existing assessment preserved, no handoff.' }
+                        $outcome.Stage = 'Assessed machines GET'
+                        $results = Get-LabAssessmentCollection -Path ($assessmentId + '/assessedMachines?api-version=2024-01-15') -Session $Session
+                        Assert-LabAssessedMachines -Results $results -Machines $Creation.Machines -AssessmentId $assessmentId
+                        $outcome.Stage = 'Final membership/status verification'
+                        $group = Invoke-LabAssessmentRead -Path $Creation.GroupPath -Session $Session
+                        Assert-LabAssessmentResponse $group 'Final server group GET'
+                        if (-not (Test-LabAssessmentGroupReady -Resource $group.Data -GroupId $Creation.GroupPath.Split('?')[0] -Pending $group.Pending -RequireMembership -RequireIdle)) { throw 'Final group state/count is busy or unverified; no handoff.' }
+                        $inventory = Get-LabAssessmentCollection -Path $Creation.MachinePath -Session $Session
+                        $projectId = $Creation.MachinePath.Split('?')[0].Substring(0, $Creation.MachinePath.Split('?')[0].Length - '/machines'.Length)
+                        $currentMap = Get-LabAssessmentMachineMap -Workloads $Workloads -Inventory $inventory -ProjectId $projectId
+                        Assert-LabAssessmentMachineMapStable -Expected $Creation.Machines -Current $currentMap
+                        if ((Get-LabAssessmentMembership -Inventory $inventory -GroupId $Creation.GroupPath.Split('?')[0] -Machines $currentMap) -ne 'Exact') { throw 'Final group membership changed; no stale or partial result handoff.' }
+                        $final = Invoke-LabAssessmentRead -Path $Creation.AssessmentPath -Session $Session
+                        Assert-LabAssessmentResponse $final 'Final assessment GET'
+                        Assert-LabAssessmentSettings -Resource $final.Data -AssessmentId $assessmentId -Settings $Creation.Settings
+                        $finalProps = Get-LabAssessmentField $final.Data 'properties'
+                        $finalState = Get-LabClassicAssessmentState -Response $final
+                        if (-not $finalState.Completed) { throw "Final assessment completion gate: $($finalState.Gate); computation status $($finalState.Status), optional provisioning $($finalState.ProvisioningLabel). No handoff." }
+                        if ((Get-LabAssessmentField $finalProps 'numberOfMachines') -ne 4 -or
+                            (Get-LabAssessmentField $finalProps 'updatedTimestamp') -ine (Get-LabAssessmentField $props 'updatedTimestamp')) { throw 'Assessment count or update timestamp changed after reading results; no handoff.' }
+                        $outcome.Results = $results; $outcome.Ready = $true; $outcome.State = 'ResultsReady'
+                        return $outcome
+                    }
+                } else { $lastObservation = 'Assessment GET is pending with no resource JSON; computation status and optional provisioning metadata are unverified.' }
+            }
+            if ($attempt -lt 10) { Start-Sleep -Seconds $resource.RetryAfter }
+        }
+        $outcome.Message = "Bounded assessment verification wait expired. Last observation: $lastObservation Preserve the assessment and rerun Step 2 with the same names/settings. No automatic replication handoff."
+    } catch {
+        $outcome.State = 'ReadFailed'
+        $message = [string](Get-LabAssessmentField (Get-LabAssessmentField $_ 'Exception') 'Message')
+        $outcome.Message = if ($message.Length -le 800 -and $message -notmatch '(?i)bearer|password|secret|credential|eyJ|[a-zA-Z0-9_+/=-]{64,}|[\x00-\x1f]') { $message } else { 'Assessment verification failed safely; state/results remain unverified. Review the portal before Step 3.' }
+    }
+    return $outcome
+}
+
 function Get-LabAzContext {
     <#
       Makes this script runnable on its own from the scripts folder, the same way deploy-lab.ps1
@@ -832,6 +1923,54 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -844,15 +1983,18 @@ trap {
     exit 1
 }
 
-$context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute') -OptionalModules @('Az.Migrate')
+$context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Migrate')
+$assessmentContextStamp = Get-LabAssessmentContextStamp $context
 
 Write-Host ""
 Write-Host "Enter the values for your lab environment. A value in [brackets] is a lab default and Enter accepts it; an (example: ...) is a hint only and must be typed." -ForegroundColor Cyan
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
-# Discovery and assessment never write to the landing zone, so no target resource group is
-# asked for here. The assessment takes an Azure REGION (azureLocation), which is read from the
-# source resource group. migrate-step3 onwards, which do deploy into the landing zone, ask for it.
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $SourceResourceGroup
+# Assessment targets the chosen migration region, not source/project/RG metadata.
+if (-not [string]::IsNullOrWhiteSpace($TargetResourceGroup)) {
+    $Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+} else {
+    $Location = Read-LabTargetRegion -Value $Location
+}
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
 $HyperVHostVMName = Select-LabFromList -Name 'HyperVHostVMName' -Value $HyperVHostVMName -Options (Get-LabVMNames -ResourceGroupName $SourceResourceGroup) -Kind VMName -Prompt 'Hyper-V host VM' -EmptyHelp 'Run deploy-lab.ps1 first: it creates the Hyper-V host in the source resource group.'
 
@@ -915,6 +2057,268 @@ function Write-NextSteps {
     Write-Host ""
 }
 
+function Get-LabRunCommandText {
+    param([Parameter(Mandatory = $true)]$Result)
+    $results = @($Result)
+    if ($results.Count -ne 1 -or $null -eq $results[0] -or
+        $null -eq $results[0].PSObject.Properties['Value']) { throw 'Host read returned no valid Run Command result.' }
+    $entries = @($results[0].Value)
+    if ($entries.Count -eq 0) { throw 'Host read returned no status records.' }
+    $stdout = @()
+    foreach ($entry in $entries) {
+        if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['Code'] -or
+            $null -eq $entry.PSObject.Properties['Message']) { throw 'Malformed host status record.' }
+        $code = [string]$entry.Code
+        if ($code -match '(?i)(failed|error)' -or
+            ($null -ne $entry.PSObject.Properties['Level'] -and [string]$entry.Level -eq 'Error')) {
+            throw 'Host Run Command reported failure.'
+        }
+        if ($code -match '(?i)StdErr') {
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry.Message)) { throw 'Host read reported stderr.' }
+        } elseif ($code -match '(?i)StdOut') {
+            if ($code -notmatch '(?i)/succeeded$') { throw 'Host stdout status is not successful.' }
+            $stdout += [string]$entry.Message
+        }
+    }
+    $text = $stdout -join "`n"
+    if ([string]::IsNullOrWhiteSpace($text)) { throw 'Host read returned empty stdout.' }
+    return $text
+}
+
+function Assert-LabWorkloadPower {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    Write-Host "${Stage}: read-only workload power check on $SourceResourceGroup/$HyperVHostVMName" -ForegroundColor Cyan
+    $rows = @()
+    try {
+        $hostStatus = Get-AzVM -ResourceGroupName $SourceResourceGroup -Name $HyperVHostVMName -Status -ErrorAction Stop
+        if ($null -eq $hostStatus -or $null -eq $hostStatus.PSObject.Properties['Statuses']) { throw 'Azure host power state is unreadable.' }
+        $power = @($hostStatus.Statuses | Where-Object { $_.Code -like 'PowerState/*' })
+        if ($power.Count -ne 1 -or [string]$power[0].Code -cne 'PowerState/running') {
+            throw 'Azure host must be running before its nested workload states can be verified.'
+        }
+        $probe = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+$inventory = @(Get-VM -ErrorAction Stop)
+$rows = @(foreach ($name in $required) {
+    $match = @($inventory | Where-Object { $_.Name -ceq $name })
+    if ($match.Count -gt 1) { throw 'Ambiguous workload inventory.' }
+    $state = if ($match.Count -eq 1) { [string]$match[0].State } else { 'Missing' }
+    [pscustomobject]@{ Name = $name; State = $state }
+})
+Write-Output ('LAB_GUEST_STATE_JSON|' + ([ordered]@{ Schema = 1; Rows = $rows } | ConvertTo-Json -Depth 4 -Compress))
+Write-Output 'LAB_GUEST_STATE_END'
+'@
+        $result = Invoke-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+            -CommandId RunPowerShellScript -ScriptString $probe -ErrorAction Stop
+        $text = Get-LabRunCommandText -Result $result
+        $matches = [regex]::Matches($text, '(?m)^LAB_GUEST_STATE_JSON\|([^\r\n]+)\r?\nLAB_GUEST_STATE_END\r?$')
+        if ($matches.Count -ne 1 -or ([regex]::Matches($text, 'LAB_GUEST_STATE_JSON\|')).Count -ne 1 -or
+            ([regex]::Matches($text, '(?m)^LAB_GUEST_STATE_END\r?$')).Count -ne 1) {
+            throw 'Missing, duplicate or truncated workload power payload.'
+        }
+        $payload = $matches[0].Groups[1].Value | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $payload -or $null -eq $payload.PSObject.Properties['Schema'] -or
+            [string]$payload.Schema -cne '1' -or $null -eq $payload.PSObject.Properties['Rows']) { throw 'Invalid workload payload schema.' }
+        $rows = @($payload.Rows)
+        if ($rows.Count -ne 4) { throw 'Expected exactly four workload rows.' }
+        for ($i = 0; $i -lt $required.Count; $i++) {
+            $row = $rows[$i]
+            if ($null -eq $row -or $null -eq $row.PSObject.Properties['Name'] -or
+                $null -eq $row.PSObject.Properties['State'] -or $row.Name -isnot [string] -or
+                $row.State -isnot [string] -or $row.Name -cne $required[$i] -or
+                $row.State -cnotmatch '^[A-Za-z]+$') { throw 'Malformed, duplicate or unexpected workload row.' }
+        }
+    } catch {
+        foreach ($name in $required) { Write-Host "  ${name}: Unknown (selected host power/inventory could not be verified)" -ForegroundColor Yellow }
+        Write-Host "Verify Azure host '$HyperVHostVMName' is running and Run Command/Hyper-V access works. Then rerun this step." -ForegroundColor Yellow
+        Write-Host 'No nested VM was started; do not continue to discovery or traffic with unknown workload states.' -ForegroundColor Yellow
+        throw 'Workload power verification failed closed; no next-stage guidance or traffic is permitted.'
+    }
+    $notRunning = @($rows | Where-Object { $_.State -cne 'Running' })
+    foreach ($row in $rows) {
+        $color = if ($row.State -ceq 'Running') { 'Green' } else { 'Yellow' }
+        Write-Host "  $($row.Name): $($row.State)" -ForegroundColor $color
+    }
+    Write-Host 'Running is a VM power state, not proof of application or database health. MigrateAppl is not a workload prerequisite.' -ForegroundColor Gray
+    if ($notRunning.Count -gt 0) {
+        Write-Host "Repair manually in elevated PowerShell ON the selected host '$HyperVHostVMName', then rerun this step:" -ForegroundColor Yellow
+        foreach ($row in $notRunning) {
+            if ($row.State -ceq 'Missing') {
+                Write-Host "  $($row.Name) is missing: restore the expected workload/deployment; Start-VM cannot create it." -ForegroundColor Yellow
+            } else {
+                if ($row.State -ceq 'Paused') { Write-Host "  Resume-VM -Name '$($row.Name)' # Paused VM" -ForegroundColor White }
+                Write-Host "  Start-VM -Name '$($row.Name)' # Review its reported state before repair" -ForegroundColor White
+            }
+        }
+        throw 'All four workload VMs must be Running. No nested VM was automatically started; stop and retry after repair.'
+    }
+    return [pscustomobject]@{ Rows = $rows; CheckedUtc = [DateTime]::UtcNow.ToString('u') }
+}
+
+function Get-LabKvpReadinessRow {
+    param([string]$Name, [string]$VMId, [AllowNull()]$Component, [string]$Failure = '')
+    $row = [ordered]@{ Name = $Name; VMId = $VMId; EnabledState = $null; OperationalStatus = $null;
+        CommunicationStatus = $null; OSName = ''; OSVersion = ''; Ready = $false; Reason = '' }
+    try {
+        if ($Failure) { throw $Failure }
+        if ($null -eq $Component) { throw 'Missing KVP component' }
+        foreach ($field in @('EnabledState', 'OperationalStatus', 'CommunicationStatus')) {
+            $property = $Component.PSObject.Properties[$field]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            $values = @($property.Value)
+            if ($values.Count -eq 0) { continue }
+            if ($field -ne 'OperationalStatus' -and $values.Count -ne 1) { throw 'Invalid numeric KVP status' }
+            $value = $values[0]
+            if ($value -isnot [byte] -and $value -isnot [uint16] -and $value -isnot [int] -and
+                $value -isnot [uint32] -and $value -isnot [long]) { throw 'Invalid numeric KVP status' }
+            if ($value -lt 0 -or $value -gt 65535) { throw 'Invalid numeric KVP status' }
+            $row[$field] = [int]$value
+        }
+        if ($row.EnabledState -ne 2) { throw 'KVP disabled or enabled state unknown' }
+        # OperationalStatus is authoritative. CommunicationStatus is inherited and may be unimplemented.
+        if ($null -eq $row.OperationalStatus) { throw 'KVP operational status missing or not OK' }
+        if ($row.OperationalStatus -ne 2) {
+            switch ($row.OperationalStatus) {
+                3 { throw 'KVP Degraded (lab requires normal communication)' }
+                7 { throw 'KVP incompatible protocol' }
+                12 { throw 'KVP NoContact' }
+                13 { throw 'KVP LostCommunication' }
+                default { throw 'KVP operational status missing or not OK' }
+            }
+        }
+        if ($null -ne $row.CommunicationStatus -and $row.CommunicationStatus -notin @(0, 1, 2)) {
+            throw 'KVP CommunicationStatus reports lost/no contact or unknown failure'
+        }
+        $property = $Component.PSObject.Properties['GuestIntrinsicExchangeItems']
+        if ($null -eq $property) { throw 'Missing guest OS metadata' }
+        $metadata = @{}
+        foreach ($item in @($property.Value)) {
+            if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)) { throw 'Malformed guest OS metadata XML' }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $reader = [Xml.XmlReader]::Create([IO.StringReader]::new($item), $settings)
+            try { $xml = [Xml.XmlDocument]::new(); $xml.XmlResolver = $null; $xml.Load($reader) }
+            catch { throw 'Malformed guest OS metadata XML' }
+            finally { $reader.Dispose() }
+            $names = $xml.SelectNodes('/INSTANCE/PROPERTY[@NAME="Name"]/VALUE')
+            $data = $xml.SelectNodes('/INSTANCE/PROPERTY[@NAME="Data"]/VALUE')
+            if ($names.Count -ne 1 -or $data.Count -ne 1) { throw 'Malformed guest OS metadata XML' }
+            $key = $names[0].InnerText
+            if ($key -notin @('OSName', 'OSVersion')) { continue }
+            if ($metadata.ContainsKey($key)) { throw 'Duplicate guest OS metadata' }
+            $metadata[$key] = $data[0].InnerText.Trim()
+        }
+        foreach ($key in @('OSName', 'OSVersion')) {
+            if (-not $metadata.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($metadata[$key])) { throw 'Missing guest OS name/version' }
+            if ($metadata[$key].Length -gt 256 -or $metadata[$key] -match '[\x00-\x1f\x7f]') { throw 'Invalid guest OS metadata text' }
+            $row[$key] = $metadata[$key]
+        }
+        if ($Name -like 'OnPrem-Linux-*') {
+            if ($row.OSName -notmatch '(?i)\b(?:Linux|Ubuntu)\b') { throw 'Guest OS family is not recognized as Linux/Ubuntu' }
+        } elseif ($row.OSName -notmatch '(?i)\bWindows\b') { throw 'Guest OS family is not recognized as Windows' }
+        $row.Ready = $true
+        $row.Reason = 'KVP communication OK and guest OS metadata present'
+    } catch { $row.Reason = $_.Exception.Message }
+    return [pscustomobject]$row
+}
+
+function Get-LabGuestCommunicationRows {
+    $required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    foreach ($name in $required) {
+        $id = ''; $component = $null; $failure = ''
+        try {
+            $vms = @(Get-VM -Name $name -ErrorAction Stop)
+            if ($vms.Count -ne 1) { $failure = 'Missing or ambiguous VM'; throw $failure }
+            $vm = $vms[0]; $id = [string]$vm.Id
+            if ([string]$vm.State -cne 'Running') { $failure = 'VM not Running'; throw $failure }
+            $systems = @(Get-CimInstance -Namespace root/virtualization/v2 -ClassName Msvm_ComputerSystem -Filter "Name='$id'" -OperationTimeoutSec 15 -ErrorAction Stop)
+            if ($systems.Count -ne 1) { $failure = 'Missing or ambiguous VM CIM record'; throw $failure }
+            $components = @(Get-CimAssociatedInstance -InputObject $systems[0] -ResultClassName Msvm_KvpExchangeComponent -OperationTimeoutSec 15 -ErrorAction Stop)
+            if ($components.Count -ne 1) { $failure = 'Missing or ambiguous KVP component'; throw $failure }
+            $component = $components[0]
+        } catch { if (-not $failure) { $failure = 'VM/KVP read unavailable; check VM state and host CIM access' } }
+        Get-LabKvpReadinessRow -Name $name -VMId $id -Component $component -Failure $failure
+    }
+}
+
+function ConvertFrom-LabGuestCommunicationPayload {
+    param([string]$Text)
+    $matches = [regex]::Matches($Text, '(?m)^LAB_KVP_JSON\|([^\r\n]+)\r?\nLAB_KVP_END\r?$')
+    if ($matches.Count -ne 1 -or ([regex]::Matches($Text, 'LAB_KVP_JSON\|')).Count -ne 1 -or
+        ([regex]::Matches($Text, '(?m)^LAB_KVP_END\r?$')).Count -ne 1) { throw 'Missing, duplicate or truncated KVP payload' }
+    $payload = $matches[0].Groups[1].Value | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $payload -or $null -eq $payload.PSObject.Properties['Schema'] -or
+        [string]$payload.Schema -cne '1' -or $null -eq $payload.PSObject.Properties['Rows']) { throw 'Invalid KVP payload schema' }
+    $required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    $rows = @($payload.Rows)
+    if ($rows.Count -ne 4) { throw 'Expected exactly four KVP rows' }
+    $ids = @{}
+    for ($i = 0; $i -lt 4; $i++) {
+        $row = $rows[$i]
+        foreach ($field in @('Name', 'VMId', 'EnabledState', 'OperationalStatus', 'CommunicationStatus', 'OSName', 'OSVersion', 'Ready', 'Reason')) {
+            if ($null -eq $row -or $null -eq $row.PSObject.Properties[$field]) { throw 'Malformed KVP row' }
+        }
+        if ($row.Name -isnot [string] -or $row.Name -cne $required[$i] -or $row.VMId -isnot [string] -or
+            $row.Ready -isnot [bool] -or $row.Reason -isnot [string] -or $row.Reason.Length -gt 256 -or
+            $row.Reason -match '[\x00-\x1f\x7f]') { throw 'Malformed or duplicate KVP row' }
+        foreach ($field in @('EnabledState', 'OperationalStatus', 'CommunicationStatus')) {
+            $value = $row.$field
+            if ($null -ne $value -and (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 0 -or $value -gt 65535)) { throw 'Invalid numeric KVP payload status' }
+        }
+        if ($row.OSName -isnot [string] -or $row.OSVersion -isnot [string]) { throw 'Invalid OS metadata payload' }
+        if ($row.Ready) {
+            $id = [guid]::Empty
+            if (-not [guid]::TryParse($row.VMId, [ref]$id) -or $id -eq [guid]::Empty -or $ids.ContainsKey($row.VMId)) { throw 'Missing or duplicate VM identity' }
+            $ids[$row.VMId] = $true
+            if ($row.EnabledState -ne 2 -or $row.OperationalStatus -ne 2 -or
+                ($null -ne $row.CommunicationStatus -and $row.CommunicationStatus -notin @(0, 1, 2))) { throw 'KVP readiness contradicts numeric status' }
+            foreach ($field in @('OSName', 'OSVersion')) {
+                if ([string]::IsNullOrWhiteSpace($row.$field) -or $row.$field.Length -gt 256 -or $row.$field -match '[\x00-\x1f\x7f]') { throw 'Missing or invalid guest OS metadata' }
+            }
+            $family = if ($row.Name -like 'OnPrem-Linux-*') { '(?i)\b(?:Linux|Ubuntu)\b' } else { '(?i)\bWindows\b' }
+            if ($row.OSName -notmatch $family) { throw 'Unrecognized guest OS family' }
+        }
+    }
+    return $rows
+}
+
+function Assert-LabGuestCommunication {
+    Write-Host "Read-only guest KVP communication/OS metadata check on $SourceResourceGroup/$HyperVHostVMName" -ForegroundColor Cyan
+    # Inline the same read-only functions into the selected Azure host, never the workstation.
+    $probe = "`$ErrorActionPreference = 'Stop'`n`$ProgressPreference = 'SilentlyContinue'`n"
+    foreach ($name in @('Get-LabKvpReadinessRow', 'Get-LabGuestCommunicationRows')) {
+        $probe += "function $name {`n" + (Get-Command $name -CommandType Function).Definition + "`n}`n"
+    }
+    $probe += @'
+$rows = @(Get-LabGuestCommunicationRows)
+Write-Output ('LAB_KVP_JSON|' + ([ordered]@{ Schema = 1; Rows = $rows } | ConvertTo-Json -Depth 4 -Compress))
+Write-Output 'LAB_KVP_END'
+'@
+    try {
+        $result = Invoke-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+            -CommandId RunPowerShellScript -ScriptString $probe -ErrorAction Stop
+        $rows = @(ConvertFrom-LabGuestCommunicationPayload -Text (Get-LabRunCommandText -Result $result))
+    } catch {
+        Write-Warning "KVP communication Unknown: $($_.Exception.Message)"
+        throw 'Guest communication verification failed closed. Check selected host Run Command/CIM access, then rerun Step 2.'
+    }
+    foreach ($row in $rows) {
+        $color = if ($row.Ready) { 'Green' } else { 'Yellow' }
+        Write-Host "  $($row.Name): $($row.Reason) [EnabledState=$($row.EnabledState); OperationalStatus=$($row.OperationalStatus); CommunicationStatus=$($row.CommunicationStatus)]" -ForegroundColor $color
+    }
+    if (@($rows | Where-Object { -not $_.Ready }).Count) {
+        Write-Warning 'Repair only the named guest(s) manually. In Linux check uname -r, systemctl status hv-kvp-daemon.service and journalctl -u hv-kvp-daemon.service.'
+        Write-Warning 'A unit can be enabled yet lack its current-kernel daemon. Module 1 section 2 explains matching tools, service and retry checks. WinRM does not fix guest KVP.'
+        throw 'All four guests require normal KVP communication and recognized OS name/version. No guest was started or modified; rerun Step 2 after repair.'
+    }
+    Write-Host 'Local host transport/OS metadata verified only; appliance credentials, OS classification and fresh software/web discovery still require validation.' -ForegroundColor Gray
+    return [pscustomobject]@{ Rows = $rows; CheckedUtc = [DateTime]::UtcNow.ToString('o') }
+}
+
 function Invoke-HostScript {
     # Runs a short script on the Hyper-V host through VM Run Command and returns its output.
     param([Parameter(Mandatory)][string]$Script, [Parameter(Mandatory)][string]$Stage)
@@ -958,18 +2362,9 @@ if (-not $sourceRg) {
     throw "Source resource group '$SourceResourceGroup' not found. Run deploy-lab.ps1 first."
 }
 
-# Verify the Hyper-V host VM is running
-$hostVM = Get-AzVM -ResourceGroupName $SourceResourceGroup -Name $HyperVHostVMName -Status -ErrorAction SilentlyContinue
-if (-not $hostVM) {
-    throw "Hyper-V host VM '$HyperVHostVMName' not found in '$SourceResourceGroup'."
-}
-$vmStatus = ($hostVM.Statuses | Where-Object { $_.Code -like "PowerState/*" }).DisplayStatus
-Write-Log "Hyper-V host VM status: $vmStatus"
-if ($vmStatus -ne "VM running") {
-    Write-Host "WARNING: Hyper-V host is not running. Starting it now..." -ForegroundColor Yellow
-    Start-AzVM -ResourceGroupName $SourceResourceGroup -Name $HyperVHostVMName -ErrorAction Stop
-    Write-Log "Hyper-V host started."
-}
+# Fail closed before appliance/download/registration/assessment actions. No nested VM is started.
+$guestReadiness = Assert-LabWorkloadPower -Stage 'Step 2 pre-flight'
+$guestCommunication = Assert-LabGuestCommunication
 
 # Ensure Az.Migrate module is loaded
 $migrateModule = Get-Module -ListAvailable -Name Az.Migrate
@@ -1011,18 +2406,7 @@ try {
     # Store the IP for later use
     $hyperVHostIP = $pip.IpAddress
 
-    # List the guest VMs currently running on the Hyper-V host
-    # This confirms the on-premises environment is healthy before we start discovery
-    Write-Log "Checking guest VMs on the Hyper-V host..."
-    $guestVmResult = Invoke-AzVMRunCommand `
-        -ResourceGroupName $SourceResourceGroup `
-        -VMName $HyperVHostVMName `
-        -CommandId "RunPowerShellScript" `
-        -ScriptString "Get-VM | Select-Object Name, State, MemoryAssigned, ProcessorCount | Format-Table -AutoSize" `
-        -ErrorAction Stop
-
-    Write-Host "  Guest VMs on Hyper-V host:" -ForegroundColor White
-    Write-Host $guestVmResult.Value[0].Message -ForegroundColor Gray
+    Write-Host "  Four workload VMs were verified Running at $($guestReadiness.CheckedUtc) UTC (power state only)." -ForegroundColor Gray
 
 } catch {
     throw "Failed to get Hyper-V host information: $_"
@@ -1030,10 +2414,8 @@ try {
 
 Read-Host "Press Enter to continue to Step 2..."
 
-# The appliance VM is named from what is actually on the Hyper-V host. Microsoft's documented
-# route -- Hyper-V Manager > Import Virtual Machine -- keeps the name held in Microsoft's
-# exported configuration and offers no rename step, while Module 1 creates the VM with
-# New-VM -Name. Rather than assume either, the host is asked what it has.
+# Select from the host inventory or choose a name for a new configuration copy-import.
+# Module 1 renames the imported VM before boot; its Azure registration name is separate.
 $workloadVMNames = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
 $hostVMText = Invoke-HostScript -Script 'Get-VM | Select-Object -ExpandProperty Name' -Stage 'List VMs on the Hyper-V host'
 $hostVMNames = @($hostVMText -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -1074,14 +2456,6 @@ try {
     $listeners = @(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop)
     $report['PSRemoting'] = if ($listeners.Count) { 'Enabled' } else { 'No listener' }
 } catch { $report['PSRemoting'] = 'Not enabled' }
-$missing = @()
-foreach ($vm in @('OnPrem-Web','OnPrem-SQL','OnPrem-Linux-Web','OnPrem-Linux-App')) {
-    if (-not (Get-VM -Name $vm -ErrorAction SilentlyContinue)) { continue }
-    $svcs = Get-VMIntegrationService -VMName $vm -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -in @('Heartbeat','Key-Value Pair Exchange') -and -not $_.Enabled }
-    if ($svcs) { $missing += $vm }
-}
-$report['IntegrationServices'] = if ($missing.Count) { "Incomplete on $($missing -join ', ')" } else { 'Enabled on all present guests' }
 foreach ($k in $report.Keys) { Write-Output ("HOSTPREP|{0}|{1}" -f $k, $report[$k]) }
 '@
 
@@ -1098,9 +2472,10 @@ $prepProblems = @()
 if ($prepState['HyperVRole'] -ne 'Installed') { $prepProblems += "Hyper-V role: $($prepState['HyperVRole'])" }
 if ($prepState['WinRmService'] -notlike 'Running*') { $prepProblems += "WinRM service: $($prepState['WinRmService'])" }
 if ($prepState['PSRemoting'] -ne 'Enabled') { $prepProblems += "PowerShell remoting: $($prepState['PSRemoting'])" }
-if ($prepState['IntegrationServices'] -like 'Incomplete*') { $prepProblems += $prepState['IntegrationServices'] }
+# Guest communication was gated separately before module/appliance work; WinRM cannot waive it.
+Write-Log "  GuestCommunication : verified live in pre-flight at $($guestCommunication.CheckedUtc)"
 
-foreach ($key in @('RecordedByDeployment','HyperVRole','WinRmService','PSRemoting','IntegrationServices')) {
+foreach ($key in @('RecordedByDeployment','HyperVRole','WinRmService','PSRemoting')) {
     Write-Log "  $key : $($prepState[$key])"
 }
 
@@ -1190,7 +2565,7 @@ Read-Host "Press Enter once the project key is generated and stored safely..."
 # with an \Appliance folder. The download, the extracted VHD and the running VM all stay
 # on it -- never on C:, which holds the four fixed workload disks.
 #
-# Timing: the archive is roughly 11-12 GB and expands to a ~40 GB VHD. A single VM Run
+# Timing: the archive is roughly 11-12 GB; extracted physical size depends on the current package. A single VM Run
 # Command cannot be relied on for that (it has a hard time limit and gives no progress),
 # so the download runs as a scheduled task on the host and this script polls it with
 # short Run Commands. The task survives a closed console; rerunning this script with the
@@ -1229,7 +2604,7 @@ $doImport = ($hostVMNames -notcontains $ApplianceVMName)
 if ($doImport) {
     Write-Log "No VM named '$ApplianceVMName' on the host yet: the VHD will be downloaded and imported into $storeRoot."
     $ApplianceDownloadUrl = Read-LabParameter -Name 'ApplianceDownloadUrl' -Value $ApplianceDownloadUrl -Kind Url -Prompt 'VHD download link shown in the project (Discover > Hyper-V > VHD)' -Example 'https://go.microsoft.com/fwlink/?linkid=2191848'
-    $ApplianceSha256 = Read-LabParameter -Name 'ApplianceSha256' -Value $ApplianceSha256 -Kind Sha256 -Prompt "SHA256 Microsoft publishes for this archive (Hyper-V appliance article, 'Verify security'), or SKIP"
+    $ApplianceSha256 = Read-LabParameter -Name 'ApplianceSha256' -Value $ApplianceSha256 -Kind Sha256 -Prompt "Current official Hyper-V ZIP SHA256 (appliance article, 'Verify security')"
     $DownloadTimeoutMinutes = Read-LabNumber -Name 'DownloadTimeoutMinutes' -Prompt 'Minutes to wait for the download before asking whether to keep waiting' -Value $DownloadTimeoutMinutes -Supplied:($PSBoundParameters.ContainsKey('DownloadTimeoutMinutes')) -Minimum 15 -Maximum 480 -Example '90'
 }
 
@@ -1239,47 +2614,39 @@ if ($doImport) {
 param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$Sha256)
 $ErrorActionPreference = 'Stop'
 $statusPath = Join-Path $Root 'appliance-download.status'
-$archive = Join-Path $Root 'AzureMigrateAppliance.zip'
-$partial = "$archive.partial"
+$recordPath = Join-Path $Root 'download-complete.json'
 $extracted = Join-Path $Root 'Extracted'
-# deploy-lab.ps1 pre-stages the archive under a different name, so any .zip in the folder is
-# a candidate for verification. Without this the staged archive is invisible here and the
-# extracted VHD would be accepted with nothing to check it against.
-if (-not (Test-Path -LiteralPath $archive)) {
-    $staged = Get-ChildItem -LiteralPath $Root -Filter *.zip -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($staged) { $archive = $staged.FullName }
-}
+$prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
 function Set-Status([string]$State, [string]$Detail) {
     $line = '{0}|{1}|{2}' -f $State, (Get-Date).ToUniversalTime().ToString('o'), ($Detail -replace '[\r\n|]+', ' ')
     Set-Content -LiteralPath $statusPath -Value $line -Encoding UTF8
 }
-function Find-ApplianceVhd {
-    if (-not (Test-Path -LiteralPath $extracted)) { return $null }
-    return (Get-ChildItem -LiteralPath $extracted -Recurse -File | Where-Object { $_.Extension -in @('.vhd', '.vhdx') } | Select-Object -First 1)
+function Get-StoreFile([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Recorded file is outside ApplianceStore.' }
+    $item = Get-Item -LiteralPath $full -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Expected a regular file inside ApplianceStore.' }
+    return $item
 }
 try {
-    $vhd = Find-ApplianceVhd
-    if ($vhd) {
-        # An already-extracted VHD is NOT automatically trustworthy. deploy-lab.ps1 stages one
-        # from the static aka.ms link, which is not guaranteed to be the appliance the portal
-        # currently serves - a stale build has been observed. Accepting it unchecked would
-        # import an appliance nobody verified, so it is verified here or refused.
-        if ($Sha256 -eq 'SKIP') { Set-Status 'Ready' $vhd.FullName; exit 0 }
-        if (Test-Path -LiteralPath $archive) {
-            Set-Status 'Verifying' 'Checking the staged archive against the published hash'
-            $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-            if ($actual -eq $Sha256.ToUpperInvariant()) { Set-Status 'Ready' $vhd.FullName; exit 0 }
-            throw "The staged appliance does not match the published SHA256 (expected $Sha256, got $actual). It was left in place, not deleted, so you can inspect it. Remove $Root\Extracted and the .zip beside it, then rerun to download the appliance the portal serves."
-        }
-        throw "An extracted appliance VHD is present at $extracted but no archive remains beside it, so it cannot be checked against the published SHA256. Either remove the extracted folder and rerun to download a verifiable copy, or rerun with -ApplianceSha256 SKIP to accept it unverified."
+    if ($Sha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'A current official Hyper-V ZIP SHA256 is required; bypass is not supported.' }
+    $record = $null
+    if (Test-Path -LiteralPath $recordPath) { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json }
+    if ($record -and $record.Archive) {
+        $archive = (Get-StoreFile ([string]$record.Archive)).FullName
+        if ([IO.Path]::GetExtension($archive) -ne '.zip') { throw 'Completion record does not identify a ZIP.' }
+    } else {
+        $candidates = @(Get-ChildItem -LiteralPath $Root -Filter *.zip -File)
+        if ($candidates.Count -gt 1) { throw 'Multiple ZIPs are present. Select and verify one explicit file using Module 1; no first-ZIP guess was made.' }
+        $archive = if ($candidates.Count -eq 1) { (Get-StoreFile $candidates[0].FullName).FullName } else { Join-Path $Root 'AzureMigrateAppliance.zip' }
     }
+    $partial = "$archive.partial"
     if (-not (Test-Path -LiteralPath $archive)) {
         $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
         $attempt = 0
         while ($true) {
             $attempt++
             Set-Status 'Downloading' "Attempt $attempt"
-            # --continue-at - resumes a partial file after a network drop or a host restart.
             & $curl --location --fail --silent --show-error --retry 5 --retry-delay 20 --continue-at - --output $partial $Url
             if ($LASTEXITCODE -eq 0) { break }
             if ($attempt -ge 5) { throw "curl.exe exited with code $LASTEXITCODE after $attempt attempts." }
@@ -1287,21 +2654,47 @@ try {
         }
         Move-Item -LiteralPath $partial -Destination $archive -Force
     }
-    if ($Sha256 -ne 'SKIP') {
-        Set-Status 'Verifying' 'Computing SHA256'
-        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-        if ($actual -ne $Sha256.ToUpperInvariant()) {
-            Remove-Item -LiteralPath $archive -Force
-            throw "SHA256 mismatch (expected $Sha256, got $actual). The archive was deleted; do not import it."
-        }
+    Set-Status 'Verifying' 'Hashing the exact source ZIP against the supplied official value'
+    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+    if ($actual -ne $Sha256.ToUpperInvariant()) {
+        throw "ZIP SHA256 mismatch: expected $Sha256, actual $actual, file $archive. Retained for inspection; do not extract or import."
     }
-    Set-Status 'Extracting' "Extracting to $extracted"
-    if (Test-Path -LiteralPath $extracted) { Remove-Item -LiteralPath $extracted -Recurse -Force }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $extracted)
-    $vhd = Find-ApplianceVhd
-    if (-not $vhd) { throw 'The archive did not contain a .vhd or .vhdx file.' }
-    Set-Status 'Ready' $vhd.FullName
+    if (Test-Path -LiteralPath $extracted) {
+        # A matching ZIP does not prove an existing extracted/booted disk is unchanged.
+        if (-not $record -or $record.ArchiveSha256 -ne $actual -or -not $record.ExtractionFiles) {
+            throw 'Existing extraction has no matching content record. Instructor must review it and any attached disks; no files were deleted. Follow the fresh-extraction route in Module 1.'
+        }
+        $files = @(Get-ChildItem -LiteralPath $extracted -Recurse -File)
+        if ($files.Count -ne @($record.ExtractionFiles).Count) { throw 'Extracted file inventory changed. Do not import; no files were deleted.' }
+        foreach ($entry in $record.ExtractionFiles) {
+            $item = Get-StoreFile ([string]$entry.Path)
+            if (-not $item.FullName.StartsWith($extracted.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+                (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ne $entry.Sha256) {
+                throw 'Extracted content changed or is outside the recorded extraction folder. Source ZIP verification does not verify this disk.'
+            }
+        }
+    } else {
+        Set-Status 'Extracting' "Checking space and extracting to $extracted"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $sourceZip = [IO.Compression.ZipFile]::OpenRead($archive)
+        try { $expandedBytes = ($sourceZip.Entries | Measure-Object Length -Sum).Sum }
+        finally { $sourceZip.Dispose() }
+        $free = (Get-Volume -DriveLetter $Root.Substring(0,1)).SizeRemaining
+        if ($free -lt ($expandedBytes + 10GB)) { throw 'Insufficient store space for extracted bytes plus 10 GB headroom. Stop for instructor capacity review.' }
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $extracted)
+        $extractionFiles = @(Get-ChildItem -LiteralPath $extracted -Recurse -File | ForEach-Object {
+            [ordered]@{ Path=$_.FullName; Sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+        })
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $actual) { throw 'ZIP changed during extraction. Do not use the extracted files.' }
+        [ordered]@{ CompletedUtc=(Get-Date).ToUniversalTime().ToString('o'); Archive=$archive; ArchiveSha256=$actual;
+            ExtractionFiles=$extractionFiles; Verified=$true; Note='Extraction content recorded; rehash before import.' } |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $recordPath -Encoding UTF8
+    }
+    $vhds = @(Get-ChildItem -LiteralPath $extracted -Recurse -File | Where-Object { $_.Extension -in @('.vhd', '.vhdx') })
+    if ($vhds.Count -ne 1) { throw 'Expected exactly one appliance disk in the exported configuration; check the current Microsoft package.' }
+    $attached = @(Get-VM | Get-VMHardDiskDrive | Where-Object { $_.Path -and $_.Path.StartsWith($extracted.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })
+    if ($attached.Count) { throw 'An existing VM uses a disk in the extraction folder. No active disk will be overwritten or treated as a pristine template.' }
+    Set-Status 'Ready' $vhds[0].FullName
 } catch {
     Set-Status 'Failed' $_.Exception.Message
     exit 1
@@ -1340,13 +2733,7 @@ Write-Output ('DOWNLOAD_STATUS|{0}|{1}|{2}' -f $taskState, [string]::Format([Glo
 '@
 
     $existingOutput = Invoke-HostScript -Script ($pollScript.Replace('__ROOT__', $storeRoot)) -Stage 'Check existing download'
-    $alreadyReady = $existingOutput -match '(?m)^DOWNLOAD_STATUS\|[^|]*\|[^|]*\|Ready\|'
-    $partialGB = 0.0
-    $partialMatch = [regex]::Match($existingOutput, '(?m)^DOWNLOAD_STATUS\|[^|]*\|([0-9.]+)\|')
-    if ($partialMatch.Success) { $partialGB = [double]::Parse($partialMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) }
-    if (-not $alreadyReady -and ($storeFreeGB + $partialGB) -lt 55) {
-        throw "The appliance store has $storeFreeGB GB free; the archive plus the extracted VHD need about 55 GB. Free space on $storeDrive (do not stage on C:) and rerun."
-    }
+    # The worker checks extraction/copy requirements using actual package/file bytes.
 
     $quote = { param([string]$Text) $Text.Replace("'", "''") }
     $workerB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($worker))
@@ -1357,9 +2744,6 @@ Write-Output ('DOWNLOAD_STATUS|{0}|{1}|{2}' -f $taskState, [string]::Format([Glo
         Write-Log "A download is already running on the host; following its progress."
     } else {
         Write-Log "Download task started on $HyperVHostVMName. Files go to $storeRoot."
-    }
-    if ($ApplianceSha256 -eq 'SKIP') {
-        Write-Warning "Hash verification was skipped. Module 1 requires checking the archive against Microsoft's published SHA256 before import."
     }
 
     Write-Log "Polling every 60 seconds. The archive is roughly 11-12 GB; allow $DownloadTimeoutMinutes minutes before you are asked whether to keep waiting."
@@ -1401,72 +2785,103 @@ Write-Output ('DOWNLOAD_STATUS|{0}|{1}|{2}' -f $taskState, [string]::Format([Glo
     }
     Write-Log "Extracted VHD: $extractedVhd"
 
-    # --- 3.4: Import the VHD as a VM, grow the disk to 80 GB before first boot ------------
+    # --- 3.4: Copy-import the exported configuration; preserve generation and disk -------
     $importScript = @'
 $ErrorActionPreference = 'Stop'
-$root = '__ROOT__'; $vmName = '__VMNAME__'; $vhdPath = '__VHD__'; $generationToken = '__GEN__'
-$drive = $root.Substring(0, 2)
+$root = '__ROOT__'; $vmName = '__VMNAME__'; $vhdPath = '__VHD__'; $expected = '__SHA__'; $requestedGeneration = '__GEN__'
 if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) { Write-Output 'APPLIANCE_EXISTS'; return }
-if (-not $vhdPath.StartsWith($drive, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $vhdPath)) {
-    throw "The extracted VHD '$vhdPath' is not on the appliance store $drive."
+$prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+$vhdPath = [IO.Path]::GetFullPath($vhdPath)
+if (-not $vhdPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $vhdPath -PathType Leaf)) {
+    throw 'The extracted disk is not inside the appliance store.'
 }
-$extension = [IO.Path]::GetExtension($vhdPath).ToLowerInvariant()
-if ($extension -eq '.vhd') {
-    if ($generationToken -eq '2') { throw 'A .vhd disk can only boot as a Generation 1 VM.' }
-    $generation = 1
-} elseif ($generationToken -in @('1', '2')) {
-    $generation = [int]$generationToken
-} else {
-    Write-Output 'APPLIANCE_NEEDS_GENERATION'; return
+$extracted = Join-Path $root 'Extracted'
+$record = Get-Content -LiteralPath (Join-Path $root 'download-complete.json') -Raw | ConvertFrom-Json
+$archive = [IO.Path]::GetFullPath([string]$record.Archive)
+if (-not $archive.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($archive) -ne '.zip') { throw 'Recorded archive is not a ZIP inside ApplianceStore.' }
+$fresh = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+if ($fresh -ne $expected -or $fresh -ne $record.ArchiveSha256 -or -not $record.ExtractionFiles) { throw 'ZIP or extraction record is no longer verified; stop before import.' }
+$files = @(Get-ChildItem -LiteralPath $extracted -Recurse -File)
+if ($files.Count -ne @($record.ExtractionFiles).Count) { throw 'Extraction inventory changed before import.' }
+foreach ($entry in $record.ExtractionFiles) {
+    $full = [IO.Path]::GetFullPath([string]$entry.Path)
+    if (-not $full.StartsWith($extracted.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash -ne $entry.Sha256) { throw 'Extracted content changed before import; no VM was created.' }
 }
-# The VM runs from the extracted VHD in place on the store. The disk stays dynamic.
+$vhds = @($files | Where-Object { $_.Extension -in @('.vhd', '.vhdx') })
+if ($vhds.Count -ne 1 -or $vhds[0].FullName -ne $vhdPath) { throw 'Ambiguous or changed appliance disk selection.' }
+$attached = @(Get-VM | Get-VMHardDiskDrive | Where-Object { $_.Path -and $_.Path.StartsWith($extracted.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })
+if ($attached.Count) { throw 'An existing VM uses this extracted disk; do not import or overwrite it.' }
+$configs = @($files | Where-Object { $_.Extension -eq '.vmcx' })
+if (-not $configs.Count) { $configs = @($files | Where-Object { $_.Extension -eq '.xml' }) }
+if ($configs.Count -ne 1) { throw 'Expected exactly one exported VM configuration. Check the current official import route; generation will not be guessed.' }
 $disk = Get-VHD -Path $vhdPath
-if ($disk.Size -lt 80GB) { Resize-VHD -Path $vhdPath -SizeBytes 80GB }
+Write-Output ('TEMPLATE_CAPACITY_GB|{0}' -f [math]::Round($disk.Size / 1GB, 1))
+if ($disk.Size -lt 80GB) { throw 'Verified template has less than the documented roughly 80 GB disk requirement. Stop for instructor review; disk and guest partition were not resized.' }
+$copyBytes = ($files | Measure-Object Length -Sum).Sum
+$free = (Get-Volume -DriveLetter $root.Substring(0,1)).SizeRemaining
+if ($free -lt ($copyBytes + 10GB)) { throw 'Insufficient ApplianceStore space for the physical source-file copy plus 10 GB headroom. Nothing was deleted.' }
+$reservations = @(Get-DhcpServerv4Reservation -ScopeId 192.168.0.0)
+$client = '00155D000014'
+$conflicts = @($reservations | Where-Object {
+    ($_.IPAddress.ToString() -eq '192.168.0.20' -and ($_.ClientId -replace '[-:]','') -ne $client) -or
+    (($_.ClientId -replace '[-:]','') -eq $client -and $_.IPAddress.ToString() -ne '192.168.0.20')
+})
+if ($conflicts.Count) { throw 'DHCP reservation conflict: do not overwrite another client.' }
+$leases = @(Get-DhcpServerv4Lease -ScopeId 192.168.0.0 | Where-Object { $_.IPAddress.ToString() -eq '192.168.0.20' -and ($_.ClientId -replace '[-:]','') -ne $client })
+if ($leases.Count) { throw '192.168.0.20 is leased to another client.' }
+$usedMac = @(Get-VM | Get-VMNetworkAdapter | Where-Object { $_.MacAddress -eq $client })
+if ($usedMac.Count) { throw 'Appliance MAC is already in use by another VM.' }
 $vmPath = Join-Path $root 'VMs'
-New-Item -ItemType Directory -Path $vmPath -Force | Out-Null
-New-VM -Name $vmName -MemoryStartupBytes 16GB -VHDPath $vhdPath -SwitchName 'intSwitch' -Path $vmPath -Generation $generation | Out-Null
-Set-VMProcessor -VMName $vmName -Count 8
-Set-VMMemory -VMName $vmName -DynamicMemoryEnabled $false
-Set-VM -Name $vmName -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
-Set-VMNetworkAdapter -VMName $vmName -StaticMacAddress '00155D000014'
-Enable-VMIntegrationService -VMName $vmName -Name 'Time Synchronization'
-$reservation = @(Get-DhcpServerv4Reservation -ScopeId 192.168.0.0 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress.IPAddressToString -eq '192.168.0.20' })
-if (-not $reservation.Count) {
-    Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 -ClientId '00-15-5D-00-00-14' -Name $vmName
-} elseif ($reservation[0].ClientId -ne '00-15-5d-00-00-14') {
-    throw "192.168.0.20 is already reserved for another client ($($reservation[0].ClientId))."
+$diskPath = Join-Path $vmPath 'Virtual Hard Disks'
+$checkpointPath = Join-Path $vmPath 'Snapshots'
+$pagingPath = Join-Path $vmPath 'Paging'
+if (Test-Path -LiteralPath (Join-Path $diskPath $vhds[0].Name)) { throw 'Destination disk file already exists. No file will be overwritten; instructor review required.' }
+New-Item -ItemType Directory -Path $vmPath,$diskPath,$checkpointPath,$pagingPath -Force | Out-Null
+$report = Compare-VM -Path $configs[0].FullName -Copy -GenerateNewId -VirtualMachinePath $vmPath `
+    -SnapshotFilePath $checkpointPath -SmartPagingFilePath $pagingPath -VhdDestinationPath $diskPath -VhdSourcePath $vhds[0].DirectoryName
+if ($requestedGeneration -and [int]$requestedGeneration -ne $report.VM.Generation) { throw 'Requested generation differs from the export. Preserve the published configuration; do not infer from disk extension.' }
+foreach ($issue in $report.Incompatibilities) {
+    if ($issue.MessageId -eq 33012 -and $issue.Source -is [Microsoft.HyperV.PowerShell.VMNetworkAdapter]) {
+        Disconnect-VMNetworkAdapter -VMNetworkAdapter $issue.Source
+    } else { throw 'Export compatibility issue requires instructor review using Hyper-V Manager; generation/hardware will not be guessed.' }
 }
+$report = Compare-VM -CompatibilityReport $report
+if ($report.Incompatibilities.Count) { throw 'Export remains incompatible after switch disconnection. Stop for instructor review.' }
+if (@(Get-VMNetworkAdapter -VM $report.VM).Count -ne 1) { throw 'Unexpected exported NIC count; stop for instructor review.' }
+$vm = Import-VM -CompatibilityReport $report
+Rename-VM -VM $vm -NewName $vmName
+Set-VMProcessor -VMName $vmName -Count 8
+Set-VMMemory -VMName $vmName -StartupBytes 16GB -DynamicMemoryEnabled $false
+Set-VM -Name $vmName -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
+Connect-VMNetworkAdapter -VMName $vmName -SwitchName 'intSwitch'
+Set-VMNetworkAdapter -VMName $vmName -StaticMacAddress $client
+Enable-VMIntegrationService -VMName $vmName -Name 'Time Synchronization'
+if (-not @($reservations | Where-Object { $_.IPAddress.ToString() -eq '192.168.0.20' }).Count) {
+    Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 -ClientId '00-15-5D-00-00-14' -Name $vmName
+}
+$imported = Get-VM -Name $vmName
+$paths = @(Get-VMHardDiskDrive -VMName $vmName | ForEach-Object { $_.Path }) + @($imported.Path, $imported.SnapshotFileLocation, $imported.SmartPagingFilePath)
+if (@($paths | Where-Object { -not $_ -or -not ([IO.Path]::GetFullPath($_)).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count) { throw 'Imported VM has a disk/configuration destination outside ApplianceStore; it was not started.' }
 Start-VM -Name $vmName
-# Module 1, section 3.3: keep the archive until the import succeeds, then delete it.
-Remove-Item -LiteralPath (Join-Path $root 'AzureMigrateAppliance.zip') -Force -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'AzMigrateApplianceDownload' -Confirm:$false -ErrorAction SilentlyContinue
-Write-Output ('APPLIANCE_IMPORTED|{0}' -f $generation)
+Write-Output ('APPLIANCE_IMPORTED|{0}' -f $imported.Generation)
 '@
 
-    $generationChoice = $ApplianceGeneration
-    while ($true) {
-        $importBody = $importScript.Replace('__ROOT__', (& $quote $storeRoot)).Replace('__VMNAME__', (& $quote $ApplianceVMName))
-        $importBody = $importBody.Replace('__VHD__', (& $quote $extractedVhd)).Replace('__GEN__', [string]$generationChoice)
-        Write-Log "Importing '$ApplianceVMName' from $extractedVhd (16 GB static memory, 8 vCPUs, intSwitch, 80 GB disk)..."
-        $importOutput = Invoke-HostScript -Script $importBody -Stage 'Import appliance VM'
-        if ($importOutput -match '(?m)^APPLIANCE_NEEDS_GENERATION') {
-            Write-Log "The extracted disk is a .vhdx, which can be Generation 1 or 2."
-            $generationChoice = Read-LabParameter -Name 'ApplianceGeneration' -Value '' -Kind Generation `
-                -Prompt 'VM generation stated in the current Microsoft article for this VHD (1 or 2)'
-            continue
-        }
-        break
-    }
+    $importBody = $importScript.Replace('__ROOT__', (& $quote $storeRoot)).Replace('__VMNAME__', (& $quote $ApplianceVMName))
+    $importBody = $importBody.Replace('__VHD__', (& $quote $extractedVhd)).Replace('__GEN__', [string]$ApplianceGeneration).Replace('__SHA__', $ApplianceSha256.ToUpperInvariant())
+    Write-Log "Copy-importing '$ApplianceVMName' from the exported configuration (16 GB static memory, 8 vCPUs, intSwitch; template disk unchanged)..."
+    $importOutput = Invoke-HostScript -Script $importBody -Stage 'Import appliance VM'
     if ($importOutput -match '(?m)^APPLIANCE_EXISTS') {
-        Write-Log "VM '$ApplianceVMName' already exists on the host; it was not recreated."
+        Write-Warning "VM '$ApplianceVMName' appeared before import; it was not recreated or source-hash verified. Confirm it belongs to this project."
     } elseif ($importOutput -match '(?m)^APPLIANCE_IMPORTED\|(\d)') {
-        Write-Log "Appliance imported as a Generation $($Matches[1]) VM and started. The archive was deleted to reclaim space."
+        Write-Log "Appliance copy-imported as the export's Generation $($Matches[1]) VM and started. Source ZIP and extracted files retained."
     } else {
         throw 'The host did not confirm the appliance import.'
     }
 } else {
     Write-Log "VM '$ApplianceVMName' already exists on the host; the download and import are skipped."
-    Write-Log "This script checks it against Module 1 below."
+    Write-Warning "Existing appliance: source ZIP/extracted bytes are NOT verified by this path. Confirm this VM is not registered to another project; only read-only VM checks follow."
 }
 
 # --- Confirm the appliance VM matches Module 1 (section 3.5 checklist) -------------------
@@ -1499,7 +2914,6 @@ if (-not $checkLine -or $checkLine -eq 'APPLIANCE_CHECK|Missing') {
         @{ Item = 'Memory (GB)';            Actual = $c[3]; Expected = '16' }
         @{ Item = 'Dynamic memory';         Actual = $c[4]; Expected = 'False' }
         @{ Item = "Disk on $storeDrive";    Actual = $c[5]; Expected = 'True' }
-        @{ Item = 'Virtual disk size (GB)'; Actual = $c[6]; Expected = '80' }
         @{ Item = 'Switch';                 Actual = $c[7]; Expected = 'intSwitch' }
     )
     foreach ($check in $checks) {
@@ -1508,6 +2922,8 @@ if (-not $checkLine -or $checkLine -eq 'APPLIANCE_CHECK|Missing') {
         $mark = if ($ok) { '[OK]  ' } else { '[CHECK]' }
         Write-Host ("  {0} {1,-24} {2}  (expected {3})" -f $mark, $check.Item, $check.Actual, $check.Expected) -ForegroundColor $colour
     }
+    Write-Host ("         Template capacity (GB): {0}; current documented requirement is roughly 80 GB. No resize was performed." -f $c[6])
+    if ([double]$c[6] -lt 80) { throw 'Template capacity is below the documented requirement. Stop for instructor review, not learner expansion.' }
     $ipText = if ($c.Count -ge 9 -and $c[8]) { $c[8] } else { '(not reported yet)' }
     Write-Host ("         {0,-24} {1}  (expected 192.168.0.20)" -f 'Address', $ipText) -ForegroundColor Gray
 }
@@ -1525,14 +2941,15 @@ Write-StepHeader -Step 4 -Title "First Boot, Register and Discover (Manual, Modu
 Write-ManualAction -Title "Complete first boot and register the appliance" -Instructions @(
     "1. RDP to the Hyper-V host: mstsc /v:$hyperVHostIP"
     "2. Hyper-V Manager > $ApplianceVMName > Connect. Accept the first-boot prompts and set its password."
-    "3. Inside $ApplianceVMName (elevated PowerShell), extend C: into the space added to the disk:"
-    "     `$max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax; Resize-Partition -DriveLetter C -Size `$max"
-    "4. Check the clock inside ${ApplianceVMName}: [DateTime]::UtcNow and Get-TimeZone (expect UTC)."
-    "     If wrong: Set-TimeZone -Id 'UTC'; w32tm /resync /force"
+    "3. Inside $ApplianceVMName, check guest OS, Get-Disk and Get-Volume C read-only; do not expand partitions."
+    "4. Compare [DateTime]::UtcNow with a trusted source; any display time zone is valid."
+    "     Check w32tm /query /status and /source; repair the time source if needed, resync, then recheck."
     "5. Open https://192.168.0.20:44368 (HTTPS only) and confirm it is your own appliance."
-    "6. Complete the connectivity, time and update checks."
+    "6. Confirm .20/gateway .1, DNS, required Azure HTTPS access, accurate UTC and updates."
+    "   Verify Windows Server 2022/2025 inside the guest, not from its filename; do not run AzureMigrateInstaller on the host or workloads."
+    "   Do not reuse an appliance registered to another project or force WinRM HTTPS without a proper listener/certificate."
     "7. Paste the project key; sign in to the correct tenant and subscription."
-    "8. Hyper-V host credentials: HyperVHost\<lab user>; discovery source address 192.168.0.1."
+    "8. Hyper-V host credentials: HyperVHost\<actual AdminUsername>; discovery source address 192.168.0.1."
     "9. Validate the source, resolve every failed prerequisite, then start discovery."
     "10. Guest credentials (Manage credentials and discovery sources, step 3):"
     "     - Windows (non-domain): Administrator -> OnPrem-Web, OnPrem-SQL"
@@ -1566,9 +2983,11 @@ Write-Host ""
 while (-not $discoveryComplete) {
     $attempt++
     try {
+        # This lab uses Hyper-V; select its inventory explicitly, not VMware inventory.
         $discoveredServers = @(Get-AzMigrateDiscoveredServer `
             -ProjectName $MigrateProjectName `
             -ResourceGroupName $SourceResourceGroup `
+            -SourceMachineType 'HyperV' `
             -ErrorAction Stop)
         $workloadServers = @($discoveredServers | Where-Object { $_.DisplayName -in $expectedVMs })
         $foundNames = @($workloadServers | ForEach-Object { $_.DisplayName } | Select-Object -Unique)
@@ -1641,208 +3060,139 @@ Read-Host "Press Enter to continue to Step 6..."
 
 Write-StepHeader -Step 6 -Title "Create Migration Assessment"
 
-$assessmentName = "Workshop-Assessment"
+$assessmentName = $AssessmentName
+$groupName = $AssessmentGroupName
+$assessmentState = 'NotAttempted'
+$assessmentConfirmed = $false
+$assessmentReady = $false
+$assessmentSession = @{ Context = $context; PinnedContext = $assessmentContextStamp; ResourceGroup = $SourceResourceGroup }
+$creation = $null
 
-try {
-    Write-Log "Creating assessment '$assessmentName'..."
-    Write-Log "Assessment type: Azure VM (IaaS) -- for lift-and-shift migration"
-
-    # The assessment needs a group of servers to evaluate.
-    # Module 1: a group containing exactly the four workload VMs.
-    $groupName = "AllServers-Group"
-
-    # Attempt to create assessment via REST API since the PowerShell cmdlet
-    # may not be available in all Az.Migrate module versions
-    $subscriptionId = $context.Subscription.Id
-    $apiVersion = "2023-03-15"
-
-    # Build the assessment group with all discovered machines
-    if ($workloadServers.Count) {
-        $machineIds = @()
-        foreach ($server in $workloadServers) {
-            if ($server.Id) {
-                $machineIds += $server.Id
-            }
+if ($discoveryComplete -and $workloadServers.Count -eq 4) {
+    try {
+        $settings = Get-LabAssessmentSettings -Location $Location -Currency $AssessmentCurrency -Offer $AzureOfferCode -HybridBenefit $AzureHybridBenefit -Mode $AssessmentMode
+        $creation = Invoke-LabAssessmentCreation -MigrateProjectName $MigrateProjectName -ProjectName $AssessmentProjectName -GroupName $groupName -AssessmentName $assessmentName -Workloads $workloadServers -Settings $settings -Session $assessmentSession -Mode $AssessmentMode
+        $assessmentState = $creation.State
+        if ($assessmentState -ne 'Submitted') {
+            Write-Warning "Step 6 $($creation.Stage): $($creation.Message)"
+            Write-Warning 'No Step 7 continuation prompt: resolve the reported backend/mapping/group error or pending state first. HTTP 404 is not a login timeout; these errors are not repaired by reconnecting or rebuilding VMs.'
         }
-
-        Write-Log "Creating server group '$groupName' with $($machineIds.Count) machines..."
-
-        # Create the group via REST API
-        $groupUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$SourceResourceGroup/providers/Microsoft.Migrate/assessmentProjects/$MigrateProjectName/groups/${groupName}?api-version=$apiVersion"
-
-        $groupBody = @{
-            properties = @{
-                machines = $machineIds
-            }
-        } | ConvertTo-Json -Depth 5
-
-        try {
-            $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com").Token
-            $headers = @{
-                "Authorization" = "Bearer $token"
-                "Content-Type"  = "application/json"
-            }
-            $groupResponse = Invoke-RestMethod -Uri $groupUri -Method Put -Body $groupBody -Headers $headers -ErrorAction Stop
-            Write-Log "Server group '$groupName' created."
-        } catch {
-            Write-Warning "Could not create group via REST API: $_"
-        }
-
-        # Create the assessment
-        Write-Log "Creating assessment '$assessmentName'..."
-
-        $assessmentUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$SourceResourceGroup/providers/Microsoft.Migrate/assessmentProjects/$MigrateProjectName/groups/$groupName/assessments/${assessmentName}?api-version=$apiVersion"
-
-        $assessmentBody = @{
-            properties = @{
-                # "AsOnPremises" uses the current VM sizes to find equivalent Azure sizes
-                # "PerformanceBased" would use actual utilization data for right-sizing
-                sizingCriterion     = "AsOnPremises"
-                azureLocation       = $Location
-                currency            = $AssessmentCurrency
-                # Reserved instances can reduce costs by 30-72% for 1-3 year commitments
-                reservedInstance    = "None"
-                azureOfferCode      = $AzureOfferCode
-                azureHybridUseBenefit = $AzureHybridBenefit
-            }
-        } | ConvertTo-Json -Depth 5
-
-        try {
-            $assessmentResponse = Invoke-RestMethod -Uri $assessmentUri -Method Put -Body $assessmentBody -Headers $headers -ErrorAction Stop
-            Write-Log "Assessment '$assessmentName' created successfully."
-        } catch {
-            Write-Warning "Could not create assessment via REST API: $_"
-        }
+    } catch {
+        $assessmentState = 'Failed'
+        Write-Warning 'Step 6 input validation failed: use a supported pricing currency/offer, target region and benefit. No assessment write was attempted.'
     }
-
-} catch {
-    Write-Host ""
-    Write-Host "NOTE: Assessment creation requires discovered servers." -ForegroundColor Yellow
-    Write-Host "If discovery hasn't completed, create the assessment manually:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "MANUAL ALTERNATIVE:" -ForegroundColor Yellow
-    Write-Host "  1. Go to Azure portal > Azure Migrate > $MigrateProjectName" -ForegroundColor White
-    Write-Host "  2. Under 'Assessment tools', click 'Assess' > 'Azure VM'" -ForegroundColor White
-    Write-Host "  3. Assessment settings:" -ForegroundColor White
-    Write-Host "     - Target location: $Location" -ForegroundColor White
-    Write-Host "     - Sizing criterion: As on-premises" -ForegroundColor White
-    Write-Host "     - VM series: Include all" -ForegroundColor White
-    Write-Host "     - Currency: $AssessmentCurrency; offer: $AzureOfferCode; Azure Hybrid Benefit: $AzureHybridBenefit" -ForegroundColor White
-    Write-Host "  4. Select exactly the 4 workload servers (not $ApplianceVMName)" -ForegroundColor White
-    Write-Host "  5. Create the assessment and wait for it to complete" -ForegroundColor White
-    Write-Host ""
-    Write-Warning "Error details: $_"
+} else {
+    Write-Warning 'Step 6 not attempted: discovery must contain exactly the four workloads, excluding the appliance. Complete discovery and rerun Step 2.'
 }
-
-Read-Host "Press Enter to continue to Step 7..."
 
 # ================================================================
 # STEP 7: Display Assessment Results
 # ================================================================
-# The assessment takes a few minutes to compute. Once complete, it
-# provides detailed information about each VM's readiness for Azure.
-# This is critical decision-making data for a real migration:
-# - Are there any blockers? (e.g., unsupported OS, incompatible boot type)
-# - What Azure VM size should each VM use?
-# - What will it cost monthly?
-
-Write-StepHeader -Step 7 -Title "Display Assessment Results"
-
-try {
-    Write-Log "Retrieving assessment results..."
-    Write-Log "(Assessment computation may take 2-5 minutes after creation)"
-
-    # Poll for assessment status
-    $assessmentReady = $false
-    $assessAttempts = 0
-    $maxAssessAttempts = 10
-
-    while (-not $assessmentReady -and $assessAttempts -lt $maxAssessAttempts) {
-        $assessAttempts++
-        try {
-            $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com").Token
-            $headers = @{
-                "Authorization" = "Bearer $token"
-                "Content-Type"  = "application/json"
-            }
-
-            $assessResultUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$SourceResourceGroup/providers/Microsoft.Migrate/assessmentProjects/$MigrateProjectName/groups/$groupName/assessments/${assessmentName}/assessedMachines?api-version=$apiVersion"
-
-            $assessedMachines = Invoke-RestMethod -Uri $assessResultUri -Method Get -Headers $headers -ErrorAction Stop
-
-            if ($assessedMachines.value -and $assessedMachines.value.Count -gt 0) {
-                $assessmentReady = $true
-
-                Write-Host ""
-                Write-Host "  Assessment Results: $assessmentName" -ForegroundColor White
-                Write-Host "  ========================================" -ForegroundColor White
-                Write-Host ""
-
-                foreach ($machine in $assessedMachines.value) {
-                    $props = $machine.properties
-                    $readiness = if ($props.suitability) { $props.suitability } else { "Unknown" }
-                    $readinessColor = if ($readiness -eq "Suitable") { "Green" } elseif ($readiness -eq "ConditionallySuitable") { "Yellow" } else { "Red" }
-
-                    Write-Host "  VM: $($props.displayName)" -ForegroundColor White
-                    Write-Host "    Readiness       : $readiness" -ForegroundColor $readinessColor
-                    Write-Host "    Recommended Size: $($props.recommendedSize)" -ForegroundColor Gray
-                    Write-Host "    Monthly Cost    : `$$($props.monthlyComputeCostForRecommendedSize) `(compute`)" -ForegroundColor Gray
-                    Write-Host "    OS              : $($props.operatingSystemName)" -ForegroundColor Gray
-                    Write-Host "    Boot Type       : $($props.bootType)" -ForegroundColor Gray
-                    Write-Host ""
-                }
-            } else {
-                Write-Log "  Attempt $assessAttempts/$maxAssessAttempts -- Assessment still computing..."
-                Start-Sleep -Seconds 30
-            }
-        } catch {
-            Write-Log "  Attempt $assessAttempts -- Waiting for assessment results..."
-            Start-Sleep -Seconds 30
+# No second manual pause: only verified/accepted assessments enter bounded completion checks.
+if ($assessmentState -eq 'Submitted') {
+    Write-StepHeader -Step 7 -Title 'Verify Completed Assessment and Display Results'
+    $completion = Get-LabAssessmentCompletion -Creation $creation -Workloads $workloadServers -Session $assessmentSession
+    $assessmentState = $completion.State
+    $assessmentConfirmed = $completion.Confirmed
+    $assessmentReady = $completion.Ready
+    if ($completion.Message) { Write-Warning "Step 7 $($completion.Stage): $($completion.Message)" }
+    if ($assessmentReady -and $AssessmentMode -eq 'Modern') {
+        Write-Host "  Completed Modern MachineAssessmentV2 PREVIEW: $assessmentName (exactly four source-linked results; manual review required)" -ForegroundColor White
+        Show-LabModernRecommendations -Results $completion.Results
+    } elseif ($assessmentReady) {
+        Write-Host "  Completed classic Azure VM assessment: $assessmentName (exactly four verified results)" -ForegroundColor White
+        foreach ($machine in $completion.Results) {
+            $props = Get-LabAssessmentField $machine 'properties'
+            $suitability = [string](Get-LabAssessmentField $props 'suitability')
+            $readiness = if ($suitability) { $suitability } else { 'Unknown' }
+            $readinessColor = if ($readiness -eq 'Suitable') { 'Green' } elseif ($readiness -eq 'ConditionallySuitable') { 'Yellow' } else { 'Red' }
+            Write-Host "  VM: $(Get-LabAssessmentField $props 'displayName')" -ForegroundColor White
+            Write-Host "    Readiness       : $readiness" -ForegroundColor $readinessColor
+            Write-Host "    Recommended Size: $(Get-LabAssessmentField $props 'recommendedSize')" -ForegroundColor Gray
+            Write-Host "    Monthly Cost    : $AssessmentCurrency $((Get-LabAssessmentField $props 'monthlyComputeCostForRecommendedSize')) (compute)" -ForegroundColor Gray
+            Write-Host "    OS              : $(Get-LabAssessmentField $props 'operatingSystemName')" -ForegroundColor Gray
+            Write-Host "    Boot Type       : $(Get-LabAssessmentField $props 'bootType')" -ForegroundColor Gray
         }
     }
-
-    if (-not $assessmentReady) {
-        Write-Host ""
-        Write-Host "Assessment results are not yet available." -ForegroundColor Yellow
-        Write-Host "Check results in the Azure portal:" -ForegroundColor Yellow
-        Write-Host "  Azure Migrate > $MigrateProjectName > Assessments > $assessmentName" -ForegroundColor White
-    }
-
-} catch {
-    Write-Host ""
-    Write-Host "Could not retrieve assessment results programmatically." -ForegroundColor Yellow
-    Write-Host "Check results in the Azure portal:" -ForegroundColor Yellow
-    Write-Host "  Azure Migrate > $MigrateProjectName > Assessments" -ForegroundColor White
-    Write-Warning "Error: $_"
+} else {
+    Write-Log "Step 7 not started: Step 6 state is $assessmentState. The failure/pending reason was reported above before any continuation."
 }
+
+if (-not $assessmentReady) {
+    Write-Host ''
+    Write-Host 'Assessment is not verified complete. Existing discovery and VMs are retained; inspect the portal before rerunning Step 2, not deployment.' -ForegroundColor Yellow
+    Write-Host 'MANUAL ALTERNATIVE (after resolving the reported error and completing discovery):' -ForegroundColor Yellow
+    Write-Host "  1. Azure portal > Azure Migrate > $MigrateProjectName" -ForegroundColor White
+    Write-Host "  2. Inspect existing '$groupName' / '$assessmentName' first; use classic Assessment tools > Assess > Azure VM if needed" -ForegroundColor White
+    Write-Host "  3. Target location: $Location; sizing: As on-premises; VM series: Include all" -ForegroundColor White
+    Write-Host "     Currency: $AssessmentCurrency; offer: $AzureOfferCode; Azure Hybrid Benefit: $AzureHybridBenefit" -ForegroundColor White
+    Write-Host "  4. Select exactly the four workloads (not $ApplianceVMName); wait for Completed and review all four results" -ForegroundColor White
+    Write-Host '  Missing solution association: review actual listed backend names and use -AssessmentProjectName.' -ForegroundColor White
+    Write-Host '  Group/assessment name conflict: preserve it and choose unused -AssessmentGroupName / -AssessmentName.' -ForegroundColor White
+    Write-Host '  Classic Azure VM assessment is default. Modern requires explicit -AssessmentMode Modern and remains experimental/deferred. No automatic fallback between modes.' -ForegroundColor Gray
+    Write-Host '  MachineAssessmentV2 is a server assessment, not full mixed application assessment. Portal application assessment is a separate optional exercise.' -ForegroundColor Gray
+}
+Write-Host "  Azure Migrate > $MigrateProjectName > Assessments > $assessmentName" -ForegroundColor White
 
 # ================================================================
 # SUMMARY & NEXT STEPS
 # ================================================================
 
-Write-Section "STEP 2 COMPLETE -- Summary"
+$assessmentCanProceed = ($assessmentConfirmed -and $assessmentReady -and $assessmentState -eq 'ResultsReady')
+if ($assessmentCanProceed) { Write-Section 'STEP 2 COMPLETE -- Four-machine assessment completed and results verified' }
+elseif ($assessmentConfirmed -and $assessmentReady -and $assessmentState -eq 'ManualReview') {
+    Write-Section 'STEP 2 ASSESSMENT COMPLETED -- Modern results require manual IaaS review before Step 3'
+    Write-Host '  Review each returned Azure VM target, readiness and recommended SKU in the portal; planning defaults in Step 3 are not derived from Modern alternatives.' -ForegroundColor Yellow
+}
+else { Write-Section 'STEP 2 PENDING -- Assessment requires review' }
 
 Write-Host "  What was accomplished:" -ForegroundColor White
 Write-Host "  [+] Hyper-V host connection verified" -ForegroundColor Green
 Write-Host "  [+] Project key generated (never displayed in full)" -ForegroundColor Green
-Write-Host "  [+] Appliance '$ApplianceVMName' checked on $storeRoot$(if ($doImport) { ' (downloaded, verified and imported by this script)' })" -ForegroundColor Green
+Write-Host "  [+] Appliance '$ApplianceVMName' checked on $storeRoot$(if ($doImport -and $importOutput -match 'APPLIANCE_IMPORTED\|') { ' (fresh ZIP and extraction hashes checked, configuration copy-imported)' } else { ' (existing VM; source archive not verified)' })" -ForegroundColor Green
 Write-Host "  [+] Appliance configured and discovery initiated" -ForegroundColor Green
 Write-Host "  [+] Discovered servers listed" -ForegroundColor Green
-Write-Host "  [+] Migration assessment created" -ForegroundColor Green
+if ($assessmentCanProceed) {
+    Write-Host '  [+] Migration assessment Completed; all four results and current membership verified' -ForegroundColor Green
+} elseif ($assessmentConfirmed -and $assessmentReady -and $assessmentState -eq 'ManualReview') {
+    Write-Host '  [+] Modern assessment Completed; four source-linked results verified; manual IaaS review still required' -ForegroundColor Yellow
+} elseif ($assessmentState -eq 'Submitted') {
+    Write-Host '  [!] Assessment request accepted; creation not yet confirmed' -ForegroundColor Yellow
+} else {
+    Write-Host "  [!] Assessment state: $assessmentState; completion is not verified" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "  VMs Discovered:" -ForegroundColor White
 Write-Host "  - OnPrem-Web       (192.168.0.10) -- Windows + IIS" -ForegroundColor Cyan
 Write-Host "  - OnPrem-SQL       (192.168.0.11) -- Windows + SQL Server 2022 Express" -ForegroundColor Cyan
-Write-Host "  - OnPrem-Linux-Web (192.168.0.12) -- Ubuntu 22.04 + Nginx" -ForegroundColor Cyan
-Write-Host "  - OnPrem-Linux-App (192.168.0.13) -- Ubuntu 22.04 + Node.js" -ForegroundColor Cyan
+Write-Host "  - OnPrem-Linux-Web (192.168.0.12) -- Ubuntu 24.04 + Nginx" -ForegroundColor Cyan
+Write-Host "  - OnPrem-Linux-App (192.168.0.13) -- Ubuntu 24.04 + Tomcat 10.1" -ForegroundColor Cyan
 
-Write-NextSteps @(
-    "Review the assessment results in the Azure portal"
-    "Record the collection period and confidence rating; this is idle-lab telemetry"
-    "Create a second, performance-based assessment once data has accumulated"
-    "Note any readiness issues or warnings for each VM"
-    "Run Step 3: .\migrate-step3-replicate.ps1"
-    "Step 3 will enable replication for all 4 VMs and begin migration"
-)
+if ($assessmentCanProceed) {
+    Write-NextSteps @(
+        'Review the assessment results in the Azure portal before Step 3'
+        'Record the collection period and confidence rating; this is idle-lab telemetry'
+        'Create a second, performance-based assessment once data has accumulated'
+        'Note any readiness issues or warnings for each VM'
+        'After reviewing the assessment, run Step 3: .\migrate-step3-replicate.ps1'
+        'Step 3 will enable replication for all 4 VMs and begin migration'
+    )
+} elseif ($assessmentConfirmed -and $assessmentReady -and $assessmentState -eq 'ManualReview') {
+    Write-NextSteps @(
+        'Modern server assessment is Completed with four source-linked results; do not recompute it merely to remove this manual-review gate'
+        'Review a suitable Azure VM target, readiness and actual recommended SKU for each workload in the portal'
+        'Resolve missing/unknown/unsuitable recommendations; record evidence and recheck regional/family quotas'
+        'Step 3 planning sizes are unchanged and are not automatically populated from Modern recommendations'
+        'Full application assessment is a separate optional portal activity in Module 1, not this server-assessment API'
+    )
+} else {
+    Write-NextSteps @(
+        'Resolve the reported assessment error or pending state; review the existing group/assessment in the portal'
+        'For authentication rejection, reconnect to the original lab tenant/environment and explicitly select the original subscription'
+        'For authorization/schema/project errors, fix the specific reported cause, not the VMs'
+        'Keep the running lab and appliance; rerun Step 2 with the same lab settings, not deployment/provisioning'
+        'Confirm assessment creation and review the results before Step 3'
+    )
+}
 
 Write-Log "Step 2 finished at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')."

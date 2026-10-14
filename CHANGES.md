@@ -2,8 +2,9 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-The Tomcat integration section records the current runtime. Numbered sections retained below
-are **historical baseline notes**, including earlier Node/traffic behavior that is now superseded.
+The first section records the Ubuntu 24.04 revision. **All earlier sections are historical
+baseline notes**, including Tomcat 9/22.04, Node/traffic and older virtual-tools fallback
+instructions. Those runtime/repair descriptions are superseded, not directions for this build.
 The earlier comparison used the supplied original and Pull 12 revision; this integration uses
 only the published baseline and does not import Pull 12 modules.
 
@@ -27,6 +28,474 @@ This is the complete branch-ready source, not a changes-only overlay. See
 
 ---
 
+## Current: Classic assessment completion with optional provisioning metadata (2026-10-13)
+
+Exactly **8 existing files changed, 0 added/deleted, 62 files per package**: Step 2,
+the existing checker, README, Module 1, this log, static report, baseline manifest and
+root SHA256SUMS. All **54 other files** remain byte-identical to the post-traffic release.
+Runtime changes are restricted to new `Get-LabClassicAssessmentState` and its use in
+`Get-LabAssessmentCompletion`; Modern, the shared response adapter, Step 3 options,
+Steps 4-6, deployment, traffic and application/runtime assets are unchanged.
+
+Classic requires nonpending GET computation `status=Completed`. Its optional
+`provisioningState` may be absent, null or blank; a populated value must be Succeeded.
+Provisioning/Updating/Accepted remain pending; failed/canceled/deleting/unknown and
+nonstring values fail closed. The same helper gates initial and final reads. A successful
+creation PUT alone never authorizes replication. Exact four source-linked results,
+identity/settings, idle group, exact membership, mapping stability and unchanged update
+timestamp remain mandatory. Matching existing group/assessment names and settings are
+reused without overwrite/recomputation; apply the same branch and rerun Step 2, not deployment.
+This supersedes earlier mandatory-Succeeded Classic assessment wording, not group rules.
+
+Eleven checker groups were added; one retained Classic expectation was corrected.
+**166 Tomcat / 169 Ubuntu groups are DEFINED, SOURCE-INSPECTED, NOT EXECUTED** here.
+Normal retained suites passed **14 app + 16 integration per branch = 60 distinct tests**,
+zero skips/errors/failures. Seventy-five literal source contracts per branch passed;
+these are source inspection, not native PowerShell AST or mocked-runtime execution.
+Original 24-file provenance and historical previous hashes are preserved. No new helper
+is shipped, dependencies installed, Azure/Git actions taken or existing output overwritten.
+Final deterministic staged archive/integrity evidence and native/live limits are recorded
+in `STATIC-VALIDATION-REPORT.md`; publication is a separate delivery-owner action.
+
+---
+
+## Earlier: post-migration traffic and exact NSG application edges (2026-10-13)
+
+Exactly two new files: `scripts/post-migration-labtraffic.ps1` and
+`docs/post-migration-labtraffic.md`; eight existing-file updates (Step 6, existing native
+checker, README, Module 5 Section 4 and four release-integrity metadata files), no deletion,
+62 files per maintained package. Application/runtime, deployment, existing traffic,
+Steps 1-5 and standalone assessment diagnostics are unchanged.
+
+The separate Windows PowerShell 5.1+/Az managed Run Command controller explicitly selects
+and confirms every target VM and subscription/resource-group scope; an omitted resource
+group is prompted for, never inferred. Default Check/Status are guest-read-only, with
+console-only summaries including validation failures (Run Command still needs execution/
+write RBAC). Every mode first inventories inherited generators; Prepare/Start explicitly
+pause/repoint only approved aliases, restart Tomcat/reload Nginx and validate the exact
+five guest-to-guest application edges. Start adds bounded traffic using the installed
+DynamicUser Linux generator without replacing its ExecStart/sandbox; lifetime-only
+RuntimeMaxSec/Restart=no overrides, a stop-only guest deadline handler and disabled-on-boot
+controls enforce expiry. Stop remains best-effort on confirmed unavailable guests.
+Optional VerifySampleOrder explicitly authorizes one real order; no network/agent repair,
+private-DNS creation or central collector is added. Detailed Linux insert logs remain local.
+
+Step 6 preserves the five dependencies with verified dynamic peer/destination /32 rules,
+keeps deny priority 4000 and prior public HTTP policy, fails closed for ambiguous/missing
+identities or addresses, rejects shared/subnet NSGs and preserves unrelated rules with
+collision guards. Module 5 Section 4 documents the same five edges and manual NSG sequence.
+Seven offline checker groups were added: **155 Tomcat / 158 Ubuntu defined, not executed**
+without PowerShell. See `STATIC-VALIDATION-REPORT.md` for actual offline verification and
+explicit native/live-runtime limits; no live deployment/migration success is claimed.
+
+---
+
+## Current: explicit Hyper-V discovery in Step 3 (2026-10-08)
+
+Matched minimal fix in both maintained branches: the existing
+`Get-AzMigrateDiscoveredServer` call in `migrate-step3-replicate.ps1` now passes
+`-SourceMachineType 'HyperV'`, as Step 2 already does. A comment explains this lab's
+Hyper-V source inventory. This addresses the unspecified-inventory/VMware discovery
+failure; it does **not** establish compatibility of subsequent replication commands or
+prove end-to-end replication. No parameter was added to the different
+`Get-AzMigrateServerReplication` or `New-AzMigrateServerReplication` cmdlets.
+
+One native offline AST/contract case checks every Step 3 discovered-server call for an
+explicit literal HyperV value, requires a positive call count, and checks the unchanged
+3a/3b routes and workload filters. Existing Step 2 summary/runtime coverage is retained.
+Native groups are **148 Tomcat / 151 Ubuntu, DEFINED, NOT EXECUTED**. The retained
+14 app + 16 integration tests per branch ran: **60 passed across both**.
+
+Exactly **6 existing files changed per branch, 0 added/deleted, 60 files per package;
+54 unrelated files byte-identical**. Only Step 3, the existing checker, CHANGES, the static
+report, baseline manifest and root SHA256SUMS changed. Step 2's Classic default, Modern
+opt-in, standalone diagnostic, runtime/VM configurations, regional guards, disks/licenses/
+network, replication commands and wrappers are unchanged. ZIPs and clean expanded trees
+were CRC/SHA256/readback verified. No PowerShell/native mocks, Azure or live VM actions
+were executed; no redeployment is required to replace this script in a running lab.
+
+All earlier entries below describe their own revisions and validation limits.
+
+## Earlier: restore the original Classic Azure VM module (2026-10-08)
+
+Both maintained labs now default to **AssessmentMode Classic**, the grouped Azure VM
+MachineAssessment 2024-01-15 path. Classic does not mean a retired first-generation Migrate
+project. Modern remains explicit experimental opt-in, deferred pending more API information;
+there is no silent fallback in either direction. The student PaaS/advanced architecture
+inquiry does not change apps/SQL/containers or Steps 3–6. Begin the required four-server
+exercise with AsOnPremises, then optionally compare a performance-based portal assessment
+after sufficient collection; missing idle-lab performance data is not an installer failure.
+
+This is more than a default flag: ported the live-observed minimal Default-only group PUT,
+Completed groups with absent/null optional provisioning, fresh empty Unknown capabilities,
+and resource-specific GroupNotFound/AssessmentNotFound 404 GET classification. Do not demand
+MachineAssessment capability before owned-group Add. After Add, bounded reads verify exact
+four assessment IDs/membership/count, idle state and requested capability; missing optional
+capability is logged, not fabricated. Returned failed/canceled/deleting/malformed/unknown
+states remain blockers. Both completion modes share the same group helper. The Classic
+assessment's own Succeeded/Completed/four unique paginated source-result checks are retained.
+
+Existing empty/partial/extra groups are preserved even after earlier failed attempts; no
+prior ownership is guessed. Inspect and choose explicit unused names or verified exact-four
+matching resources. No remove/DELETE/overwrite, registration, blind write retry or scope/
+version change. Catalog normalization, backend mapping, pinned context and pagination remain.
+
+Exactly **8 existing files modified, 0 added/deleted, 60 files per package; 52 unrelated files
+byte-identical**. Distinct runtimes and app/WAR/source/SQL, KVP/network/power/traffic, quotas,
+appliance and other steps are untouched. Both full ZIPs/clean expanded trees are refreshed;
+legacy output, standalone diagnostic and instructor Word guide are unchanged.
+Executed: **60 retained app/integration tests across both**, private static inspection and
+deterministic ZIP/CRC/SHA256/readback. Native groups: **150 DEFINED, NOT EXECUTED**
+(138 retained + 12 Classic-restoration); existing Modern coverage is explicit.
+No PowerShell, Java/SQL, Azure sign-in/API or live VM execution is claimed after the merge.
+The supplied isolated Classic export proves four assessed/four Ready for that test, not a
+full-script run; the isolated Modern request was rejected and created no assessment.
+
+Earlier entries below are historical. Their Modern-default and stricter group provisioning/
+capability assumptions are superseded here; recorded tests/counts describe their revisions.
+
+## Earlier: focused assessment provider-catalog normalization (2026-10-07)
+
+Both maintained branches retain default Modern and their distinct runtimes. Step 2 now
+normalizes only relevant exact resource types, merges harmless duplicate rows/version
+strings and feeds that same catalog into profile selection. Unused catalog rows cannot
+reject an assessment. Bounded unknown/non-date metadata tokens are never a license to
+select an unimplemented version: parent 2023-03-15 and Modern 2024-03-03-preview remain
+required, with no 2025 payload reuse, newest-version choice or automatic Classic fallback.
+Namespace/Registered and array-shape guards remain. Required malformed fields stop with
+safe canonical resource-type/field/index diagnostics, never raw values. Malformed optional
+rows warn/are ignored; fixed documented read-only endpoint checks still gate their writes.
+No API paths, payloads, group/server mapping, readiness/status/completion/context or retry
+behavior changed. The previous generic catalog error does not reveal its exact offending
+row/token; this is a bounded false-negative repair, not proof of that trigger or live success.
+
+Exactly 8 existing files changed per branch; 0 added/deleted; 60 files each and 52 unrelated
+files byte-identical against captured SHA256 inventories. Host/guests/runtime/WAR/source/SQL,
+appliance/regions/KVP/traffic and all other steps are untouched. The legacy workshop is
+untouched. Both complete ZIPs and matching expanded folders are refreshed, not overlaid.
+Executed: 14 retained app + 16 integration checks per branch (60 tests across both), private
+lexical/source-contract inspection and deterministic ZIP/CRC/all-entry SHA256/readback.
+Native groups: **138 DEFINED, NOT EXECUTED** in this branch (8 added; the old blanket
+malformed/duplicate rejection fixture is replaced by required-field rejection). No PowerShell
+AST/native execution, Azure calls/sign-in, install, Git, Java/SQL or Office document changes.
+Modern ServerGroupId service acceptance, actual result linkages and ManualReview for IaaS
+remain live-unknown/unchanged; this fix cannot guarantee the remaining workflow succeeds.
+
+Earlier entries below are historical revision evidence. Their blanket malformed/duplicate
+catalog rejection policy and prior native group counts are superseded here; their recorded
+executions and preservation results describe those earlier revisions, not this one.
+
+## Earlier: Ubuntu 24.04-only Modern server assessment profile (2026-10-07)
+
+Step 2 adds `-AssessmentMode Modern|Classic`, default **Modern on this branch only**.
+The inline reviewed profile catalog intersects actual provider metadata with the documented
+MachineAssessmentV2 **2024-03-03-preview** top-level assessment contract. Advertised 2025
+preview contracts are skipped/logged as unverified, not chosen by date. Missing Modern
+availability/metadata errors stop before group writes. Classic remains deliberate opt-in;
+Modern errors never trigger Classic fallback or feature/provider registration.
+
+Shared hardened exact-four server-group preparation is factored once. Modern assessment
+GET/PUT and fully paginated assessedMachines GET omit the groups path segment and use only
+the verified preview version. Modern writes contain nested scope/settings, ServerGroupId,
+nested savingsSettings and integer scaling/discount; no readonly details, flat reserved
+instance/offer, dynamic ARG query or unknown enum substitution. Existing scope/settings/
+membership conflicts are preserved, as are pending/busy/invalid/stale resources.
+
+Modern polling uses details.status and distinguishes acceptance/creation/completion. It
+never requires provisioningState absent from the public GET example; an optional returned
+state is checked. Results require four unique top-level resource identities/types and
+linkages.armId mapping exactly one known source/assessment machine each. Unknown linkage
+shapes stop as SourceUnverified without calling creation failed or redoing PUT. Actual
+nested recommendation/readiness/SKU/cost details are shown without summing alternatives,
+inventing monthly units or assuming classic flat fields. Completed source-verified results
+require **ManualReview**, not automatic Step 3 guidance: this profile has no verified Azure
+VM target/strategy selector. Step 3's planning sizes/quotas remain unchanged.
+
+This is **modern server assessment**, not full mixed application-assessment automation.
+Module 1 adds the separate optional portal exercise using actual assets/dependencies. Full
+application creation, composite/wave/PaaS/SQL/web automation and the unverified 2025 schema
+remain deferred. Classic ServerGroupId acceptance by the Modern service and live linkage
+semantics still require an authorized live lab test; catalog advertisement is not proof.
+
+Exactly 8 existing Ubuntu files changed; 0 added/deleted; 52 unrelated files byte-identical.
+Ubuntu 24.04/Tomcat 10.1/Java 17, SQL, four guests, ports/network, KVP/traffic, quotas and
+appliance remain unchanged. The entire older Tomcat source/archive/tree is byte-identical.
+Executed: 14 retained app + 16 integration checks (30), private lexical/source-contract
+checks and deterministic 60-file ZIP/CRC/SHA256/readback. Native fixture groups: **130
+DEFINED, NOT EXECUTED** (108 retained + 22 Modern). No PowerShell AST/native tests, live
+Azure/Hyper-V, Java/SQL, package installation, OS upgrade, Git or Office guide edits.
+
+## Earlier: provider metadata and parent API repair (2026-10-07)
+
+The preceding revision wrongly required 2024-01-15 on the parent assessmentProjects
+resource and treated every omitted nested provider row as unsupported. The actual
+catalog supplied for this failure advertises parent 2023-03-15, not parent 2024-01-15.
+Parent LIST/GET now use verified-advertised 2023-03-15; classic machine/group/assessment/
+results operations retain documented 2024-01-15. Missing nested entries warn and permit
+fixed read-only endpoint validation; explicit child-version omissions are not converted
+to previews. Actual namespace/Registered state remains mandatory. Malformed/duplicate
+metadata or unadvertised chosen parent versions stop before writes. Top-level
+assessmentProjects/assessments is a different contract, never an alias for grouped
+classic assessments. API rejection and parent/scope 404 stop without child writes or
+blind retry. Pagination explicitly preserves its initial version.
+
+Backend identity/Active/Succeeded, exact four-source-ID inventory mapping and resource
+preflight reads still gate writes. All ownership/reuse/settings/completion/context and
+immediate failure safeguards remain. No broad modern-API rewrite or VM/app changes.
+Exactly 8 existing files changed per branch, 52 untouched byte-for-byte, 60 files each;
+60 retained Python static/integration tests executed across both. Native groups defined
+105 Tomcat / 108 Ubuntu (8 additional metadata groups each), **not executed**. No live
+Azure read/write or successful assessment creation is claimed. ZIP/tree checksum readback
+is verified; preserve the lab and rerun Step 2 using its real backend, not deployment.
+
+## Earlier: actual assessment backend and stable machine/group APIs (2026-10-07)
+
+The parent-version/nested-catalog support claims below are superseded by the current repair.
+
+The focused correction supersedes the authentication-only patch: resolve and verify the
+selected Migrate project's real classic assessment backend rather than guessing its name;
+list actual candidates and require an explicit existing backend if association is missing.
+Provider API support, exact four-machine source mapping, group create plus updateMachines
+Add, normalized pricing wire enums and exact membership are now checked. Existing groups/
+assessments are preserved/reused instead of overwritten; name options handle reviewed
+conflicts. Stable 2024-01-15 classic MachineAssessment is not new logical-application preview
+coverage, and published 2023-03-15 is not blamed for resource 404.
+
+Step 6 reports operation failures immediately. Step 7 has no continuation pause and only
+polls accepted/matching work. Completed status, succeeded provisioning, all pages/exactly
+four verified source-matched results and final unchanged settings/membership gate replication
+guidance; created/running/stale/partial states cannot claim ready. Earlier pinned-context,
+SecureString-safe Az authentication and secret-safe/no-blind-write-retry behavior remain.
+
+Exactly 8 existing files change; no new/deleted delivered files, still 60 per branch.
+All unrelated bytes and distinct OS/Tomcat/Jakarta runtimes are preserved. 60 retained
+app/integration tests execute across both branches. Native groups now define 97 Tomcat /
+100 Ubuntu, **not executed here** (22 new backend groups each). No live Azure actions,
+PowerShell/Java execution, installs, app rebuild, Git or Office guide edits. See the current
+static report for evidence, remaining native/live acceptance and authoritative API references
+in Module 1. Update the same full branch and rerun Step 2, not deployment/rebuild.
+
+## Earlier: context-authenticated assessment requests and honest completion (2026-10-07)
+
+Both maintained branches receive the same focused Step 2 fix. `Invoke-AzRestMethod` owns
+ARM authentication/refresh via the pinned validated Az context and current-cloud endpoint;
+all manual `Get-AzAccessToken`/Authorization code is removed. Az 14 / Az.Accounts 5's
+SecureString token change explains a real compatibility defect in that old code, but the
+reported user's installed version/root cause has not been established live.
+
+Group failure/pending prevents assessment PUT; HTTP status/error JSON is checked even
+without a thrown exception. Auth/RBAC/context/prerequisite/schema/project failures are
+reported by stage with safe messages, without tokens/headers/raw exception dumps. Reads do
+not hide authentication as computation; only accepted requests are polled, with at most one
+transient/unverified GET retry and no blind PUT retry. Accepted/202 creation, confirmed
+resource existence and pending/ready results are separate. Unverified/failed states cannot
+print completion or direct replication. Four distinct workload IDs and existing HyperV
+inventory selection are retained; API version, project-name and machines schema are not
+silently remapped and still need live verification.
+
+Existing running labs use the matching fixed checkout and rerun Step 2 only, after reviewing
+any existing group/assessment. No deploy/rebuild/OS upgrade or guest modification is needed.
+Only Step 2, the existing native checker, README/Module 1/this log/report, baseline manifest
+and root checksums change: **8 files, no added/deleted deliverables, 60 total**. All host,
+app/WAR/runtime, network/quota/KVP/appliance guards and other runtime scripts are byte-identical
+to each branch's immediate preceding revision. Historical original archive digests are retained.
+
+The checker adds **18 assessment groups** with strict local ARM/context mocks and source
+contracts. Current totals: **75 Tomcat 9 / 78 Ubuntu 24.04**, defined **not executed** here.
+The retained 30 tests per branch (14 app + 16 integration), private lexical/source inspection
+and deterministic CRC/SHA archive/expanded-tree verification pass. No new learner Python
+or shipped helper files. Native PowerShell 5.1/parser/groups/.NET packaging and live Azure
+assessment creation remain unexecuted; authentication repair does not certify service success.
+
+References: [Az 14 migration](https://learn.microsoft.com/en-us/powershell/azure/migrate-az-14.0.0),
+[context-backed ARM requests](https://learn.microsoft.com/en-us/powershell/azure/manage-azure-resources-invoke-azrestmethod).
+
+## Earlier: separate Ubuntu 24.04 / Tomcat 10.1 rebuild (2026-10-07)
+
+Full separate 60-file checkout/ZIP, not an overlay. Both Linux guests use Noble's exact-name
+SHA256-checked moving current QCOW2, distinct Ubuntu2404 cache names, the same fixed disks,
+memory/CPU, guest names/IPs and nested topology. Fresh-host build-marker refusal prevents
+adopting/rebuilding an old or unmarked lab; incomplete same-revision resumes remain possible.
+The earlier deployed lab and all earlier packages are unchanged. No live OS upgrade occurs.
+
+Linux-App uses current repository `tomcat10`/common/lib packages, checks 10.1.x and pins
+OpenJDK 17 via JAVA_HOME. JSP Servlet signatures and the descriptor migrate to Jakarta
+Servlet 6.0 / Pages 3.1; Java SE javax.sql/javax.naming remain unchanged. WAR/runtime and
+all checksums are rebuilt. The custom controlled ROOT.war deployment, non-root service,
+private 0640 JNDI, bounded JDBC pool/JVM, endpoints, original SQL schema/seeds/login and
+Nginx proxy/optional traffic contracts are retained. Same-OS legacy app scripts now require
+24.04; they do not upgrade or roll back Ubuntu/Tomcat cross-version environments.
+
+Exact-kernel KVP install/binary/mask/stop-until-reboot safeguards, joint/final acceptance,
+Step 2 selected-host strict read-only gate and explicit HyperV discovery are preserved.
+Region/VNet/quota 6-vCPU baseline/12-overlap, project footer/traffic default No and appliance
+exact-ZIP/copy-import/no-expansion safeguards remain. Step 6 is write-enabled, not read-only.
+Associated Markdown guides are revised without editing the earlier Word guide. Module 3's
+Mobility discussion is explicitly separate/optional; no invented Noble Mobility installer
+or extra workshop appliance is prescribed. Current distro/kernel/package versions must be
+verified at target; standard Main lifetime is not blanket Universe Tomcat coverage.
+
+Three native Ubuntu/Jakarta/fresh-host contract groups extend the 57 retained groups to
+60 **defined, not executed**. Retained Python/bash checks and archive/source provenance
+are rerun; see the current static reports for measured results and unexecuted live gates.
+Release requires Windows PowerShell 5.1/native groups and fresh Azure/Hyper-V/appliance
+Ubuntu OS + Tomcat/Java software + visible Java web-asset acceptance. Local health checks
+are not proof of discovery and the rebuild makes no claim to solve prior classifier issues.
+
+## Earlier: require guest communication, not just health (2026-10-07)
+
+Focused changes in existing `scripts/host/configure-host.ps1` and
+`scripts/migrate-step2-discover-assess.ps1`: identical inline read-only KVP/CIM and safe XML
+helpers now enforce enabled numeric normal communication plus recognizable OS name/version
+for exactly four guests. Lost/no contact, degraded/incompatible protocol, unknown/missing
+status, missing guests, read failures and malformed/duplicate OS metadata fail closed.
+Inherited CommunicationStatus can be null/unimplemented; HealthState/Enabled alone cannot
+pass. Only OSName/OSVersion are exported, not arbitrary KVP items or guest secrets.
+
+Provisioning now installs/checks both exact-running-kernel tools packages, with no silent
+virtual-flavour fallback. A critical failure logs an actionable marker and masks KVP; success
+keeps the enabled daemon stopped until the existing scheduled reboot. Bounded joint
+application/communication polling and a final fresh recheck prevent incomplete setup from
+emitting LAB_WORKLOADS_READY/setup-complete. Existing host-preparation JSON records KVP rows.
+Step 2 performs its separate read-only, strict four-row Run Command gate before prerequisite
+success or appliance/project-key/discovery work, without guest credentials or automatic repair.
+This does not guarantee appliance classifier/software/web discovery success.
+
+The existing checker adds 14 offline communication groups (**57 defined**, not executed here).
+README, Module 1, this log/report, baseline hashes and SHA256SUMS are updated. No new delivered
+files (**60 total**); application/WAR/runtime, SQL seed, deployment, Step 1 and Steps 3–6 remain
+byte-for-byte unchanged. The preceding explicit HyperV discovery fix is retained. No OS/kernel
+upgrade, installs, Git operations or legacy-package changes were made. The final 30 retained
+app/integration tests and scratch-only composition/lexical/archive checks pass; native
+PowerShell 5.1 and live Azure/Hyper-V/appliance acceptance still need target validation.
+
+Reference: [Msvm_KvpExchangeComponent status and guest intrinsic items](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-kvpexchangecomponent).
+
+## Earlier: merge the supplied Step 2 discovery fix (2026-10-06)
+
+Merged the latest edited Step 2's explicit `-SourceMachineType 'HyperV'` into the current
+branch, rather than replacing it with the older script/package. The discovery poll now
+selects this Hyper-V lab's inventory explicitly; this is not a VMware platform conversion.
+The current Linux-App summary already says Tomcat 9 and is retained. Target-region/VNet
+checks, all-four-workload power gates, strict appliance ZIP/extraction hashes and exported
+configuration copy-import without resizing remain intact. Other runtime scripts/assets are
+unchanged.
+
+The existing `scripts/check-lab-scripts.ps1` gains one AST/source-contract regression:
+every actual discovered-server command must supply literal HyperV, and the final summary
+must retain Tomcat 9. There are now **43 offline groups** (the original 42 plus discovery),
+with no new shipped files. Changed files: Step 2, checker, README, CHANGES, static report,
+`tests/baseline-manifest.json` and `SHA256SUMS`. The complete ZIP/expanded tree remains
+**60 files**. Refresh the full package for matching checker/manifest/checksums; a standalone
+Step 2 write-back is not a whole-folder upgrade. All 30 retained app/integration checks and
+scratch-only lexical/source/archive checks passed; native PowerShell and live discovery
+remain unexecuted here.
+
+Reference: [Get-AzMigrateDiscoveredServer, Hyper-V example](https://learn.microsoft.com/en-us/powershell/module/az.migrate/get-azmigratediscoveredserver?view=azps-16.3.0).
+
+## Earlier: consolidate recent maintenance tooling into PowerShell (2026-10-06)
+
+The existing `scripts/check-lab-scripts.ps1` now owns the 12 regional, 5 project-guidance
+and 25 workload-readiness/traffic check groups through `-RunRegressionChecks`, with no Pester
+or Python dependency. Known helper definitions are extracted by AST into an isolated child
+scope with synthetic inputs and local read mocks; no complete migration script is executed.
+Ordering, traffic and credential protections remain explicitly labeled source contracts.
+The checker now returns a nonzero status on failures. Default parsing remains read-only.
+
+Optional `-PackagePath` runs validation first, verifies the checked-in runtime hash, creates
+fresh full-checkout SHA256SUMS and a sorted/fixed-timestamp ZIP using built-in .NET, then
+verifies CRC and SHA256 readback. An external destination is mandatory; replacement requires
+`-OverwritePackage`. `-UpdateChecksums` refreshes only checksums after checks. App assets are
+not rebuilt. Removed: root `build.py`, `tests/regional_quota_checks.py`,
+`tests/step1_guidance_checks.py`, `tests/workload_readiness_checks.py`; no replacement files
+are added. The full checkout drops from 64 to **60 files**.
+
+Deployment, host configuration, traffic launcher and migration scripts are unchanged by
+this cleanup. Learner Windows deployment/migration needs no local Python; earlier Linux
+runtime helpers and optional older maintainer integration/app tests still use Python.
+The original 72 static checks passed before consolidation; the retained 30 checks and
+archive integrity checks passed afterward. Native PowerShell checks/packaging and live
+Azure/Hyper-V execution remain untested here. The legacy workshop-update is untouched.
+
+## Earlier: workload power gates and final traffic opt-in (2026-10-06)
+
+Steps 1 and 2 now independently read the resolved Azure Hyper-V host's actual power code
+and exactly four nested workload states through Azure Run Command. Small marked JSON/end
+payloads require successful status records, no stderr, a complete unique payload and all four
+expected rows. Missing, Off, Saved, Paused, unknown/unreadable and malformed outcomes stop
+progress. Each state is reported with manual host-side Start-VM/Resume-VM repair guidance;
+missing guests require deployment restoration. Neither the Azure host nor nested workloads
+are automatically started by these gates. MigrateAppl is separate; Running is power state,
+not an application-health assertion. Step 1 rechecks before final verified-project guidance;
+Step 2 gates before module/appliance/download/registration/assessment work.
+
+After WHAT TO DO NEXT, Step 1's final optional action warns about ongoing background sample
+order creation and asks the requested immediate-continuation question with safe `[y/N]`.
+No/Enter/unrecognized input changes no generators. No offer is shown for absent/unverified
+projects or unready/unverifiable guests. `-LabTraffic Prompt|Start|Skip` is explicit; supplied
+environment inputs default to no new prompt/start. `-LabTrafficPassword` optionally accepts
+SecureString input; otherwise Yes/Start privately prompts for the deployment password.
+
+An elevated local invocation must match Azure instance metadata to the selected VM ID/name,
+RG and subscription. Workstation execution uses the reviewed protected managed Run Command
+pattern with unique names and the host's actual location. No password is embedded in source
+or ordinary parameters; transient plaintext/protected values are cleared. Capability/settings/
+SSH checks happen first. The traffic script's small NonInteractive extension requires supplied
+credentials/settings, installed OpenSSH 8.4+ and working noninteractive Linux password/sudo
+access on both Linux guests before generator writes. Older/missing capabilities explicitly
+fall back to the elevated host-interactive command, never a remote Read-Host/SSH hang or
+Windows-only success. Existing hosts need the refreshed staged script; deployment code is
+unchanged and already stages the checkout's script.
+
+Full success requires Windows task Running, Linux generator/proxy markers, managed execution
+Succeeded, exit 0 and the exact launcher success marker. Partial/failure and uncertain/timeouts
+are reported without pretending generators were rolled back or never ran. Only terminal own
+managed resources are removed. Generators persist across consoles/reboots: **lab/script
+completion does not stop them**. Explicitly disable traffic or stop/remove VMs during teardown.
+No timer/completion detector is added. Deployment, app code, stages 3–6 and the legacy package
+are unchanged. Updated reusable notes and 25 new Python fixture/lexical checks complement the
+retained project-guidance regressions; no PowerShell or Azure execution is claimed.
+
+## Earlier: Step 1 project-dependent completion guidance (2026-10-06)
+
+When the requested Azure Migrate project is absent, Step 1 finishes on the portal project
+creation instructions, followed by a command to rerun Step 1 with the same resource groups,
+project, host and target region. It does not display WHAT TO DO NEXT or direct the learner to
+Step 2. The landing zone remains prepared, but the summary does not label Step 1 complete.
+Only a successful project lookup enables the existing Step 2 guidance. Read failures are
+reported as unverified, not as proof of absence, and instruct portal/access verification
+before a retry rather than creating a duplicate. No deployment, quota or migration behavior
+is changed. Five lexical regressions cover these output branches; no live lookup is claimed.
+
+## Current: separate migration target region and quota heads-up (2026-10-06)
+
+Step 1 no longer inherits the source resource-group region. The learner explicitly chooses a
+subscription-listed target region different from the **actual source host VM** region, with
+name/display-name normalization. Existing target VNet/NSG conflicts stop before provider
+registration or resource writes; RG metadata alone is not a conflict. Project data geography
+is independent: the old target-to-project-region map is removed, existing projects are unchanged,
+and project creation stays in the portal. A prominent warning requires choosing the migration
+target before portal Create resources / Finalize discovery locks it; lock detection is not claimed.
+
+Read-only, timestamped quota reporting uses the same signed-in masked subscription, live
+`Get-AzVMUsage` and SKU `vCPUs`/family metadata in source and target. Total Regional vCPU,
+relevant family and VM-count limits are independent checks. All reported usage is retained,
+including other resources/VM scale sets and allocated/deallocated VMs. Nested workloads and
+appliance do not consume separate Azure VM quota; the source host is not added twice.
+Planning defaults match step 3 (6 vCPUs/four new VMs); 12 vCPUs/eight new VMs is the optional
+full-target-plus-full-test overlap, not an automatic requirement or reserved replication capacity.
+Missing/denied/unregistered reads and incomplete SKU/family metadata are **Unknown**, not zero.
+Interactive warnings offer reselect/network-only/cancel; supplied locations need explicit
+`-AllowQuotaWarning` to proceed with networking despite warnings. No quota bypass is provided.
+`-ForecastVmSizes` is an explicit planning list, not a change to migration sizing.
+
+Step 2 assesses the selected target, optionally deriving it from the existing target VNet.
+Steps 3–6 use actual target VNet location rather than RG metadata; test VNet reuse is checked.
+Wrappers 3a/3b no longer prefill location from RG metadata, but otherwise retain their behavior.
+Helpers remain self-contained; no common.ps1 dependency, app/JDBC change, or Pull 12 import.
+Twelve new Python reference-fixture/lexical regression checks supplement all 30 prior checks;
+they are not PowerShell AST execution, live quota evidence or Azure allocation tests.
+
 ## Current: Tomcat initial deployment (2026-10-05)
 
 | Area | Implemented behavior |
@@ -45,7 +514,8 @@ This is the complete branch-ready source, not a changes-only overlay. See
 
 Current module/runtime checks and instructor script labels are updated. AgentBased remains the
 Module 3 workload grouping/agentless automation shortcut; migration architecture, VM names,
-sizing/disks, schema/seeds and appliance behavior are not changed. Module 4 remains unchanged.
+workload sizing/disks and schema/seeds are not changed. The appliance-flow correction below
+supersedes the original appliance handling. Module 4 remains unchanged.
 No material was imported from Pull 12 modules. Existing-lab staging/rollback is documented only
 as a fallback. Personal account/session override notes and obsolete source-only pointers were
 removed. The prior dated parser report is omitted because it is not evidence for this revision.
@@ -188,6 +658,10 @@ adds an optional `Convert-VHD -VHDType Fixed` step for the appliance disk — gu
 check, with a documented fallback if the expanded size does not fit.
 
 ## 3c. The appliance disk is grown to Microsoft's documented size
+
+> **Historical — superseded by the current appliance-flow revision below.** The manual VHD
+> and guest-partition expansion instructions described here are removed. Do not use the
+> old 40 GB packaging assumption or this historical entry as current installation guidance.
 
 Microsoft publishes the Hyper-V appliance VHD at around 40 GB, while the documented requirement for
 that appliance is **16 GB memory, eight vCPUs and roughly 80 GB of disk**. Importing the VHD as-is
@@ -1744,3 +2218,32 @@ cross-file helper resolution were checked statically.
 revision. The staging preflight, PHASE 6 payload decode, settings-file load and the Node, Nginx and
 SQL portions of the traffic mesh in particular should be exercised in a training subscription before
 partner delivery.
+
+
+## Current: Appliance verification and installation correction (2026-10-05)
+
+- Removed learner VHD/guest-partition expansion and Step 2's automatic VHD resize. The
+  roughly 80 GB requirement remains: inspect capacity read-only; discrepancies require
+  instructor review of the verified package, not a learner resizing workaround. Historical
+  section 3c is superseded. Host deployment's automatic ApplianceStore partition remains.
+- Module 1 selects one explicit ZIP path and stops on a current official Hyper-V ZIP hash
+  mismatch before extraction. Rename/copy/extraction do not change source ZIP bytes;
+  recompression/internal renames do, and VHD writes are not source ZIP changes. A mismatch's
+  cause is unresolved without the exact artifact, source and actual/expected hashes.
+- Deployment rehashes the actual ZIP at the end, reports full path/bytes and cached-record
+  agreement separately, and compares any supplied expected hash before reporting MATCH.
+  Staging no longer trusts a completion marker alone or overwrites an existing ZIP by default.
+- Step 2 refuses ambiguous ZIP/disk/configuration selection and stale/unrecorded extracted
+  content; it records and rechecks extraction file hashes independently of the ZIP hash.
+  Copy-import preserves exported generation, places all destinations on the actual store,
+  checks physical copy space/headroom, renames before boot and guards DHCP/MAC conflicts.
+  Source ZIP and extraction folders are retained; no verification bypass is offered.
+- Corrected host-store versus guest capacity, UTC accuracy versus display time zone,
+  actual deployed host/Linux username, initial Tomcat labapp login versus SQL discovery
+  permissions, guest OS verification and nested-switch/WinRM/installer/project boundaries.
+
+Sources: [Microsoft appliance requirements and Verify security](https://learn.microsoft.com/en-us/azure/migrate/migrate-appliance?view=migrate),
+[Hyper-V appliance import tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-hyper-v?view=migrate),
+and [Compare-VM compatibility/import parameters](https://learn.microsoft.com/en-us/powershell/module/hyper-v/compare-vm?view=windowsserver2025-ps).
+Four regression checks cover the new flow, including a fictional ZIP rename/copy/extract
+fixture; they do not validate a real Microsoft archive or execute Hyper-V/Azure/PowerShell.

@@ -1,3 +1,15 @@
+> **Workshop execution boundary — Ubuntu 24.04 revision.** All four nested workloads,
+> including SQL and Linux-App, migrate through the **Hyper-V host replication provider**
+> from Module 2. The `AgentBased` script selector is an instructor workload grouping, not
+> an instruction to deploy a guest Mobility agent or another appliance. For this lab use
+> `migrate-step3b-agent-based.ps1`, review the selected SQL/Linux-App machines and perform
+> the same supported host-provider/test/cutover workflow. No extra VM, memory or disk is
+> required. Sections describing legacy configuration/process servers and Mobility agents
+> below are optional architecture discussion, **not steps to run on this workshop host**.
+> A separate physical/other agent-based exercise requires its own supported infrastructure
+> and current source OS/kernel/agent support review; Noble support is not inferred from a
+> 22.04 installer or a Hyper-V discovery support entry.
+
 # Module 3: Agent-Based Migration — Continuous Replication for Mission-Critical Workloads
 
 | **Estimated Time** | 75–90 minutes |
@@ -198,7 +210,7 @@ Agent-based migration supports **application-consistent snapshots** via VSS (Win
 | VM Name              | OS                    | Role                   | IP Address    |
 |----------------------|-----------------------|------------------------|---------------|
 | OnPrem-SQL           | Windows Server 2022   | SQL Server 2022 Express| 192.168.0.11  |
-| OnPrem-Linux-App     | Ubuntu 22.04          | Tomcat 9 JSP order desk    | 192.168.0.13  |
+| OnPrem-Linux-App     | Ubuntu 24.04          | Tomcat 10.1 JSP order desk    | 192.168.0.13  |
 
 - ✅ RDP access to OnPrem-SQL and SSH access to OnPrem-Linux-App
 - ✅ Azure subscription with quota for 2× Standard_B2s VMs
@@ -351,72 +363,23 @@ You can also verify in the Azure Portal:
 
 ---
 
-## 7. Step 3 — Install Mobility Service on OnPrem-Linux-App (Linux)
+## 7. Ubuntu 24.04 workshop path — no guest Mobility installer
 
-### 7.1 Connect to OnPrem-Linux-App
+Do **not** copy a `Microsoft-ASR_UA*Ubuntu-22.04*release.tar.gz` package to a Noble guest,
+rename it to 24.04, or invent a 24.04 release filename. This full lab uses the Hyper-V host
+replication provider; it does not install a Linux Mobility agent. Keep the Tomcat 10.1 /
+OpenJDK 17 service, private JNDI and original SQL dependency intact during host replication.
+Use Module 2's provider/target-region safeguards and the Module 3 instructor grouping,
+then validate the isolated test mesh and coordinated SQL/app cutover.
 
-```bash
-ssh adminuser@192.168.0.13
-```
-
-### 7.2 Download the Mobility Service Installer
-
-```bash
-# Download from the replication appliance
-wget "http://<replication-appliance-ip>:9443/installers/download?type=linuxmobility" \
-    -O MobilityServiceInstaller.tar.gz
-
-# Or copy via scp
-scp adminuser@<replication-appliance-ip>:"/Program Files (x86)/Microsoft Azure Site Recovery/home/svsystems/pushinstallsvc/repository/Microsoft-ASR_UA*Ubuntu-22.04*release.tar.gz" \
-    ~/MobilityServiceInstaller.tar.gz
-```
-
-### 7.3 Install the Mobility Service
-
-```bash
-# Extract the installer
-mkdir -p /tmp/MobilityService
-tar -xvf MobilityServiceInstaller.tar.gz -C /tmp/MobilityService
-
-# Run the installer
-cd /tmp/MobilityService
-sudo ./install -d /usr/local/ASR -r MS -v VmWare -q
-```
-
-### 7.4 Register with the Replication Appliance
-
-```bash
-# Copy the passphrase file from the replication appliance
-scp adminuser@<replication-appliance-ip>:"/ProgramData/Microsoft Azure Site Recovery/private/connection.passphrase" \
-    /tmp/passphrase.txt
-
-# Register the agent
-cd /usr/local/ASR/Vx/bin
-sudo ./UnifiedAgentConfigurator.sh -i <replication-appliance-ip> -P /tmp/passphrase.txt
-
-# Clean up the passphrase file — do not leave credentials on disk
-rm -f /tmp/passphrase.txt
-```
-
-### 7.5 Verify Agent Status
-
-```bash
-# Check agent service status
-sudo systemctl status svagents
-
-# Verify agent connectivity
-sudo /usr/local/ASR/Vx/bin/UnifiedAgentConfigurator.sh -S
-```
-
-> **⚠️ Warning:** Ensure the Linux VM has outbound connectivity to Azure on port 443 and to the replication appliance on port 9443. Verify firewall rules:
-> ```bash
-> # Test connectivity to replication appliance
-> nc -zv <replication-appliance-ip> 9443
-> # Test connectivity to Azure
-> nc -zv *.hypervrecoverymanager.windowsazure.com 443
-> ```
-
-**Expected Outcome:** The Mobility Service agent is installed and registered on OnPrem-Linux-App, showing as connected in the Azure Portal.
+For a **separate optional physical/other** exercise, first review the current
+[agent-based migration support matrix](https://learn.microsoft.com/azure/migrate/migrate-support-matrix-physical)
+and actual supported agent/kernel versions. Inspect the released repository files on that
+exercise's approved replication appliance; select and verify the publisher's exact OS,
+architecture, version and hash. Stop if Ubuntu 24.04 or the running kernel is unsupported
+or no matching released installer is available. No download/installation example is supplied
+here because this revision has not verified a Noble Mobility release; a wildcard must never
+serve as compatibility or signature verification.
 
 ---
 
@@ -626,7 +589,7 @@ counts and recent orders. `validate.sh --write` explicitly creates/reads one rea
 and rejects invalid quantity; compare SQL data using the existing Customers/Orders tables.
 Manage the app with its systemd unit; never expose the protected JNDI file in a support log.
 
-**Expected outcome:** non-root Tomcat 9/OpenJDK 17 serves port 3000 and reads the isolated
+**Expected outcome:** non-root Tomcat 10.1/OpenJDK 17 serves port 3000 and reads the isolated
 migrated SQL data. Verify Linux-Web port-8080 desk/readiness separately; port 80 stays static.
 
 ---

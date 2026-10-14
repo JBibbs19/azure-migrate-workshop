@@ -20,7 +20,7 @@
       - OnPrem-Web       (Windows Server + IIS)
       - OnPrem-SQL       (Windows Server + SQL Server Express)
       - OnPrem-Linux-Web (Ubuntu + Nginx)
-      - OnPrem-Linux-App (Ubuntu + Node.js API)
+      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
 
     Prerequisites:
       - Steps 1-4 completed (test migration passed, test resources cleaned up)
@@ -37,6 +37,7 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
+    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
     Azure region for resources. Prompted when not supplied (example: eastus).
 
 .PARAMETER TurnOffSourceVMs
@@ -795,6 +796,54 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -814,7 +863,7 @@ Write-Host "Enter the values for your lab environment. A value in [brackets] is 
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $TargetResourceGroup
+$Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
 $TurnOffSourceVMs = Read-LabChoice -Prompt 'Shut down the source VMs before the final sync (recommended: Yes)' -Value $TurnOffSourceVMs
 $Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload group (All = four VMs; Agentless = the Module 2 pair; AgentBased = the Module 3 pair)'
 
@@ -952,7 +1001,7 @@ Write-Host "║  This will MIGRATE the following VMs to Azure:      ║" -Foregr
 Write-Host "║    - OnPrem-Web       (IIS Web Server)              ║" -ForegroundColor Red
 Write-Host "║    - OnPrem-SQL       (SQL Server Express)          ║" -ForegroundColor Red
 Write-Host "║    - OnPrem-Linux-Web (Nginx Web Server)            ║" -ForegroundColor Red
-Write-Host "║    - OnPrem-Linux-App (Node.js API)                 ║" -ForegroundColor Red
+Write-Host "║    - OnPrem-Linux-App (Tomcat order desk)                 ║" -ForegroundColor Red
 Write-Host "║                                                      ║" -ForegroundColor Red
 Write-Host "║  Source VM shutdown: $TurnOffSourceVMs                          ║" -ForegroundColor Red
 Write-Host "║  Target Resource Group: $TargetResourceGroup              ║" -ForegroundColor Red
@@ -1173,6 +1222,7 @@ foreach ($vmName in $vmNames) {
             "OnPrem-SQL" {
                 # Validate SQL Server is listening and data is intact.
                 Write-StepInfo "  Testing SQL Server on port 1433..."
+                $tcpTest = $null
                 try {
                     $tcpTest = Test-NetConnection -ComputerName $testIp -Port 1433 -WarningAction SilentlyContinue
                     if ($tcpTest.TcpTestSucceeded) {
@@ -1193,10 +1243,12 @@ foreach ($vmName in $vmNames) {
                 try {
                     $sqlCheckScript = @"
                         try {
-                            `$result = Invoke-Sqlcmd -ServerInstance 'localhost' -Database 'ContosoApp' -Query 'SELECT COUNT(*) AS RowCount FROM dbo.Products' -ErrorAction Stop
-                            Write-Output "ContosoApp.Products row count: `$(`$result.RowCount)"
+                            `$result = Invoke-Sqlcmd -TrustServerCertificate -ServerInstance '.\SQLEXPRESS' -Database 'ContosoApp' -Query 'SELECT (SELECT COUNT(*) FROM dbo.Customers) AS Customers, (SELECT COUNT(*) FROM dbo.Orders) AS Orders' -ErrorAction Stop
+                            if (`$result.Customers -lt 1 -or `$result.Orders -lt 1) { throw 'Expected ContosoApp data missing.' }
+                            Write-Output "Customers: `$(`$result.Customers); Orders: `$(`$result.Orders)"
+                            Write-Output 'LAB_SQL_DATA_OK' 
                         } catch {
-                            Write-Output "SQL query failed: `$_"
+                            throw 'ContosoApp data validation failed; inspect SQL locally.'
                         }
 "@
                     $sqlResult = Invoke-AzVMRunCommand `
@@ -1209,8 +1261,18 @@ foreach ($vmName in $vmNames) {
                     $sqlResult.Value | ForEach-Object {
                         Write-StepInfo "  SQL Check: $($_.Message)"
                     }
-                    $workloadStatus = "PASSED (port + data)"
+                    $stdout = @($sqlResult.Value | Where-Object Code -Match 'StdOut' | ForEach-Object Message) -join "`n"
+                    $stderr = @($sqlResult.Value | Where-Object Code -Match 'StdErr' | ForEach-Object Message) -join "`n"
+                    if ($stdout -cnotmatch '(?m)^LAB_SQL_DATA_OK\r?$' -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+                        throw 'Remote SQL data marker missing or SQL validation reported an error.'
+                    }
+                    if ($tcpTest -and $tcpTest.TcpTestSucceeded) {
+                        $workloadStatus = 'PASSED (port + data)'
+                    } else {
+                        $workloadStatus = 'SQL DATA VERIFIED; TCP NOT VERIFIED'
+                    }
                 } catch {
+                    $workloadStatus = 'SQL DATA NOT VERIFIED'
                     Write-WarningBanner "  Data integrity check failed: $_"
                     Write-StepInfo "  (You can verify manually via RDP + SSMS)"
                 }
@@ -1232,17 +1294,22 @@ foreach ($vmName in $vmNames) {
             }
 
             "OnPrem-Linux-App" {
-                # Validate the Node.js API health endpoint.
-                Write-StepInfo "  Testing Node.js API at port 3000/api/health..."
+                Write-StepInfo "  Testing Tomcat health, SQL readiness and existing data on port 3000..."
                 try {
-                    $response = Invoke-WebRequest -Uri "http://${testIp}:3000/api/health" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
-                    if ($response.StatusCode -eq 200) {
-                        Write-StepInfo "  ✅ Node.js API returned HTTP 200."
-                        $workloadStatus = "PASSED"
+                    $health = Invoke-RestMethod "http://${testIp}:3000/api/health" -TimeoutSec 15 -ErrorAction Stop
+                    if ($health.status -ne 'healthy' -or $health.server -ne 'OnPrem-Linux-App' -or $health.app -ne 'Contoso Order Desk') {
+                        throw 'Wrong application or Tomcat liveness contract failed.'
                     }
+                    $ready = Invoke-RestMethod "http://${testIp}:3000/api/ready" -TimeoutSec 20 -ErrorAction Stop
+                    $orders = Invoke-RestMethod "http://${testIp}:3000/api/orders" -TimeoutSec 20 -ErrorAction Stop
+                    if ($ready.status -ne 'ready' -or $orders.customerCount -lt 1 -or $orders.count -lt 1) {
+                        throw 'Tomcat cannot read existing SQL data; repoint aliases to the matching migrated SQL VM.'
+                    }
+                    Write-StepInfo "  Tomcat health, SQL readiness and existing data passed."
+                    $workloadStatus = "PASSED (Tomcat + SQL data)"
                 } catch {
-                    Write-WarningBanner "  Node.js API test failed: $_"
-                    $workloadStatus = "API FAILED"
+                    Write-WarningBanner "  Tomcat/SQL validation failed; verify services, private routing and repointed lab aliases."
+                    $workloadStatus = "APP/SQL NOT READY"
                 }
             }
         }
@@ -1402,7 +1469,7 @@ foreach ($vmName in $vmNames) {
             }
 
             "OnPrem-Linux-App" {
-                # Node.js API should only be accessible from the Nginx reverse proxy.
+                # Tomcat order desk should only be accessible from the Nginx reverse proxy.
                 $nginxIp = $migratedVMDetails["OnPrem-Linux-Web"].PrivateIP
                 if ($nginxIp) {
                     $nsg | Add-AzNetworkSecurityRuleConfig -Name "Allow-API-From-Nginx" `

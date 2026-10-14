@@ -6,6 +6,14 @@
 >
 > **WAF Pillars Covered:** Operational Excellence · Reliability · Security · Cost Optimization
 
+> **Ubuntu 24.04 revision:** both Linux guests retain Noble after migration. Verify Tomcat
+> 10.1.x with explicit Java 17, protected JNDI, SQL orders/readiness and the Nginx proxy
+> after isolated alias repointing. Record actual versions and review Noble Universe Tomcat
+> patch/security coverage separately from Main maintenance. After any kernel update/reboot,
+> require matching current-kernel tools and active KVP; do not silently fall back by flavour.
+> `migrate-step6-post-migration.ps1` is **write-enabled**: its regional guards precede the
+> existing monitoring/backup/network changes. It is not a read-only validation command.
+
 ## 1. Overview — Day 2 Operations: Where Migrations Succeed or Fail
 
 The migration is not done at cutover. It is done when operations are **stable, secure, observable, and cost-optimized** in their new cloud environment. Industry data consistently shows that organizations that underinvest in post-migration operations fail to achieve the expected ROI from their cloud migration — often within the first 12 months.
@@ -421,15 +429,17 @@ Now that your VMs are in Azure, consider **Azure-to-Azure ASR** for cross-region
 
 Migrated workloads carry their on-premises security posture into the cloud — which is almost always **too permissive** for a cloud environment. A CSA must harden these workloads using Zero Trust principles: verify explicitly, use least-privilege access, assume breach.
 
+> **Pre/post-hardening traffic check:** After Step 5, use `post-migration-labtraffic.ps1` in native PowerShell (not Cloud Shell), with the verified `-TargetResourceGroup` and `-SubscriptionId`: `Check` (default, inspect existing jobs) → `Prepare` → `Check` → `Start` before Step 6; run `Check` again after hardening. `Prepare` stops/disables old jobs, repoints all four aliases to Azure-primary-NIC-verified target IPs, restarts Tomcat, and reloads Nginx. Changes require per-VM confirmation; `Start` repeats preparation/gates before bounded original business cycles (defaults: 30-second interval, 60-second duration). `Status` inspects runs; `Stop` stops them. `Check`/`Status` are guest-read-only, but Azure Run Command still requires ARM execution write permissions. Stale aliases fail `Check`: do not proceed to `Start`. Explicit `-TestMigration` selects only `-test` VMs, with no fallback. Windows summaries/native SQL counts and detailed Linux journal evidence are separate.
+
 ### Security Hardening Flow
 
 ```mermaid
 flowchart TD
     Start["Migrated VMs<br/>in Azure"] --> NSG["Step 1: Harden NSGs"]
     NSG --> Web["OnPrem-Web<br/>Allow: 80, 443"]
-    NSG --> SQL["OnPrem-SQL<br/>Allow: 1433 from Web only"]
-    NSG --> Nginx["OnPrem-Linux-Web<br/>Allow: 80, 443"]
-    NSG --> TomcatApp["OnPrem-Linux-App<br/>Allow: 3000 from Nginx only"]
+    NSG --> SQL["OnPrem-SQL<br/>Allow: 1433 from Web and Linux-App"]
+    NSG --> Nginx["OnPrem-Linux-Web<br/>Allow: 80, 443; 8080 from Linux-App"]
+    NSG --> TomcatApp["OnPrem-Linux-App<br/>Allow: 3000 from Nginx and Web"]
 
     Web & SQL & Nginx & TomcatApp --> Bastion["Step 2: Azure Bastion<br/>Replace open RDP/SSH"]
     Bastion --> Defender["Step 3: Microsoft Defender<br/>Threat Protection"]
@@ -466,82 +476,166 @@ Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 
 ### 4.3 Apply Role-Based NSG Rules — Microsegmentation
 
-Design NSG rules based on **application architecture tiers**: web → app → data. Each tier should only accept traffic from the tier directly upstream.
+Design NSG rules around the lab's **actual application dependencies**: IIS Web and Tomcat Linux-App → SQL (TCP 1433); Nginx Linux-Web and IIS Web → Tomcat Linux-App (TCP 3000); Tomcat Linux-App → Nginx Linux-Web (TCP 8080). Public HTTP/HTTPS retain their existing names, priorities, ports, and wildcard sources. Internal sources and each role's destination use the verified target primary private IP as `/32`.
+
+Step 6 updates only known lab-managed rules with recognized shapes, preserves unrelated custom rules, and fails priority-conflict or shared-NIC-NSG preflight before writes. It does not change guest firewalls, subnet NSGs, or routes. The manual examples below are for reviewed role-specific NIC NSGs where these names/priorities are available; inspect all four before writing. Use Step 6 for reconciliation rather than adding duplicate rules or removing unrelated controls.
+
+> **Verify first:** Confirm the actual target resource group, each VM's primary NIC/private IPv4, and its attached NSG against Azure before entering values. Do not reuse source `192.168.*` addresses or sample IPs. Use the actual NSG names in each example; an NSG can be in a different resource group. Enter an operator public IPv4 only if verified; otherwise leave it blank to skip management allows.
+
+```powershell
+$TargetResourceGroup = Read-Host "Actual target resource group (verified in Azure)"
+$WebIp = Read-Host "Azure-verified OnPrem-Web primary private IPv4 (without /32)"
+$AppIp = Read-Host "Azure-verified OnPrem-Linux-App primary private IPv4 (without /32)"
+$SqlIp = Read-Host "Azure-verified OnPrem-SQL primary private IPv4 (without /32)"
+$NginxIp = Read-Host "Azure-verified OnPrem-Linux-Web primary private IPv4 (without /32)"
+$OperatorPublicIp = Read-Host "Verified operator public IPv4 (without /32; blank if unverified)"
+```
 
 **OnPrem-Web (IIS — Web Tier):**
 
-| Priority | Name | Direction | Action | Protocol | Source | Dest Port |
-|---|---|---|---|---|---|---|
-| 100 | Allow-HTTP | Inbound | Allow | TCP | * | 80 |
-| 110 | Allow-HTTPS | Inbound | Allow | TCP | * | 443 |
-| 200 | Allow-RDP-MyIP | Inbound | Allow | TCP | *Your IP* | 3389 |
-| 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
+| Priority | Name | Direction | Action | Protocol | Source | Destination | Dest Port |
+|---|---|---|---|---|---|---|---|
+| 100 | Allow-HTTP | Inbound | Allow | TCP | * | `$WebIp/32` | 80 |
+| 110 | Allow-HTTPS | Inbound | Allow | TCP | * | `$WebIp/32` | 443 |
+| 200 | Allow-RDP | Inbound | Allow | TCP | *Verified operator public IP/32; omit if unverified* | `$WebIp/32` | 3389 |
+| 4000 | Deny-All | Inbound | Deny | TCP | * | `$WebIp/32` | * |
 
 ```powershell
-$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName "rg-ces-target-01"
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Web-nsg" -ResourceGroupName $TargetResourceGroup
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
   -Name "Allow-HTTP" -Priority 100 -Direction Inbound -Access Allow `
   -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
-  -DestinationAddressPrefix "*" -DestinationPortRange "80"
+  -DestinationAddressPrefix "$WebIp/32" -DestinationPortRange "80"
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
   -Name "Allow-HTTPS" -Priority 110 -Direction Inbound -Access Allow `
   -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
-  -DestinationAddressPrefix "*" -DestinationPortRange "443"
+  -DestinationAddressPrefix "$WebIp/32" -DestinationPortRange "443"
+
+if ($OperatorPublicIp) {
+  Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+    -Name "Allow-RDP" -Priority 200 -Direction Inbound -Access Allow `
+    -Protocol TCP -SourceAddressPrefix "$OperatorPublicIp/32" -SourcePortRange "*" `
+    -DestinationAddressPrefix "$WebIp/32" -DestinationPortRange "3389"
+}
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
-  -Name "Allow-RDP-MyIP" -Priority 200 -Direction Inbound -Access Allow `
-  -Protocol TCP -SourceAddressPrefix "YOUR_PUBLIC_IP/32" -SourcePortRange "*" `
-  -DestinationAddressPrefix "*" -DestinationPortRange "3389"
+  -Name "Deny-All" -Priority 4000 -Direction Inbound -Access Deny `
+  -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$WebIp/32" -DestinationPortRange "*"
 
 Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 ```
-
-> **Important:** Replace `YOUR_PUBLIC_IP` with your actual public IP address.
 
 **OnPrem-SQL (SQL Server — Data Tier):**
 
-| Priority | Name | Direction | Action | Protocol | Source | Dest Port |
-|---|---|---|---|---|---|---|
-| 100 | Allow-SQL-FromWeb | Inbound | Allow | TCP | *OnPrem-Web private IP* | 1433 |
-| 200 | Allow-RDP-MyIP | Inbound | Allow | TCP | *Your IP* | 3389 |
-| 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
+| Priority | Name | Direction | Action | Protocol | Source | Destination | Dest Port |
+|---|---|---|---|---|---|---|---|
+| 100 | Allow-SQL-From-Web | Inbound | Allow | TCP | `$WebIp/32` | `$SqlIp/32` | 1433 |
+| 110 | Allow-SQL-From-Linux-App | Inbound | Allow | TCP | `$AppIp/32` | `$SqlIp/32` | 1433 |
+| 200 | Allow-RDP | Inbound | Allow | TCP | *Verified operator public IP/32; omit if unverified* | `$SqlIp/32` | 3389 |
+| 4000 | Deny-All | Inbound | Deny | TCP | * | `$SqlIp/32` | * |
 
 ```powershell
-$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-SQL-nsg" -ResourceGroupName "rg-ces-target-01"
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-SQL-nsg" -ResourceGroupName $TargetResourceGroup
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
-  -Name "Allow-SQL-FromWeb" -Priority 100 -Direction Inbound -Access Allow `
-  -Protocol TCP -SourceAddressPrefix "10.0.0.4/32" -SourcePortRange "*" `
-  -DestinationAddressPrefix "*" -DestinationPortRange "1433"
+  -Name "Allow-SQL-From-Web" -Priority 100 -Direction Inbound -Access Allow `
+  -Protocol TCP -SourceAddressPrefix "$WebIp/32" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$SqlIp/32" -DestinationPortRange "1433"
 
 Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
-  -Name "Allow-RDP-MyIP" -Priority 200 -Direction Inbound -Access Allow `
-  -Protocol TCP -SourceAddressPrefix "YOUR_PUBLIC_IP/32" -SourcePortRange "*" `
-  -DestinationAddressPrefix "*" -DestinationPortRange "3389"
+  -Name "Allow-SQL-From-Linux-App" -Priority 110 -Direction Inbound -Access Allow `
+  -Protocol TCP -SourceAddressPrefix "$AppIp/32" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$SqlIp/32" -DestinationPortRange "1433"
+
+if ($OperatorPublicIp) {
+  Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+    -Name "Allow-RDP" -Priority 200 -Direction Inbound -Access Allow `
+    -Protocol TCP -SourceAddressPrefix "$OperatorPublicIp/32" -SourcePortRange "*" `
+    -DestinationAddressPrefix "$SqlIp/32" -DestinationPortRange "3389"
+}
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Deny-All" -Priority 4000 -Direction Inbound -Access Deny `
+  -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$SqlIp/32" -DestinationPortRange "*"
 
 Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
 ```
 
-> **Note:** Replace `10.0.0.4` with the actual private IP of `OnPrem-Web`. In production, use **Application Security Groups (ASGs)** instead of IP addresses for more maintainable rules.
-
 **OnPrem-Linux-Web (Nginx — Web Tier):**
 
-| Priority | Name | Direction | Action | Protocol | Source | Dest Port |
-|---|---|---|---|---|---|---|
-| 100 | Allow-HTTP | Inbound | Allow | TCP | * | 80 |
-| 110 | Allow-HTTPS | Inbound | Allow | TCP | * | 443 |
-| 200 | Allow-SSH-MyIP | Inbound | Allow | TCP | *Your IP* | 22 |
-| 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
+| Priority | Name | Direction | Action | Protocol | Source | Destination | Dest Port |
+|---|---|---|---|---|---|---|---|
+| 100 | Allow-HTTP | Inbound | Allow | TCP | * | `$NginxIp/32` | 80 |
+| 110 | Allow-HTTPS | Inbound | Allow | TCP | * | `$NginxIp/32` | 443 |
+| 120 | Allow-8080-From-Linux-App | Inbound | Allow | TCP | `$AppIp/32` | `$NginxIp/32` | 8080 |
+| 200 | Allow-SSH | Inbound | Allow | TCP | *Verified operator public IP/32; omit if unverified* | `$NginxIp/32` | 22 |
+| 4000 | Deny-All | Inbound | Deny | TCP | * | `$NginxIp/32` | * |
+
+The Linux-Web example adds the internal edge, optional management allow, and deny; retain the existing `Allow-HTTP`/`Allow-HTTPS` rules shown above.
+
+```powershell
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Linux-Web-nsg" -ResourceGroupName $TargetResourceGroup
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Allow-8080-From-Linux-App" -Priority 120 -Direction Inbound -Access Allow `
+  -Protocol TCP -SourceAddressPrefix "$AppIp/32" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$NginxIp/32" -DestinationPortRange "8080"
+
+if ($OperatorPublicIp) {
+  Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+    -Name "Allow-SSH" -Priority 200 -Direction Inbound -Access Allow `
+    -Protocol TCP -SourceAddressPrefix "$OperatorPublicIp/32" -SourcePortRange "*" `
+    -DestinationAddressPrefix "$NginxIp/32" -DestinationPortRange "22"
+}
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Deny-All" -Priority 4000 -Direction Inbound -Access Deny `
+  -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$NginxIp/32" -DestinationPortRange "*"
+
+Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
+```
 
 **OnPrem-Linux-App (Tomcat — App Tier):**
 
-| Priority | Name | Direction | Action | Protocol | Source | Dest Port |
-|---|---|---|---|---|---|---|
-| 100 | Allow-App-FromNginx | Inbound | Allow | TCP | *OnPrem-Linux-Web private IP* | 3000 |
-| 200 | Allow-SSH-MyIP | Inbound | Allow | TCP | *Your IP* | 22 |
-| 4096 | Deny-All-Inbound | Inbound | Deny | * | * | * |
+| Priority | Name | Direction | Action | Protocol | Source | Destination | Dest Port |
+|---|---|---|---|---|---|---|---|
+| 100 | Allow-API-From-Nginx | Inbound | Allow | TCP | `$NginxIp/32` | `$AppIp/32` | 3000 |
+| 110 | Allow-API-From-Web | Inbound | Allow | TCP | `$WebIp/32` | `$AppIp/32` | 3000 |
+| 200 | Allow-SSH | Inbound | Allow | TCP | *Verified operator public IP/32; omit if unverified* | `$AppIp/32` | 22 |
+| 4000 | Deny-All | Inbound | Deny | TCP | * | `$AppIp/32` | * |
+
+```powershell
+$nsg = Get-AzNetworkSecurityGroup -Name "OnPrem-Linux-App-nsg" -ResourceGroupName $TargetResourceGroup
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Allow-API-From-Nginx" -Priority 100 -Direction Inbound -Access Allow `
+  -Protocol TCP -SourceAddressPrefix "$NginxIp/32" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$AppIp/32" -DestinationPortRange "3000"
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Allow-API-From-Web" -Priority 110 -Direction Inbound -Access Allow `
+  -Protocol TCP -SourceAddressPrefix "$WebIp/32" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$AppIp/32" -DestinationPortRange "3000"
+
+if ($OperatorPublicIp) {
+  Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+    -Name "Allow-SSH" -Priority 200 -Direction Inbound -Access Allow `
+    -Protocol TCP -SourceAddressPrefix "$OperatorPublicIp/32" -SourcePortRange "*" `
+    -DestinationAddressPrefix "$AppIp/32" -DestinationPortRange "22"
+}
+
+Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg `
+  -Name "Deny-All" -Priority 4000 -Direction Inbound -Access Deny `
+  -Protocol TCP -SourceAddressPrefix "*" -SourcePortRange "*" `
+  -DestinationAddressPrefix "$AppIp/32" -DestinationPortRange "*"
+
+Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
+```
 
 > **Application Security Groups (ASGs):** In production, create ASGs (e.g., `asg-web-tier`, `asg-app-tier`, `asg-data-tier`) and reference them in NSG rules instead of IP addresses. ASGs make rules self-documenting and automatically adapt when VMs are added or replaced.
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Step 1: Create Azure Migrate project and prepare the target landing zone.
 
@@ -6,14 +6,15 @@
     This script sets up the Azure Migrate project and creates the target
     resource group (rg-ces-target-01) with networking infrastructure for migrated VMs.
 
-    Run this script ONCE before starting discovery.
+    Run this script before starting discovery. If the project is absent, create it
+    in the portal, then rerun this step to verify it before continuing to Step 2.
 
     What this script does:
     1. Registers required Azure resource providers
     2. Creates the target resource group (landing zone)
     3. Creates a target VNet and subnet for migrated VMs
     4. Creates a Network Security Group with appropriate rules
-    5. Creates an Azure Migrate project
+    5. Checks an existing Azure Migrate project or prints manual portal creation steps
     6. Outputs project details and next steps
 
     Why each step matters:
@@ -37,7 +38,28 @@
     The target cloud resource group. Prompted when not supplied (example: rg-ces-target-01).
 
 .PARAMETER Location
-    Azure region for all resources. Prompted when not supplied (example: eastus).
+    Migration target VM/network region, different from the actual source host region.
+    Validated against Get-AzLocation; no source default. Alias: TargetLocation.
+
+.PARAMETER HyperVHostVMName
+    Optional source Azure host name. Uses HyperVHost when present, otherwise an unambiguous
+    existing VM or a selection prompt; never takes an arbitrary first VM.
+
+.PARAMETER ForecastVmSizes
+    Planning list with duplicates representing VM counts. Defaults match step 3:
+    Standard_B2s, Standard_B2ms, Standard_B1ms, Standard_B1ms. Not binding migration sizes.
+
+.PARAMETER AllowQuotaWarning
+    Explicitly acknowledge unknown/insufficient quota or SKU restrictions and create only
+    the network landing zone. Does not bypass Azure quota or region-conflict validation.
+
+.PARAMETER LabTraffic
+    Prompt (default) offers traffic only after a verified project and four Running workloads.
+    Fully supplied environment inputs default to no traffic prompt; explicit Prompt requests it.
+    Start explicitly opts in, Skip makes no generator changes. No option bypasses readiness.
+.PARAMETER LabTrafficPassword
+    Optional SecureString deployment password for an explicitly opted-in launch. Otherwise
+    privately prompted. Never pass plaintext credentials on command lines.
 
 .PARAMETER MigrateProjectName
     Name for the Azure Migrate project. Prompted when not supplied (example: ces-migrate-01).
@@ -73,9 +95,19 @@ param(
 
     [string]$TargetResourceGroup,
 
-    [string]$Location,
+    [Alias('TargetLocation')][string]$Location,
 
-    [string]$MigrateProjectName
+    [string]$MigrateProjectName,
+
+    [string]$HyperVHostVMName,
+
+    [ValidateNotNullOrEmpty()][string[]]$ForecastVmSizes = @('Standard_B2s', 'Standard_B2ms', 'Standard_B1ms', 'Standard_B1ms'),
+
+    [switch]$AllowQuotaWarning,
+
+    [ValidateSet('Prompt', 'Start', 'Skip')][string]$LabTraffic = 'Prompt',
+
+    [SecureString]$LabTrafficPassword
 )
 
 Set-StrictMode -Version Latest
@@ -665,7 +697,8 @@ function Get-LabAzContext {
     #>
     param(
         [string[]]$RequiredModules = @('Az.Accounts', 'Az.Resources'),
-        [AllowEmptyCollection()][string[]]$OptionalModules = @()
+        [AllowEmptyCollection()][string[]]$OptionalModules = @(),
+        [switch]$SkipSubscriptionPrompt
     )
 
     # Modules are loaded best-effort. A module that will not import is reported but is not fatal
@@ -734,7 +767,7 @@ function Get-LabAzContext {
     # from this session. The chance to switch is offered here rather than after a failed lookup.
     $available = @()
     try { $available = @(Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }) } catch { $available = @() }
-    if ($available.Count -gt 1) {
+    if ($available.Count -gt 1 -and -not $SkipSubscriptionPrompt) {
         if ((Read-LabChoice -Prompt "Work in '$script:LabSubscriptionName'?") -eq 'No') {
             $pickedName = Select-LabFromList -Name 'Subscription' -Prompt 'Azure subscription to work in' -Options @($available | ForEach-Object { $_.Name })
             $target = @($available | Where-Object { $_.Name -eq $pickedName })[0]
@@ -794,6 +827,215 @@ function Assert-LabResources {
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
 }
 
+function ConvertTo-LabRegionKey {
+    param([string]$Value)
+    return (($Value -replace '\s', '').ToLowerInvariant())
+}
+
+function Read-LabTargetRegion {
+    param([string]$Value, [string]$SourceLocation)
+    $locations = @(Get-AzLocation -ErrorAction Stop)
+    if ($locations.Count -eq 0) { throw 'Get-AzLocation returned no subscription regions. No changes were made.' }
+    $supplied = -not [string]::IsNullOrWhiteSpace($Value)
+    while ($true) {
+        $constraint = if ($SourceLocation) { 'different from source host' } else { 'match the chosen step 1 target' }
+        $entry = if ($supplied) { $Value } else { Read-Host "Migration target region (name or display name; $constraint; no default)" }
+        $key = ConvertTo-LabRegionKey ([string]$entry)
+        $matches = @($locations | Where-Object {
+            (ConvertTo-LabRegionKey ([string]$_.Location)) -eq $key -or
+            (ConvertTo-LabRegionKey ([string]$_.DisplayName)) -eq $key
+        })
+        $problem = $null
+        if ($matches.Count -ne 1) { $problem = "Region '$entry' is not an unambiguous Get-AzLocation entry for this subscription." }
+        elseif ($SourceLocation -and (ConvertTo-LabRegionKey ([string]$matches[0].Location)) -eq (ConvertTo-LabRegionKey $SourceLocation)) {
+            $problem = "Migration target must differ from the actual source Hyper-V host region '$SourceLocation'. Choose another region yourself."
+        }
+        if (-not $problem) { return [string]$matches[0].Location }
+        if ($supplied) { throw "$problem No changes were made." }
+        Write-Warning $problem
+        Write-Host "Subscription region names: $(@($locations | ForEach-Object { $_.Location }) -join ', ')"
+    }
+}
+
+function Resolve-LabTargetNetworkLocation {
+    param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $name = "$ResourceGroupName-vnet"
+    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
+        throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
+    }
+    $actual = [string]$network.Location
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $selected = Read-LabTargetRegion -Value $Value
+        if ((ConvertTo-LabRegionKey $selected) -ne (ConvertTo-LabRegionKey $actual)) {
+            throw "-Location '$selected' conflicts with target VNet '$name' in '$actual'. Existing networks cannot be moved; choose a fresh landing zone. No changes were made."
+        }
+    }
+    Write-Host "Migration target region: $actual (actual target VNet; resource-group metadata is not used)" -ForegroundColor Green
+    return $actual
+}
+
+function Get-LabField {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -ne $property) { return $property.Value }
+    return $null
+}
+
+function Get-LabQuotaRow {
+    param([object[]]$Usage, [string]$Key)
+    $rows = @($Usage | Where-Object { (Get-LabField (Get-LabField $_ 'Name') 'Value') -eq $Key })
+    if ($rows.Count -ne 1) { return $null }
+    $current = Get-LabField $rows[0] 'CurrentValue'
+    $limit = Get-LabField $rows[0] 'Limit'
+    $unit = Get-LabField $rows[0] 'Unit'
+    $currentNumber = 0L; $limitNumber = 0L
+    if ($null -eq $current -or $null -eq $limit -or [string]$unit -ne 'Count' -or
+        -not [long]::TryParse([string]$current, [ref]$currentNumber) -or
+        -not [long]::TryParse([string]$limit, [ref]$limitNumber) -or $currentNumber -lt 0 -or $limitNumber -lt 0) { return $null }
+    return [pscustomobject]@{ Current = $currentNumber; Limit = $limitNumber; Remaining = ($limitNumber - $currentNumber) }
+}
+
+function Write-LabQuotaRow {
+    param([string]$Label, $Row, [Nullable[long]]$Additional)
+    if ($null -eq $Row) {
+        Write-Warning "$Label : Unknown (quota row missing, unreadable or unsupported unit; not zero and not proof of headroom)."
+        return
+    }
+    Write-Host "$Label : current=$($Row.Current) limit=$($Row.Limit) remaining=$($Row.Remaining)"
+    if ($null -ne $Additional) {
+        Write-Host "  Hypothetical new allocations: +$Additional; projected=$($Row.Current + $Additional); remaining-after=$($Row.Remaining - $Additional)"
+    }
+}
+
+function Get-LabSkuPlan {
+    param([object[]]$Skus, [string[]]$Sizes, [string]$Location)
+    $families = @{}; $total = 0L; $issues = @(); $known = $true
+    foreach ($size in $Sizes) {
+        $matches = @($Skus | Where-Object { $_.Name -eq $size -and $_.ResourceType -eq 'virtualMachines' -and @($_.Locations) -contains $Location })
+        if ($matches.Count -ne 1) { $known = $false; $issues += "SKU '$size' metadata unavailable in '$Location'; forecast Unknown."; continue }
+        $sku = $matches[0]
+        # Quota uses the SKU vCPUs capability, not constrained vCPUsAvailable.
+        $capabilities = @(Get-LabField $sku 'Capabilities' | Where-Object { (Get-LabField $_ 'Name') -eq 'vCPUs' })
+        $cores = 0L
+        $family = [string](Get-LabField $sku 'Family')
+        if ($capabilities.Count -ne 1 -or -not [long]::TryParse([string](Get-LabField $capabilities[0] 'Value'), [ref]$cores) -or $cores -le 0 -or -not $family) {
+            $known = $false; $issues += "SKU '$size' vCPUs/family metadata missing; forecast Unknown."; continue
+        }
+        $total += $cores
+        if (-not $families.ContainsKey($family)) { $families[$family] = 0L }
+        $families[$family] += $cores
+        foreach ($restriction in @(Get-LabField $sku 'Restrictions')) {
+            if ($null -eq $restriction) { continue }
+            $type = [string](Get-LabField $restriction 'Type')
+            $values = @(Get-LabField $restriction 'Values' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $info = Get-LabField $restriction 'RestrictionInfo'
+            $restrictedLocations = @(Get-LabField $info 'Locations' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $applies = ($values -contains $Location -or $restrictedLocations -contains $Location)
+            if ($type -eq 'Location' -and $values.Count -eq 0 -and $restrictedLocations.Count -eq 0) { $applies = $true }
+            if ($applies -or ($type -eq 'Zone' -and $restrictedLocations.Count -eq 0)) {
+                $issues += "SKU '$size' has a $type restriction in '$Location' (reason: $(Get-LabField $restriction 'ReasonCode')); review region/zone eligibility."
+            }
+        }
+    }
+    return [pscustomobject]@{ Known = $known; Total = $total; Families = $families; Count = $Sizes.Count; Issues = $issues }
+}
+
+function Get-LabRegionQuotaSnapshot {
+    param([string]$Location)
+    $usage = @(); $skus = @(); $issues = @()
+    try {
+        $providers = @(Get-AzResourceProvider -ProviderNamespace 'Microsoft.Compute' -ErrorAction Stop)
+        if (-not @($providers | Where-Object { $_.RegistrationState -eq 'Registered' }).Count) {
+            throw 'Microsoft.Compute is not registered; quota/SKU reads were not performed.'
+        }
+        try { $usage = @(Get-AzVMUsage -Location $Location -ErrorAction Stop) }
+        catch { $issues += "Get-AzVMUsage '$Location': Unknown ($($_.Exception.Message))." }
+        try { $skus = @(Get-AzComputeResourceSku -Location $Location -ErrorAction Stop | Where-Object { $_.ResourceType -eq 'virtualMachines' }) }
+        catch { $issues += "Get-AzComputeResourceSku '$Location': Unknown ($($_.Exception.Message))." }
+    } catch { $issues += "Read-only Compute preflight '$Location': Unknown ($($_.Exception.Message))." }
+    return [pscustomobject]@{ Usage = $usage; Skus = $skus; Issues = $issues }
+}
+
+function Show-LabQuotaPreflight {
+    param($SourceHost, [string]$TargetLocation, [string[]]$PlannedSizes)
+    Write-Host ''
+    Write-Host "READ-ONLY SUBSCRIPTION QUOTA HEADS-UP | UTC $([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" -ForegroundColor Cyan
+    Write-Host "Subscription: $script:LabSubscriptionName $(Format-LabSubscriptionId $script:LabSubscriptionId) (same signed-in subscription for source and target)"
+    Write-Host 'Reported usage includes ALL resources, including other labs and VM scale sets; allocated AND deallocated cores count. Nothing is subtracted.'
+    $source = Get-LabRegionQuotaSnapshot -Location $SourceHost.Location
+    $target = Get-LabRegionQuotaSnapshot -Location $TargetLocation
+    foreach ($issue in @($source.Issues + $target.Issues)) { Write-Warning $issue }
+    $sourcePlan = Get-LabSkuPlan -Skus $source.Skus -Sizes @($SourceHost.HardwareProfile.VmSize) -Location $SourceHost.Location
+    Write-Host "SOURCE HOST REGION: $($SourceHost.Location) | VM $($SourceHost.Name) | actual size $($SourceHost.HardwareProfile.VmSize)"
+    Write-LabQuotaRow -Label 'Total Regional vCPUs' -Row (Get-LabQuotaRow -Usage $source.Usage -Key 'cores')
+    Write-LabQuotaRow -Label 'Regional VM count' -Row (Get-LabQuotaRow -Usage $source.Usage -Key 'virtualMachines')
+    foreach ($family in @($sourcePlan.Families.Keys | Sort-Object)) {
+        Write-LabQuotaRow -Label "Source host family $family (host SKU vCPUs=$($sourcePlan.Total); already included, NOT added again)" -Row (Get-LabQuotaRow -Usage $source.Usage -Key $family)
+    }
+    foreach ($issue in $sourcePlan.Issues) { Write-Warning $issue }
+    if (-not $sourcePlan.Known) { Write-Warning 'Source host family quota: Unknown (actual SKU family/vCPUs metadata unresolved; no hard-coded host sizing used).' }
+    Write-Host 'Four nested workload VMs and MigrateAppl are NOT separate Azure VMs; source quota counts the Azure host only, plus other Azure allocations.'
+    Write-Host "TARGET MIGRATION REGION: $TargetLocation"
+    $plan = Get-LabSkuPlan -Skus $target.Skus -Sizes $PlannedSizes -Location $TargetLocation
+    $regional = Get-LabQuotaRow -Usage $target.Usage -Key 'cores'
+    $vmCount = Get-LabQuotaRow -Usage $target.Usage -Key 'virtualMachines'
+    $additional = if ($plan.Known) { $plan.Total } else { $null }
+    Write-LabQuotaRow -Label 'Total Regional vCPUs' -Row $regional -Additional $additional
+    Write-LabQuotaRow -Label 'Regional VM count' -Row $vmCount -Additional $plan.Count
+    $issues = @($target.Issues + $plan.Issues)
+    if ($null -eq $regional) { $issues += 'Target Total Regional vCPU quota Unknown.' }
+    elseif ($plan.Known -and $regional.Remaining -lt $plan.Total) { $issues += 'Insufficient target Total Regional vCPU quota for the planning baseline.' }
+    if ($null -eq $vmCount) { $issues += 'Target regional VM-count quota Unknown.' }
+    elseif ($vmCount.Remaining -lt $plan.Count) { $issues += 'Insufficient target regional VM-count quota for the planning baseline.' }
+    foreach ($family in @($plan.Families.Keys | Sort-Object)) {
+        $row = Get-LabQuotaRow -Usage $target.Usage -Key $family
+        $familyAdditional = if ($plan.Known) { $plan.Families[$family] } else { $null }
+        Write-LabQuotaRow -Label "Target VM family $family" -Row $row -Additional $familyAdditional
+        if ($null -eq $row) { $issues += "Target family '$family' quota Unknown." }
+        elseif ($row.Remaining -lt $plan.Families[$family]) { $issues += "Insufficient target family '$family' quota for the planning baseline." }
+    }
+    Write-Host "Planning sizes (not binding migration choices): $($PlannedSizes -join ', ')"
+    if ($plan.Known) {
+        Write-Host "ONE FULL TARGET OR TEST SET: +$($plan.Total) vCPUs / +$($plan.Count) Azure VMs (hypothetical new allocations)."
+        Write-Host "FULL TARGET + FULL TEST OVERLAP: +$($plan.Total * 2) vCPUs / +$($plan.Count * 2) Azure VMs ONLY if both new sets coexist in this target region."
+        Write-LabQuotaRow -Label 'Overlap Total Regional vCPUs (optional scenario)' -Row $regional -Additional ($plan.Total * 2)
+        Write-LabQuotaRow -Label 'Overlap regional VM count (optional scenario)' -Row $vmCount -Additional ($plan.Count * 2)
+        if (($null -ne $regional -and $regional.Remaining -lt ($plan.Total * 2)) -or ($null -ne $vmCount -and $vmCount.Remaining -lt ($plan.Count * 2))) {
+            Write-Warning 'Optional FULL TARGET + FULL TEST overlap exceeds reported regional vCPU or VM-count headroom. Clean up tests before cutover; the single-set baseline is checked separately.'
+        }
+        foreach ($family in @($plan.Families.Keys | Sort-Object)) {
+            $overlapFamilyRow = Get-LabQuotaRow -Usage $target.Usage -Key $family
+            Write-LabQuotaRow -Label "Overlap target VM family $family (optional scenario)" -Row $overlapFamilyRow -Additional ($plan.Families[$family] * 2)
+            if ($null -ne $overlapFamilyRow -and $overlapFamilyRow.Remaining -lt ($plan.Families[$family] * 2)) {
+                Write-Warning "Optional full-target/full-test overlap exceeds '$family' headroom; the single-set baseline is checked separately."
+            }
+        }
+    } else { Write-Warning 'vCPU forecast: Unknown; unresolved SKU metadata is not treated as zero.' }
+    Write-Host 'Step 4 normally cleans up test VMs before step 5; replication disks do not reserve VM cores. Existing target VMs are already in reported usage: do not add them again as actual usage.'
+    Write-Host 'Forecasts are NOT reservations. Rerun with actual planned sizes/counts before VM/test allocation. Quota is not physical capacity; SKU restrictions, subscription policy and region access can still block allocation.'
+    foreach ($issue in $issues) { Write-Warning $issue }
+    return [pscustomobject]@{ NeedsAcknowledgement = ($issues.Count -gt 0); Issues = $issues }
+}
+
+function Assert-LabLandingZoneRegion {
+    param([string]$ResourceGroupName, [string]$Location)
+    # Enumerate read-only so a permission failure is not mistaken for a missing resource.
+    $groups = @(Get-AzResourceGroup -ErrorAction Stop | Where-Object { $_.ResourceGroupName -eq $ResourceGroupName })
+    if ($groups.Count -eq 0) { return }
+    $resources = @(Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction Stop | Where-Object {
+        ($_.ResourceType -eq 'Microsoft.Network/virtualNetworks' -and $_.Name -eq "$ResourceGroupName-vnet") -or
+        ($_.ResourceType -eq 'Microsoft.Network/networkSecurityGroups' -and $_.Name -eq "$ResourceGroupName-nsg")
+    })
+    foreach ($resource in $resources) {
+        if (-not $resource.Location -or (ConvertTo-LabRegionKey $resource.Location) -ne (ConvertTo-LabRegionKey $Location)) {
+            throw "Existing $($resource.Name) is in '$($resource.Location)', not migration target '$Location'. It cannot be moved. Choose a fresh target RG/VNet. No changes were made."
+        }
+    }
+    Write-Host "Target RG metadata region '$($groups[0].Location)' does NOT bind child resource regions."
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
@@ -802,22 +1044,55 @@ $script:LabScriptPath = $PSCommandPath
 trap {
     Write-LabTerminatingError $_
     Save-LabErrorReport -ErrorRecord $_ -ScriptPath $script:LabScriptPath
-    Wait-LabBeforeExit
+    if ($script:LabStep1Interactive) { Wait-LabBeforeExit }
     exit 1
 }
 
-$context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Network') -OptionalModules @('Az.Migrate')
+$script:LabTrafficExplicit = $PSBoundParameters.ContainsKey('LabTraffic')
+$script:LabStep1Interactive = [string]::IsNullOrWhiteSpace($SourceResourceGroup) -or [string]::IsNullOrWhiteSpace($TargetResourceGroup) -or [string]::IsNullOrWhiteSpace($Location) -or [string]::IsNullOrWhiteSpace($MigrateProjectName)
+$locationWasSupplied = -not [string]::IsNullOrWhiteSpace($Location)
+$context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Network', 'Az.Compute') -OptionalModules @('Az.Migrate') -SkipSubscriptionPrompt:(-not $script:LabStep1Interactive)
+foreach ($command in @('Get-AzVM', 'Get-AzLocation', 'Get-AzVirtualNetwork', 'Get-AzNetworkSecurityGroup')) {
+    if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { throw "Required read command '$command' is unavailable. No changes were made." }
+}
 
 Write-Host ""
 Write-Host "Enter the values for your lab environment. A value in [brackets] is a lab default and Enter accepts it; an (example: ...) is a hint only and must be typed." -ForegroundColor Cyan
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group to use as the landing zone' -Example 'rg-ces-target-01' -AllowNew
-$Location = Resolve-LabLocation -Value $Location -ResourceGroupName $SourceResourceGroup
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -AllowNew -NewLabel 'Create a new Azure Migrate project -- you name it' -Prompt 'Azure Migrate project to create or reuse' -Example 'ces-migrate-01'
 
 
 # Confirm this step's resources exist in the signed-in subscription before changing anything.
 Assert-LabResources -SourceResourceGroup $SourceResourceGroup
+
+$hostVMs = @(Get-AzVM -ResourceGroupName $SourceResourceGroup -ErrorAction Stop)
+if (-not $HyperVHostVMName -and @($hostVMs | Where-Object { $_.Name -eq 'HyperVHost' }).Count -eq 1) { $HyperVHostVMName = 'HyperVHost' }
+$HyperVHostVMName = Select-LabFromList -Name 'HyperVHostVMName' -Value $HyperVHostVMName -Options @($hostVMs | ForEach-Object { $_.Name }) -Kind VMName -Prompt 'Actual source Hyper-V host Azure VM' -EmptyHelp 'Deploy the source lab first.'
+$sourceHost = Get-AzVM -ResourceGroupName $SourceResourceGroup -Name $HyperVHostVMName -ErrorAction Stop
+if (-not $sourceHost -or -not $sourceHost.Location) { throw 'Actual source host region is unknown. No changes were made.' }
+Write-Host "Source Hyper-V host actual region: $($sourceHost.Location) (NOT source RG metadata)" -ForegroundColor Cyan
+Write-Warning 'CHOOSE THE MIGRATION TARGET BEFORE portal Create resources / Finalize discovery locks the project migration target. All subsequent migrations and test VNets must match that target. Project data geography is separate; an existing project is not remapped.'
+Write-Warning 'Project migration target lock was NOT verified by this preflight. Inspect the existing project migration/recovery resources in the portal before continuing; do not change an already locked target.'
+while ($true) {
+    $Location = Read-LabTargetRegion -Value $Location -SourceLocation $sourceHost.Location
+    Assert-LabLandingZoneRegion -ResourceGroupName $TargetResourceGroup -Location $Location
+    $quotaPreflight = Show-LabQuotaPreflight -SourceHost $sourceHost -TargetLocation $Location -PlannedSizes $ForecastVmSizes
+    if (-not $quotaPreflight.NeedsAcknowledgement) { break }
+    if ($AllowQuotaWarning) {
+        Write-Warning 'Explicit -AllowQuotaWarning: NETWORK-ONLY landing zone may proceed; quota/SKU eligibility remains unresolved. No VM allocation is approved or guaranteed.'
+        break
+    }
+    if ($locationWasSupplied) {
+        throw 'Quota/SKU heads-up requires acknowledgement before any writes. Choose another -Location or rerun with -AllowQuotaWarning for NETWORK-ONLY setup; review actual VM choices before migration.'
+    }
+    Write-Host '[1] Choose another target region (recommended)  [2] Continue NETWORK-ONLY despite warnings  [3] Cancel'
+    $choice = Read-Host 'Quota preflight decision'
+    if ($choice -eq '1') { $Location = ''; continue }
+    if ($choice -eq '2') { Write-Warning 'NETWORK-ONLY acknowledgement; not a quota bypass or VM allocation guarantee.'; break }
+    if ($choice -eq '3') { throw 'Cancelled before resource/provider writes.' }
+    Write-Warning 'Enter 1, 2 or 3.'
+}
 
 # ================================================================
 # Helper Functions
@@ -874,6 +1149,289 @@ function Write-NextSteps {
 # Configuration
 # ================================================================
 
+function Get-LabRunCommandText {
+    param([Parameter(Mandatory = $true)]$Result)
+    $results = @($Result)
+    if ($results.Count -ne 1 -or $null -eq $results[0] -or
+        $null -eq $results[0].PSObject.Properties['Value']) { throw 'Host read returned no valid Run Command result.' }
+    $entries = @($results[0].Value)
+    if ($entries.Count -eq 0) { throw 'Host read returned no status records.' }
+    $stdout = @()
+    foreach ($entry in $entries) {
+        if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['Code'] -or
+            $null -eq $entry.PSObject.Properties['Message']) { throw 'Malformed host status record.' }
+        $code = [string]$entry.Code
+        if ($code -match '(?i)(failed|error)' -or
+            ($null -ne $entry.PSObject.Properties['Level'] -and [string]$entry.Level -eq 'Error')) {
+            throw 'Host Run Command reported failure.'
+        }
+        if ($code -match '(?i)StdErr') {
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry.Message)) { throw 'Host read reported stderr.' }
+        } elseif ($code -match '(?i)StdOut') {
+            if ($code -notmatch '(?i)/succeeded$') { throw 'Host stdout status is not successful.' }
+            $stdout += [string]$entry.Message
+        }
+    }
+    $text = $stdout -join "`n"
+    if ([string]::IsNullOrWhiteSpace($text)) { throw 'Host read returned empty stdout.' }
+    return $text
+}
+
+function Assert-LabWorkloadPower {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+    Write-Host "${Stage}: read-only workload power check on $SourceResourceGroup/$HyperVHostVMName" -ForegroundColor Cyan
+    $rows = @()
+    try {
+        $hostStatus = Get-AzVM -ResourceGroupName $SourceResourceGroup -Name $HyperVHostVMName -Status -ErrorAction Stop
+        if ($null -eq $hostStatus -or $null -eq $hostStatus.PSObject.Properties['Statuses']) { throw 'Azure host power state is unreadable.' }
+        $power = @($hostStatus.Statuses | Where-Object { $_.Code -like 'PowerState/*' })
+        if ($power.Count -ne 1 -or [string]$power[0].Code -cne 'PowerState/running') {
+            throw 'Azure host must be running before its nested workload states can be verified.'
+        }
+        $probe = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$required = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+$inventory = @(Get-VM -ErrorAction Stop)
+$rows = @(foreach ($name in $required) {
+    $match = @($inventory | Where-Object { $_.Name -ceq $name })
+    if ($match.Count -gt 1) { throw 'Ambiguous workload inventory.' }
+    $state = if ($match.Count -eq 1) { [string]$match[0].State } else { 'Missing' }
+    [pscustomobject]@{ Name = $name; State = $state }
+})
+Write-Output ('LAB_GUEST_STATE_JSON|' + ([ordered]@{ Schema = 1; Rows = $rows } | ConvertTo-Json -Depth 4 -Compress))
+Write-Output 'LAB_GUEST_STATE_END'
+'@
+        $result = Invoke-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+            -CommandId RunPowerShellScript -ScriptString $probe -ErrorAction Stop
+        $text = Get-LabRunCommandText -Result $result
+        $matches = [regex]::Matches($text, '(?m)^LAB_GUEST_STATE_JSON\|([^\r\n]+)\r?\nLAB_GUEST_STATE_END\r?$')
+        if ($matches.Count -ne 1 -or ([regex]::Matches($text, 'LAB_GUEST_STATE_JSON\|')).Count -ne 1 -or
+            ([regex]::Matches($text, '(?m)^LAB_GUEST_STATE_END\r?$')).Count -ne 1) {
+            throw 'Missing, duplicate or truncated workload power payload.'
+        }
+        $payload = $matches[0].Groups[1].Value | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $payload -or $null -eq $payload.PSObject.Properties['Schema'] -or
+            [string]$payload.Schema -cne '1' -or $null -eq $payload.PSObject.Properties['Rows']) { throw 'Invalid workload payload schema.' }
+        $rows = @($payload.Rows)
+        if ($rows.Count -ne 4) { throw 'Expected exactly four workload rows.' }
+        for ($i = 0; $i -lt $required.Count; $i++) {
+            $row = $rows[$i]
+            if ($null -eq $row -or $null -eq $row.PSObject.Properties['Name'] -or
+                $null -eq $row.PSObject.Properties['State'] -or $row.Name -isnot [string] -or
+                $row.State -isnot [string] -or $row.Name -cne $required[$i] -or
+                $row.State -cnotmatch '^[A-Za-z]+$') { throw 'Malformed, duplicate or unexpected workload row.' }
+        }
+    } catch {
+        foreach ($name in $required) { Write-Host "  ${name}: Unknown (selected host power/inventory could not be verified)" -ForegroundColor Yellow }
+        Write-Host "Verify Azure host '$HyperVHostVMName' is running and Run Command/Hyper-V access works. Then rerun this step." -ForegroundColor Yellow
+        Write-Host 'No nested VM was started; do not continue to discovery or traffic with unknown workload states.' -ForegroundColor Yellow
+        throw 'Workload power verification failed closed; no next-stage guidance or traffic is permitted.'
+    }
+    $notRunning = @($rows | Where-Object { $_.State -cne 'Running' })
+    foreach ($row in $rows) {
+        $color = if ($row.State -ceq 'Running') { 'Green' } else { 'Yellow' }
+        Write-Host "  $($row.Name): $($row.State)" -ForegroundColor $color
+    }
+    Write-Host 'Running is a VM power state, not proof of application or database health. MigrateAppl is not a workload prerequisite.' -ForegroundColor Gray
+    if ($notRunning.Count -gt 0) {
+        Write-Host "Repair manually in elevated PowerShell ON the selected host '$HyperVHostVMName', then rerun this step:" -ForegroundColor Yellow
+        foreach ($row in $notRunning) {
+            if ($row.State -ceq 'Missing') {
+                Write-Host "  $($row.Name) is missing: restore the expected workload/deployment; Start-VM cannot create it." -ForegroundColor Yellow
+            } else {
+                if ($row.State -ceq 'Paused') { Write-Host "  Resume-VM -Name '$($row.Name)' # Paused VM" -ForegroundColor White }
+                Write-Host "  Start-VM -Name '$($row.Name)' # Review its reported state before repair" -ForegroundColor White
+            }
+        }
+        throw 'All four workload VMs must be Running. No nested VM was automatically started; stop and retry after repair.'
+    }
+    return [pscustomobject]@{ Rows = $rows; CheckedUtc = [DateTime]::UtcNow.ToString('u') }
+}
+
+function Test-LabMatchingLocalHost {
+    try {
+        $metadata = Invoke-RestMethod -Uri 'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01' `
+            -Headers @{ Metadata = 'true' } -TimeoutSec 3 -ErrorAction Stop
+        return ($metadata.vmId -eq $sourceHost.VmId -and $metadata.name -eq $HyperVHostVMName -and
+            $metadata.resourceGroupName -eq $SourceResourceGroup -and $metadata.subscriptionId -eq $context.Subscription.Id)
+    } catch { return $false }
+}
+
+function Start-LabTrafficOnSelectedHost {
+    $trafficPath = 'C:\AzMigrateLab\enable-lab-traffic.ps1'
+    $manual = "Run $trafficPath in elevated PowerShell ON '$HyperVHostVMName' (not on a workstation)."
+    $local = Test-LabMatchingLocalHost
+    if ($local) {
+        $localCommand = Get-Command $trafficPath -ErrorAction SilentlyContinue
+        $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $elevated -or -not (Test-Path -LiteralPath $trafficPath) -or
+            $null -eq $localCommand -or -not $localCommand.Parameters.ContainsKey('NonInteractive')) {
+            Write-Warning "Traffic NOT initiated by this offer. Use the refreshed traffic script on the host. $manual"
+            return
+        }
+        $password = $LabTrafficPassword
+        if (-not $password) { $password = Read-Host 'Lab deployment password (private)' -AsSecureString }
+        try {
+            $result = @(& $trafficPath -AdminPassword $password -ErrorAction Stop)
+            if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -eq 1) {
+                Write-Host 'Lab traffic fully started on the selected host; background sample order creation remains enabled until explicitly stopped or VMs are stopped/removed.' -ForegroundColor Green
+            } else {
+                Write-Warning "Full traffic startup was NOT confirmed; generators may be partially running. Inspect or stop them on the host. $manual"
+            }
+        } catch {
+            Write-Warning "Traffic launch failed or is partial; generators may already be running. Inspect or stop them on the host. $manual"
+        } finally { $password = $null; $result = $null }
+        return
+    }
+
+    foreach ($command in @('Set-AzVMRunCommand', 'Get-AzVMRunCommand', 'Remove-AzVMRunCommand')) {
+        if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+            Write-Warning "Traffic NOT initiated by this offer: managed Run Command is unavailable. $manual"
+            return
+        }
+    }
+    if (-not (Get-Command Set-AzVMRunCommand).Parameters.ContainsKey('ProtectedParameter')) {
+        Write-Warning "Traffic NOT initiated by this offer: Az.Compute needs managed Run Command ProtectedParameter support. $manual"
+        return
+    }
+    # Read-only remote capability checks happen before any credential is requested or generator changed.
+    $preflight = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+    $path = 'C:\AzMigrateLab\enable-lab-traffic.ps1'
+    if (-not (Test-Path -LiteralPath $path) -or -not (Get-Command $path).Parameters.ContainsKey('NonInteractive')) { throw 'Refresh the staged traffic script.' }
+    $settings = Get-Content 'C:\AzMigrateLab\lab-traffic.settings.json' -Raw | ConvertFrom-Json
+    if ($settings.LinuxUsername -notmatch '^[a-z][a-z0-9]{2,18}$') { throw 'Valid deployment settings are required.' }
+    if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) { throw 'SSH must already be installed.' }
+    $ErrorActionPreference = 'Continue'
+    $version = (& ssh.exe -V 2>&1 | Out-String)
+    $ErrorActionPreference = 'Stop'
+    if ($version -notmatch 'OpenSSH[_a-zA-Z]*(\d+)\.(\d+)' -or [int]$Matches[1] -lt 8 -or
+        ([int]$Matches[1] -eq 8 -and [int]$Matches[2] -lt 4)) { throw 'OpenSSH 8.4+ is required.' }
+    Write-Output 'LAB_TRAFFIC_REMOTE_CAPABLE'
+} catch { Write-Output 'LAB_TRAFFIC_REMOTE_UNSUPPORTED' }
+'@
+    try {
+        $probeResult = Invoke-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+            -CommandId RunPowerShellScript -ScriptString $preflight -ErrorAction Stop
+        $probeText = Get-LabRunCommandText -Result $probeResult
+        if (([regex]::Matches($probeText, '(?m)^LAB_TRAFFIC_REMOTE_CAPABLE\r?$')).Count -ne 1 -or
+            $probeText -match 'LAB_TRAFFIC_REMOTE_UNSUPPORTED') { throw 'Remote preflight failed.' }
+    } catch {
+        Write-Warning "Traffic NOT initiated by this offer: remote prerequisites were not verified (refreshed staged script/settings and OpenSSH 8.4+ required). $manual"
+        return
+    }
+
+    $payload = @'
+param([Parameter(Mandatory = $true)][string]$AdminPassword)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$secure = $null
+try {
+    $secure = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -ErrorAction Stop 6>$null)
+    if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -ne 1) { throw 'Full startup not confirmed.' }
+    Write-Output 'LAB_STEP1_TRAFFIC_FULLY_STARTED'
+} catch {
+    Write-Output 'LAB_STEP1_TRAFFIC_PARTIAL_OR_FAILED'
+    exit 1
+} finally { $AdminPassword = $null; $secure = $null; $result = $null }
+'@
+    if ($payload -match '[^\x00-\x7F]') { throw 'Traffic host payload must be ASCII.' }
+    $password = $LabTrafficPassword
+    if (-not $password) { $password = Read-Host 'Lab deployment password (private)' -AsSecureString }
+    $passwordPlain = $null
+    $passwordPointer = [IntPtr]::Zero
+    $protected = $null
+    $job = $null
+    $terminal = $false
+    $attempted = $false
+    $runName = 'lab-traffic-' + [guid]::NewGuid().ToString('N')
+    try {
+        $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
+        $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+        if ([string]::IsNullOrWhiteSpace($passwordPlain)) { Write-Warning 'Traffic NOT initiated: an empty password was supplied.'; return }
+        $protected = @(@{ Name = 'AdminPassword'; Value = $passwordPlain })
+        $attempted = $true
+        $job = Set-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+            -Location $sourceHost.Location -RunCommandName $runName -SourceScript $payload `
+            -ProtectedParameter $protected -TimeoutInSecond 900 -AsyncExecution -AsJob -ErrorAction Stop
+        $submitted = Wait-Job -Job $job -Timeout 300
+        if (-not $submitted -or $job.State -ne 'Completed') { throw 'Submission not confirmed.' }
+        $null = Receive-Job -Job $job -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds(960)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $run = Get-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName `
+                -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
+            if ($null -ne $run -and $null -ne $run.PSObject.Properties['InstanceView'] -and $null -ne $run.InstanceView) {
+                $view = $run.InstanceView
+                $state = [string](Get-LabField $view 'ExecutionState')
+                $outputText = [string](Get-LabField $view 'Output')
+                $errorText = [string](Get-LabField $view 'Error')
+                if ($state -in @('Succeeded', 'Failed', 'TimedOut', 'Canceled', 'Cancelled')) {
+                    $terminal = $true
+                    if ($state -eq 'Succeeded' -and $null -ne $view.PSObject.Properties['ExitCode'] -and
+                        $null -ne $view.ExitCode -and [int]$view.ExitCode -eq 0 -and
+                        [string]::IsNullOrWhiteSpace($errorText) -and
+                        ([regex]::Matches($outputText, '(?m)^LAB_STEP1_TRAFFIC_FULLY_STARTED\r?$')).Count -eq 1 -and
+                        $outputText -notmatch 'LAB_STEP1_TRAFFIC_PARTIAL_OR_FAILED') {
+                        Write-Host 'Lab traffic fully started on the selected host; background sample order creation remains enabled until explicitly stopped or VMs are stopped/removed.' -ForegroundColor Green
+                    } else {
+                        Write-Warning "Full traffic startup was NOT confirmed; generators may be partially running. Inspect/stop them ON '$HyperVHostVMName'. Do not retry blindly."
+                    }
+                    return
+                }
+            }
+            Start-Sleep -Seconds 10
+        }
+        throw 'Traffic execution observation timed out.'
+    } catch {
+        # Never print Azure/guest error records: they can contain protected parameter values.
+        if ($attempted) {
+            Write-Warning "Traffic outcome UNKNOWN; remote execution or partial generators may still be running. Inspect managed Run Command '$runName' and stop traffic ON '$HyperVHostVMName' before retrying."
+        } else { Write-Warning "Traffic NOT initiated by this offer. $manual" }
+    } finally {
+        if ($terminal) {
+            try { Remove-AzVMRunCommand -ResourceGroupName $SourceResourceGroup -VMName $HyperVHostVMName -RunCommandName $runName -ErrorAction Stop | Out-Null }
+            catch { Write-Warning "Terminal traffic Run Command '$runName' needs manual resource cleanup; this does not stop generators." }
+        }
+        if ($null -ne $job -and $job.State -in @('Completed', 'Failed', 'Stopped')) { Remove-Job -Job $job -ErrorAction SilentlyContinue }
+        if ($null -ne $protected) { foreach ($parameter in $protected) { $parameter.Value = $null } }
+        if ($passwordPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer) }
+        $passwordPlain = $null
+        $password = $null
+        $protected = $null
+    }
+}
+
+function Invoke-LabTrafficOffer {
+    Write-Host ''
+    Write-Host 'Optional lab traffic: low-rate requests create background sample orders in ContosoApp.' -ForegroundColor Yellow
+    Write-Host 'Generators persist after this script/consoles close and resume after reboot while enabled.' -ForegroundColor Yellow
+    Write-Host 'Keep them running through the lab only if wanted. There is NO automatic lab-completed detector or stop timer.' -ForegroundColor Yellow
+    Write-Host 'Completing the lab/script alone does not stop traffic; explicitly stop it, or stop/remove VMs as part of teardown.' -ForegroundColor Yellow
+    Write-Host "Stop ON '$HyperVHostVMName' in elevated PowerShell: C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable (prompts for the lab password)." -ForegroundColor White
+    if ($LabTraffic -eq 'Skip' -or ($LabTraffic -eq 'Prompt' -and -not $script:LabStep1Interactive -and
+        -not $script:LabTrafficExplicit)) {
+        Write-Host 'Traffic not initiated (Skip or supplied-input automation default). Existing generators, if any, are unchanged.' -ForegroundColor Gray
+        return
+    }
+    if ($LabTraffic -ne 'Start') {
+        $answer = Read-Host 'Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]'
+        if ($answer -notmatch '^(?i:y|yes)$') {
+            Write-Host 'Traffic not initiated by this offer; no generator changes were made. Existing generators, if any, are unchanged.' -ForegroundColor Gray
+            return
+        }
+    }
+    $null = Assert-LabWorkloadPower -Stage 'Before requested traffic startup'
+    Start-LabTrafficOnSelectedHost
+}
+
 # Target networking configuration
 # We use 10.1.0.0/16 to clearly differentiate from the source network
 # (10.0.0.0/16 for the Hyper-V host) and the guest VM subnet (192.168.0.0/24).
@@ -901,7 +1459,7 @@ Write-Section "Step 1: Setup Azure Migrate Project & Target Landing Zone"
 
 Write-Log "Source Resource Group : $SourceResourceGroup"
 Write-Log "Target Resource Group : $TargetResourceGroup"
-Write-Log "Location              : $Location"
+Write-Log "Migration target region: $Location"
 Write-Log "Migrate Project       : $MigrateProjectName"
 Write-Host ""
 
@@ -933,9 +1491,11 @@ $sourceRg = Get-AzResourceGroup -Name $SourceResourceGroup -ErrorAction Silently
 if (-not $sourceRg) {
     throw "Source resource group '$SourceResourceGroup' not found. Deploy the lab first using deploy-lab.ps1."
 }
-Write-Log "Source resource group found in '$($sourceRg.Location)'."
+Write-Log "Source RG metadata location: '$($sourceRg.Location)' (not the host or migration target region)."
 
-Read-Host "Pre-flight checks passed. Press Enter to continue..."
+$guestReadiness = Assert-LabWorkloadPower -Stage 'Step 1 pre-flight'
+
+if ($script:LabStep1Interactive) { $null = Read-Host "Pre-flight checks passed. Press Enter to continue..." }
 
 # ================================================================
 # STEP 1: Register Resource Providers
@@ -997,7 +1557,7 @@ foreach ($provider in $requiredProviders) {
 Write-Host ""
 Write-Log "Resource provider registration complete."
 
-Read-Host "Press Enter to continue to Step 2..."
+if ($script:LabStep1Interactive) { $null = Read-Host "Press Enter to continue to Step 2..." }
 
 # ================================================================
 # STEP 2: Create Target Resource Group (Landing Zone)
@@ -1030,7 +1590,7 @@ try {
     throw "Failed to create target resource group: $_"
 }
 
-Read-Host "Press Enter to continue to Step 3..."
+if ($script:LabStep1Interactive) { $null = Read-Host "Press Enter to continue to Step 3..." }
 
 # ================================================================
 # STEP 3: Create Target Virtual Network and Subnet
@@ -1054,6 +1614,7 @@ Write-StepHeader -Step 3 -Title "Create Target VNet and Subnet"
 try {
     $existingVnet = Get-AzVirtualNetwork -Name $targetVNetName -ResourceGroupName $TargetResourceGroup -ErrorAction SilentlyContinue
     if ($existingVnet) {
+        if ((ConvertTo-LabRegionKey $existingVnet.Location) -ne (ConvertTo-LabRegionKey $Location)) { throw "Existing target VNet region conflicts with migration target $Location." }
         Write-Log "VNet '$targetVNetName' already exists."
         $targetVNet = $existingVnet
     } else {
@@ -1081,7 +1642,7 @@ try {
     throw "Failed to create VNet: $_"
 }
 
-Read-Host "Press Enter to continue to Step 4..."
+if ($script:LabStep1Interactive) { $null = Read-Host "Press Enter to continue to Step 4..." }
 
 # ================================================================
 # STEP 4: Create Network Security Group (NSG)
@@ -1095,7 +1656,7 @@ Read-Host "Press Enter to continue to Step 4..."
 # - Allow SSH (22) inbound:     For connecting to migrated Linux VMs
 # - Allow HTTP (80) inbound:    For testing web workloads after migration
 # - Allow HTTPS (443) inbound:  For secure web traffic
-# - Allow Node.js (3000) inbound: For the Node.js app server
+# - Allow Tomcat (3000) inbound: For the Tomcat application server
 #
 # IMPORTANT: In production, you would NOT allow RDP/SSH from the internet.
 # You would use Azure Bastion, Just-In-Time VM Access, or a VPN gateway.
@@ -1106,6 +1667,7 @@ Write-StepHeader -Step 4 -Title "Create Network Security Group (NSG)"
 try {
     $existingNsg = Get-AzNetworkSecurityGroup -Name $targetNsgName -ResourceGroupName $TargetResourceGroup -ErrorAction SilentlyContinue
     if ($existingNsg) {
+        if ((ConvertTo-LabRegionKey $existingNsg.Location) -ne (ConvertTo-LabRegionKey $Location)) { throw "Existing target NSG region conflicts with migration target $Location." }
         Write-Log "NSG '$targetNsgName' already exists."
         $targetNsg = $existingNsg
     } else {
@@ -1172,10 +1734,10 @@ try {
             -DestinationPortRange "443" `
             -ErrorAction Stop
 
-        # Rule: Allow Node.js port -- OnPrem-Linux-App runs on port 3000
+        # Rule: Allow Tomcat port -- OnPrem-Linux-App runs on port 3000
         $rules += New-AzNetworkSecurityRuleConfig `
-            -Name "Allow-NodeJS" `
-            -Description "Allow port 3000 for Node.js app server" `
+            -Name "Allow-Tomcat" `
+            -Description "Allow port 3000 for Tomcat application server" `
             -Access Allow `
             -Protocol Tcp `
             -Direction Inbound `
@@ -1203,7 +1765,7 @@ try {
         Write-Host "  110       Allow-SSH      22     Linux VM management" -ForegroundColor Gray
         Write-Host "  120       Allow-HTTP     80     Web workload testing" -ForegroundColor Gray
         Write-Host "  130       Allow-HTTPS    443    Secure web traffic" -ForegroundColor Gray
-        Write-Host "  140       Allow-NodeJS   3000   Node.js app server" -ForegroundColor Gray
+        Write-Host "  140       Allow-Tomcat   3000   Tomcat application server" -ForegroundColor Gray
     }
 
     # Associate NSG with the target subnet
@@ -1230,7 +1792,7 @@ try {
     throw "Failed to create or configure NSG: $_"
 }
 
-Read-Host "Press Enter to continue to Step 5..."
+if ($script:LabStep1Interactive) { $null = Read-Host "Press Enter to continue to Step 5..." }
 
 # ================================================================
 # STEP 5: Create Azure Migrate Project
@@ -1253,45 +1815,32 @@ Read-Host "Press Enter to continue to Step 5..."
 
 Write-StepHeader -Step 5 -Title "Create Azure Migrate Project"
 
+# Fail closed: only a successful lookup of the requested project permits Step 2 guidance.
+$migrateProject = $null
+$projectLookupSucceeded = $false
+$rerunStep1Command = ".\migrate-step1-setup-project.ps1 -SourceResourceGroup '$SourceResourceGroup' -TargetResourceGroup '$TargetResourceGroup' -Location '$Location' -MigrateProjectName '$MigrateProjectName' -HyperVHostVMName '$HyperVHostVMName'"
+$projectCreationInstructions = @(
+    "1. Azure portal > search for 'Azure Migrate' > Create project."
+    "2. Subscription: the one you are signed in to here."
+    "3. Resource group: $SourceResourceGroup"
+    "4. Project name: $MigrateProjectName"
+    "5. Geography: choose the permitted PROJECT DATA geography independently; target VM region is $Location."
+    "6. Create, and wait for the deployment to finish."
+    "Creating it this way registers the discovery, assessment and migration tools."
+    "7. Return to this PowerShell window and rerun Step 1 with the same settings:"
+    "   $rerunStep1Command"
+    "Do not run Step 2 until Step 1 successfully verifies the project."
+)
+
 try {
-    # Check if the Az.Migrate module is available
-    $migrateModule = Get-Module -ListAvailable -Name Az.Migrate
-    if (-not $migrateModule) {
-        Write-Log "Az.Migrate module not found. Installing..."
-        Install-Module -Name Az.Migrate -Force -AllowClobber -Scope CurrentUser
-        Import-Module Az.Migrate
-        Write-Log "Az.Migrate module installed and imported."
-    } else {
-        Import-Module Az.Migrate -ErrorAction SilentlyContinue
-        Write-Log "Az.Migrate module is available `(version: $($migrateModule.Version)`)."
-    }
-
-    # Create the Azure Migrate project
-    # We place it in the SOURCE resource group because it's a management tool
-    # that needs to observe and interact with the source environment.
-    # Azure Migrate projects must be in specific regions -- map common regions
-    # to supported Migrate project locations. See error message for full list.
-    $migrateLocationMap = @{
-        "eastus" = "centralus"; "eastus2" = "centralus"; "westus" = "westus2";
-        "westus3" = "westus2"; "centralus" = "centralus"; "northcentralus" = "centralus";
-        "southcentralus" = "centralus"; "westcentralus" = "centralus";
-        "northeurope" = "northeurope"; "westeurope" = "westeurope";
-        "uksouth" = "uksouth"; "ukwest" = "ukwest";
-        "australiaeast" = "australiaeast"; "australiasoutheast" = "australiasoutheast";
-        "southeastasia" = "southeastasia"; "eastasia" = "eastasia";
-        "japaneast" = "japaneast"; "japanwest" = "japanwest";
-        "canadacentral" = "canadacentral"; "centralindia" = "centralindia";
-        "koreacentral" = "koreacentral"; "brazilsouth" = "brazilsouth";
-        "francecentral" = "francecentral"; "germanywestcentral" = "germanywestcentral";
-        "norwayeast" = "norwayeast"; "swedencentral" = "swedencentral";
-        "switzerlandnorth" = "switzerlandnorth"; "uaenorth" = "uaenorth"
-    }
-    $migrateLocation = if ($migrateLocationMap.ContainsKey($Location)) { $migrateLocationMap[$Location] } else { "centralus" }
-    Write-Log "Creating Azure Migrate project '$MigrateProjectName'..."
-    Write-Log "  Resource Group: $SourceResourceGroup"
-    Write-Log "  Migrate Location: $migrateLocation (mapped from deployment region '$Location')"
-
-    $existingProject = Get-AzMigrateProject -Name $MigrateProjectName -ResourceGroupName $SourceResourceGroup -ErrorAction SilentlyContinue
+    # Project geography is a separate portal decision, never inferred from target VM region.
+    Write-Log "Checking Azure Migrate project '$MigrateProjectName' (existing project unchanged)."
+    $existingProject = @(Get-AzResource -ResourceGroupName $SourceResourceGroup -ErrorAction Stop | Where-Object {
+        $_.Name -eq $MigrateProjectName -and $_.ResourceType -eq 'Microsoft.Migrate/migrateProjects'
+    })
+    if ($existingProject.Count -gt 1) { throw 'Ambiguous project resource lookup.' }
+    $existingProject = if ($existingProject.Count -eq 1) { $existingProject[0] } else { $null }
+    $projectLookupSucceeded = $true
     if ($existingProject) {
         Write-Log "Azure Migrate project '$MigrateProjectName' already exists."
         $migrateProject = $existingProject
@@ -1322,18 +1871,7 @@ try {
         $migrateProject = $null
         Write-Host ""
         Write-Warning "Azure Migrate project '$MigrateProjectName' does not exist, and this script will not create it."
-        Write-ManualAction -Title "Create the Azure Migrate project in the portal (Module 1, section 1)" -Instructions @(
-            "1. Azure portal > search for 'Azure Migrate' > Create project."
-            "2. Subscription: the one you are signed in to here."
-            "3. Resource group: $SourceResourceGroup"
-            "4. Project name: $MigrateProjectName"
-            "5. Geography: a permitted project geography for your region ('$migrateLocation' matches this deployment)."
-            "6. Create, and wait for the deployment to finish."
-            "Creating it this way registers the discovery, assessment and migration tools. A project"
-            "created with New-AzMigrateProject has none of them, and the portal's Generate key step"
-            "then fails in the browser with a 'Cannot read properties of undefined' error."
-        )
-        Write-Host "  Rerun this script afterwards, or continue to Module 1 by hand." -ForegroundColor White
+        Write-Host "  Project creation instructions are shown below the landing-zone summary." -ForegroundColor White
     }
 
     # Display project details
@@ -1346,18 +1884,11 @@ try {
     }
 
 } catch {
-    Write-Host ""
-    Write-Host "WARNING: Could not create Azure Migrate project via PowerShell." -ForegroundColor Yellow
-    Write-Host "This can happen if the Az.Migrate module version doesn't support New-AzMigrateProject." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "MANUAL ALTERNATIVE:" -ForegroundColor Yellow
-    Write-Host "  1. Go to https://portal.azure.com" -ForegroundColor White
-    Write-Host "  2. Search for 'Azure Migrate'" -ForegroundColor White
-    Write-Host "  3. Click 'Create project'" -ForegroundColor White
-    Write-Host "  4. Resource group: $SourceResourceGroup" -ForegroundColor White
-    Write-Host "  5. Project name: $MigrateProjectName" -ForegroundColor White
-    Write-Host "  6. Geography: United States (or matching your region)" -ForegroundColor White
-    Write-Host ""
+    $migrateProject = $null
+    $projectLookupSucceeded = $false
+    Write-Host "" 
+    Write-Warning "Could not verify the Azure Migrate project. This does not mean the project is absent."
+    Write-Host "No project was created or remapped here. Verify the project and access in the portal, then rerun Step 1." -ForegroundColor Yellow
     Write-Warning "Error details: $_"
 }
 
@@ -1365,25 +1896,56 @@ try {
 # SUMMARY & NEXT STEPS
 # ================================================================
 
-Write-Section "STEP 1 COMPLETE -- Summary"
+# A guest may have been stopped during the landing-zone/project work.
+if ($migrateProject) { $guestReadiness = Assert-LabWorkloadPower -Stage 'Step 1 final readiness' }
+
+if ($migrateProject) {
+    Write-Section "STEP 1 COMPLETE -- Summary"
+} else {
+    Write-Section "LANDING ZONE READY -- Step 1 requires project verification"
+}
 
 Write-Host "  Resources Created:" -ForegroundColor White
-Write-Host "  [+] Resource Group    : $TargetResourceGroup `($Location`)" -ForegroundColor Green
+Write-Host "  [+] Resource Group    : $TargetResourceGroup `(metadata location may differ`)" -ForegroundColor Green
 Write-Host "  [+] Virtual Network   : $targetVNetName `($targetAddressPrefix`)" -ForegroundColor Green
 Write-Host "  [+] Subnet            : $targetSubnetName `($targetSubnetPrefix`)" -ForegroundColor Green
 Write-Host "  [+] NSG               : $targetNsgName `(5 inbound rules`)" -ForegroundColor Green
-Write-Host "  [+] Migrate Project   : $MigrateProjectName `(in $SourceResourceGroup`)" -ForegroundColor Green
+if ($migrateProject) {
+    Write-Host "  [+] Migrate Project   : $MigrateProjectName `(existing project verified`)" -ForegroundColor Green
+} elseif ($projectLookupSucceeded) {
+    Write-Host "  [!] Migrate Project   : $MigrateProjectName `(not found; portal creation required`)" -ForegroundColor Yellow
+} else {
+    Write-Host "  [!] Migrate Project   : $MigrateProjectName `(could not verify; retry required`)" -ForegroundColor Yellow
+}
+Write-Host "  [i] Migration target  : $Location" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Source Environment (already deployed):" -ForegroundColor White
 Write-Host "  [i] Resource Group    : $SourceResourceGroup" -ForegroundColor Cyan
-Write-Host "  [i] Hyper-V Host      : HyperVHost" -ForegroundColor Cyan
-Write-Host "  [i] Guest VMs         : OnPrem-Web, OnPrem-SQL, OnPrem-Linux-Web, OnPrem-Linux-App" -ForegroundColor Cyan
-
-Write-NextSteps @(
-    "Run Step 2: .\migrate-step2-discover-assess.ps1"
-    "Step 2 will deploy the Azure Migrate appliance on the Hyper-V host"
-    "The appliance will discover all 4 on-premises VMs"
-    "You will then create an assessment to evaluate migration readiness"
-)
+Write-Host "  [i] Hyper-V Host      : $HyperVHostVMName `($($sourceHost.Location)`)" -ForegroundColor Cyan
+Write-Host "  [i] Workload power verified UTC: $($guestReadiness.CheckedUtc)" -ForegroundColor Cyan
+foreach ($row in $guestReadiness.Rows) { Write-Host "  [i] $($row.Name): $($row.State) (power state only)" -ForegroundColor Cyan }
 
 Write-Log "Step 1 finished at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')."
+
+if ($migrateProject) {
+    Write-NextSteps @(
+        "Run Step 2: .\migrate-step2-discover-assess.ps1 -SourceResourceGroup '$SourceResourceGroup' -HyperVHostVMName '$HyperVHostVMName' -MigrateProjectName '$MigrateProjectName' -Location '$Location' -TargetResourceGroup '$TargetResourceGroup'"
+        "Step 2 will deploy the Azure Migrate appliance on the Hyper-V host"
+        "The appliance will discover all 4 on-premises VMs"
+        "You will then create an assessment to evaluate migration readiness"
+    )
+    Invoke-LabTrafficOffer
+} elseif ($projectLookupSucceeded) {
+    # End on the unresolved prerequisite, not on instructions to start discovery.
+    Write-ManualAction -Title "Create the Azure Migrate project in the portal (Module 1, section 1)" -Instructions $projectCreationInstructions
+} else {
+    Write-ManualAction -Title "Verify the Azure Migrate project, then rerun Step 1" -Instructions @(
+        "1. Open Azure Migrate in the Azure portal using the subscription signed in here."
+        "2. Check for project '$MigrateProjectName' in resource group '$SourceResourceGroup'."
+        "3. If it exists, confirm this account can read it; do not create a duplicate."
+        "4. If it is absent, create it using Module 1, section 1 and wait for deployment to finish."
+        "5. Return to this PowerShell window and rerun Step 1 with the same settings:"
+        "   $rerunStep1Command"
+        "Do not run Step 2 until Step 1 successfully verifies the project."
+    )
+}

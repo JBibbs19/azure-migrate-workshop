@@ -2,7 +2,7 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-Initial deployment already provisions Contoso Order Desk on Tomcat 9/OpenJDK 17, its shared
+Initial deployment already provisions Contoso Order Desk on Tomcat 10.1/OpenJDK 17, its shared
 SQL login, lab aliases and Nginx 8080 desk/API proxy. Port-80 IIS/Nginx sites remain unchanged.
 The optional instructor generators add low-rate requests; they are not app prerequisites.
 
@@ -19,6 +19,59 @@ orders read and at most one sample order insert per cycle through Nginx. Default
 30 seconds; allowed range 20–600 seconds. This is not a production load/sizing benchmark.
 The real JVM keeps initial/min idle 1 and maxActive 4 JDBC connections after readiness;
 no arbitrary sockets are opened merely to affect dependency polling.
+
+## Final Step 1 offer (instructor opt-in)
+
+Only after Step 1 verifies the project and freshly confirms all four workload VMs are
+Running does it print WHAT TO DO NEXT, then ask:
+
+> Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]
+
+**No/Enter or an unrecognized answer makes no generator changes**, including no attempt to
+stop any already-running generators. Yes privately prompts for the deployment password and
+launches the staged traffic script on the **selected** host, not on an arbitrary local
+Hyper-V installation. Step 2 independently verifies workload power before appliance work.
+
+The offer warns that enabling traffic causes ongoing **background sample order creation**.
+Generators survive console closure and resume after reboot while enabled. Keep them running
+through the lab only if wanted; there is **no automatic lab-completed detector or stop timer**.
+Completing a script or the lab alone does not stop them. Explicitly run the stop command on
+the host, or stop/remove VMs as part of teardown; enabled tasks resume if VMs are restarted.
+
+Step 1 controls:
+
+- `-LabTraffic Skip`: never prompt/start; existing generators remain unchanged.
+- `-LabTraffic Prompt`: explicitly request the `[y/N]` prompt even with supplied environment inputs.
+- `-LabTraffic Start`: explicit opt-in without the Yes/No question; still requires all prerequisites.
+- `-LabTrafficPassword`: optional SecureString, otherwise privately prompted after opt-in.
+  Never supply a plaintext password in command-line arguments.
+
+With all source/target/project/location inputs supplied, the default is **no traffic prompt**;
+this preserves automation usability. No traffic option bypasses project or guest readiness.
+
+From a workstation, Step 1 requires managed Run Command `ProtectedParameter` support in
+Az.Compute, a refreshed staged script/settings, and already-installed OpenSSH **8.4+** on
+the host. The password travels only as a protected parameter, never in the source script or
+ordinary parameters. The host script's `-NonInteractive` mode forbids missing-credential/user
+prompts, capability installation and Windows-only `SkipLinux` success; it preflights Linux
+password/sudo access on both Linux guests before changing generators. Unsupported preflight
+means this offer has **not initiated** traffic; use the elevated host-interactive command below.
+An elevated local launch is used only after Azure instance metadata matches the selected
+subscription, resource group, VM name and VM ID. Otherwise Step 1 takes the remote path.
+
+New deployments stage this refreshed script automatically. For an existing host, copy the
+refreshed `scripts/enable-lab-traffic.ps1` from this package to
+`C:\AzMigrateLab\enable-lab-traffic.ps1` **on that host**, retaining the deployment's existing
+`lab-traffic.settings.json`. An older staged script is not silently used for remote execution.
+
+Full startup requires the Windows task Running, Linux generator active and proxy readiness
+markers. Partial/failed startup can leave generators running: inspect or explicitly stop
+them before retrying. Step 1 checks managed execution state, exit code and exact full-start
+marker, not just Azure provisioning success. Timeout/read/submission uncertainty is reported
+as **UNKNOWN**, never as proof of no traffic; inspect the named managed Run Command and host.
+Only a terminal managed command resource is cleaned up, and that cleanup does not stop traffic.
+These results describe generator startup, not sustained app health or guaranteed appliance
+collection. Readiness and order counts still need live verification below.
 
 ## Run on HyperVHost (instructor opt-in)
 
