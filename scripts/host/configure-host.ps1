@@ -290,7 +290,7 @@ Write-Log "PHASE 2: Downloading OS images..."
 # the SHA256 it is checked against - so the link and its expected hash are maintained together.
 # The previous source, aka.ms/migrate/appliance/hyperv, came from the lab this was forked from,
 # appears in no Microsoft documentation, and was observed serving a years-old Windows Server 2016
-# build. See CHANGES.md section 41.
+# build. See VersionNotes.md section 41.
 $applianceUrl = 'https://go.microsoft.com/fwlink/?linkid=2191848'
 $applianceJob = $null
 $applianceRoot = $null

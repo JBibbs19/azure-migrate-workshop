@@ -443,7 +443,7 @@ function Invoke-LabOfflineRegression {
             Assert-Absent $step1 @('$migrateLocationMap'); Assert-Check ($step1 -notmatch '(?m)^\s*New-AzMigrateProject\b'); Assert-Absent $project @('Install-Module')
         }
         $checks['regional/reusable_docs_explain_forecast_unknown_and_locked_region [contract]'] = {
-            Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'README.md'))) @('-Location $migrationTargetRegion', '-AllowQuotaWarning', '6 vCPUs', '12 vCPUs', 'Unknown')
+            Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'VersionNotes.md'))) @('-Location $migrationTargetRegion', '-AllowQuotaWarning', '6 vCPUs', '12 vCPUs', 'Unknown')
             Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'docs/Module-1-Discovery.md'))) @('migration target region')
             Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'docs/Module-2-Agentless-Migration.md'))) @('Create resources', 'different from the actual source Hyper-V host')
             foreach ($file in Get-ChildItem $Root -Filter '*.md' -File -Recurse) { Assert-Check ([IO.File]::ReadAllText($file.FullName) -notmatch '(?i)\b(?:Joseph|azmig1)\b') }

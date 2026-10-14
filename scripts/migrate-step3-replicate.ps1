@@ -62,7 +62,7 @@ MODULE COVERAGE
 
     IMPORTANT: replication here is always AGENTLESS. Module 3 sections 5 to 7 - deploy the
     replication appliance, install Mobility Service on each guest - are NOT performed. The end
-    state matches; the method does not. See CHANGES.md section 11.
+    state matches; the method does not. See VersionNotes.md section 11.
 #>
 
 [CmdletBinding()]

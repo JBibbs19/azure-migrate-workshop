@@ -1,3 +1,63 @@
+# Documentation release validation — 2026-10-14
+
+## Current: student introduction and root Version Notes integration
+
+**Scope:** 62 files; one root `CHANGES.md` → `VersionNotes.md` rename with edited
+content and 10 same-path edits, **0 genuinely added / 0 genuinely deleted**.
+The other **51 files are byte-identical** to the private 62-file prechange archive.
+Same-path edits are README, four script comment/help references (deploy, Step 1,
+Step 3 and host), the existing checker's moved-document source contract, the existing
+Python manifest test, this report, baseline manifest and root SHA256SUMS.
+Exact inverse replacement restores all four scripts and the checker to their original
+bytes. No deployment/migration assessment behavior, SQL, application, WAR/runtime,
+workload configuration or traffic-controller behavior changes. The nested application
+`CHANGES.md` retains its original filename and bytes. No organizational cleanup.
+
+**Documentation preservation:** the reviewed README is byte-frozen, with its exact
+student title/subtitle. Only the new 2026-10-13 documentation log entry is amended for
+integration accuracy. All 72 historical sections and 18 dated entries retain
+their bodies/dates, with heading depth adjusted as reviewed; all 50 numbered sections
+(1–41 plus 3a–3c and 4a–4f) remain in order. All 8 transferred README sections
+retain their bodies. Exact three top-level Version Notes headings, the bold red
+non-distribution warning, local targets/anchors and balanced fences are verified.
+
+**Actually executed:** normal retained Python suites, bytecode disabled, with ordinary
+fixture writes and subprocess stdin pipes: **14 application + 16 integration = 30 passed**
+on this branch; **60 distinct retained tests across both branches**, zero skips,
+errors or failures. No readonly monkeypatch, test disabling or dependency installation.
+Additional private source/document checks: **262 on this branch**. Those are literal,
+byte-preservation and source-contract checks, not native/runtime fixture execution.
+The initial normal Ubuntu integration run exposed its historical ledger's literal
+old-name path/inventory check. Only that same manifest test was made rename-aware;
+all prior hashes and test registrations were retained. The final complete normal
+suite results above supersede that initial single failure.
+
+**Native limits:** **169 PowerShell groups DEFINED, SOURCE-INSPECTED, NOT EXECUTED**;
+no group was added or removed. Only the existing regional documentation contract now
+reads VersionNotes instead of the moved README section. PowerShell is unavailable;
+no native parser, AST fixture, native helper/mock or checker execution is claimed.
+No Java/JSP compilation, guest/Tomcat/SQL/systemd, Azure/Az, Hyper-V/appliance or live
+migration validation was performed. Native and authorized end-to-end lab acceptance
+remain required before partner delivery.
+
+**Integrity/provenance:** all 24 original baseline entries and hashes, SQL-seed hash,
+original added inventory of 39 and historical previous/archive hashes are preserved.
+Root CHANGES is explicitly `status: renamed`, `current_path: VersionNotes.md` with
+the actual current hash, never a deletion or a fresh baseline. Historical file maps
+retain original path keys with the same explicit current-path mapping. Other baseline
+statuses remain unchanged; non-self-referential current hashes are refreshed.
+Root checksums cover all 61 other files; unchanged app checksums cover 32 files.
+Two independently built sorted fixed-1980 ZIPs match byte-for-byte; CRC, every entry
+SHA256/source parity, exact 62-file inventory, checksum coverage and final readback pass.
+No fixture/cache/private helper is packaged. Final archive digests are stored outside
+this report to avoid self-reference. Staged working ZIPs only; no output write,
+publication, upload, send, Git operation or cloud action.
+
+Earlier report text below is preserved verbatim as historical evidence; its release
+counts, filenames and reviewed hashes describe those earlier releases.
+
+---
+
 # Branch-ready static validation — 2026-10-13
 
 ## Current: Classic Completed assessment optional provisioning metadata (2026-10-13)

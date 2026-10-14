@@ -826,7 +826,7 @@ Write-Output ('APPLIANCE_ARCHIVE_JSON|' + ($result | ConvertTo-Json -Compress))
             # on 2026-09-27, in the same row as the download link the host used. It is ADVISORY,
             # not authoritative: Microsoft republishes the appliance periodically, and when they
             # do this value goes stale while the download stays correct. So a mismatch is
-            # reported as ambiguous rather than as a failure - see CHANGES.md section 41.
+            # reported as ambiguous rather than as a failure - see VersionNotes.md section 41.
             $referenceHash = 'AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24'
             $referenceDate = '2026-09-27'
 

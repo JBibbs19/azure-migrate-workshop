@@ -1,4 +1,393 @@
-# Changes from the supplied workshop
+# Version Notes
+
+**TD SYNNEX | Cloud Enablement Services**
+
+### Release status
+
+**Release status:** rebuilt and statically verified; awaiting a Windows PowerShell 5.1 parser/regression run and full live Azure/Hyper-V/appliance acceptance. Validate the scripts end to end in a training subscription before partner delivery, and record the revision you used.
+
+### Ubuntu 24.04 rebuild — fresh separate lab only
+
+This full 62-file revision is staged as **azure-migrate-workshop-ubuntu2404.zip**,
+separate from the earlier Tomcat update. Both Linux guests are Ubuntu **24.04 LTS (Noble)**;
+Linux-App uses the Ubuntu **tomcat10** packages (Tomcat **10.1.x**), explicit **OpenJDK 17**,
+and Jakarta Servlet **6.0** / Pages **3.1** JSP source. Java SE `javax.sql`/`javax.naming`
+and the original database, HTTP routes and resource bounds are retained.
+
+Extract the full archive into a new checkout and deploy a **new dedicated source resource
+group/Hyper-V host**, then a reviewed separate target landing zone. Do not run it against
+an existing 22.04 lab, upgrade a guest in place, or try to coexist with the same nested VM
+names on one host. Provisioning rejects old/unmarked lab state; only an incomplete build
+bearing this revision's marker can resume. No live host or old package is changed by delivery.
+
+The source is Canonical's [Noble current QCOW2 image](https://cloud-images.ubuntu.com/noble/current/)
+and exact-filename SHA256SUMS, checked even for cached QCOW2 before conversion. `current`
+is moving, not a pinned image digest; a publication race requires a matching retry, not a
+checksum bypass. Distinct Ubuntu2404 cache filenames prevent reusing the 22.04 base.
+The installed running kernel/flavour is resolved with `uname -r`, never a hard-coded 5.15
+or 6.8 patch; packages/tools must match before and after any later reviewed kernel update.
+This build does not request an unattended distribution/kernel upgrade or use an Azure
+kernel VHD as a substitute for the nested generic/virtual cloud image.
+
+Ubuntu 24.04 standard maintenance extends to May 2029 for applicable Main packages;
+Tomcat is in Universe, whose security coverage must be reviewed separately (including
+Ubuntu Pro/ESM where applicable). Install current approved Noble repository updates and
+record actual versions; do not freeze an old base Tomcat patch or assume all packages
+share Main's coverage. See [Ubuntu lifecycle](https://ubuntu.com/about/release-cycle) and
+[Tomcat 10.1 migration](https://tomcat.apache.org/migration-10.1.html).
+
+### Classic Azure VM assessment — required four-server workshop path
+
+Step 2 defaults to **`-AssessmentMode Classic`** on both maintained branches. The required
+module remains discovery, an **Azure VM assessment of exactly four servers**, Hyper-V
+replication, test migration and cutover. Classic here means the grouped
+`MachineAssessment` assessment API, **not a retired first-generation Azure Migrate project**.
+It does not turn the workshop into a PaaS/application-modernization project.
+
+The isolated live Classic test produced an export with **four assessed servers and four
+Ready results**. That proves creation/results for that test, not execution of this merged
+full script. The restored workflow also incorporates the observed group behavior; merely
+changing the default would have left the missing-provisioning/capability failure in place.
+A full native checker and end-to-end lab run are still required before partner delivery.
+
+#### Working group preparation and assessment safeguards
+
+- Resolve the existing assessment backend from the selected Migrate project's solution
+  reference; verify its actual ARM identity/type and Active/Succeeded state. Do not infer
+  its name from the Migrate project name. If no verifiable link exists, list all same-scope
+  backends read-only and stop for explicit `-AssessmentProjectName`; never silently select
+  one or create a replacement project.
+- Retain normalized relevant provider metadata and the endpoint-specific plan: parent
+  assessmentProjects LIST/GET **2023-03-15**; machines, groups, grouped Classic assessment
+  and results **2024-01-15**; solution GET 2018-09-01-preview; provider GET 2021-04-01.
+  Registered namespace and implemented parent version are required. Sparse optional child
+  catalog rows warn and still require fixed read-only checks; they are not an alias for a
+  different assessment route. No latest-preview guessing or provider/feature registration.
+- Map each of the four distinct OffAzure Hyper-V source IDs through inventory
+  `discoveryMachineArmId` to the real assessment-namespace machine ID, across every page.
+  Do not match by names alone or include the appliance as a fifth workload.
+- Create a new group with **only `properties.groupType=Default`**. Capability metadata is
+  service-populated, not forced in PUT. A fresh empty Default group can legitimately return
+  `supportedAssessmentTypes=[Unknown]`, count zero and no `provisioningState`.
+- Shared group readiness accepts missing/null provisioning **only with `groupStatus=Completed`**.
+  Created/Updated require explicit Succeeded provisioning; Running/Accepted/HTTP 202 stay
+  pending. Returned failed/canceled/deleting, malformed or unknown states are never overridden
+  by Completed. Logs show actual status, provisioning presence, capability labels and count.
+- Only a fresh, empty, idle group owned by this run receives one `updateMachines` POST
+  (`operationType=Add`) containing exactly four validated assessment IDs. After Add, bounded
+  reads require exact inventory membership, count four, a ready group and idle state. Unknown
+  or explicitly nonmatching capability metadata remains pending after membership; it cannot
+  cause premature rejection of an empty group or authorize an assessment. An absent optional
+  capability field is reported, not invented; the assessment service response must establish
+  the requested contract. Both completion modes use the same group-state helper.
+- `GroupNotFound` is expected absence only for HTTP 404 on the actual group GET;
+  `AssessmentNotFound` only for HTTP 404 on the matching Classic/Modern assessment GET.
+  These codes on a parent, list, wrong resource, write or another HTTP status cannot authorize
+  creation. Parent/scope errors, schema failures and RBAC failures stop at their actual stage.
+- Existing exact-four groups and matching assessments are reused without membership writes,
+  PUT overwrite or recomputation. Existing empty/partial/extra-member groups remain preserved,
+  even if an earlier failed attempt created them. This run does not assume prior ownership.
+  No DELETE, membership removal, wildcard eTag or atomic-concurrency claim is introduced.
+
+Classic PUT/GET stays under `/assessmentProjects/<backend>/groups/<group>/assessments/<name>`.
+Start with **AsOnPremises**, the actual migration target region, applicable offer/currency,
+no reserved commitment and no Windows/Linux benefit without confirmed entitlement. The
+friendly offer `MS-AZR-0003P` is sent as `MSAZR0003P`. No security/billing/PaaS resources are
+created. For the student comparison, use a separate performance-based portal assessment
+only after sufficient data collection; idle-lab NoData/confidence gaps are not installer failures.
+
+Acceptance or a successful creation PUT is not completed computation. Classic handoff
+requires **`status=Completed` on nonpending assessment GETs**. The assessment's optional
+`provisioningState` may be absent, null or blank; when populated it must be Succeeded.
+Provisioning/Updating/Accepted remain pending; failed, canceled, deleting, unknown and
+nonstring metadata block handoff. The same helper checks initial and final GETs. Exactly
+four fully paginated unique source-linked results, verified identity/settings, an idle
+group, exact membership, stable source mappings and an unchanged update timestamp remain
+mandatory. This corrects the earlier mandatory-Succeeded assessment-field assumption.
+Step 6 reports failures immediately; Step 7 polls automatically only after accepted/matching
+work. Only transient GETs receive a bounded retry, never writes; pagination stays pinned to
+cloud/subscription/resource group/collection/API. Az owns tokens through pinned-context
+`Invoke-AzRestMethod -DefaultProfile`; no token unwrapping or credential/header dump.
+
+#### Continue a running lab without redeploying it
+
+Refresh the complete checkout **of the same OS/Tomcat branch**, keep the host, four guests,
+appliance and discovery, and rerun Step 2 with the **existing exact-four group and matching
+Classic assessment names and settings**. This completion-field correction needs neither a
+new assessment nor redeployment. Do not rerun deployment or upgrade the running guests.
+Set the variables below to the existing verified resource names:
+
+```powershell
+.\scripts\migrate-step2-discover-assess.ps1 -SourceResourceGroup $sourceRg `
+    -MigrateProjectName $projectName -Location $migrationTargetRegion `
+    -AssessmentMode Classic -AssessmentGroupName $existingGroupName `
+    -AssessmentName $existingAssessmentName
+```
+
+Reuse remains read-only for matching groups/assessments; identity, settings, membership and
+result checks still apply. Only a separately inspected empty/conflicting group requires
+explicit conflict resolution and deliberately chosen unused names. Reconnect only for an authentication rejection,
+not to repair missing resources, RBAC or schema errors. See
+[Module 1 recovery](docs/Module-1-Discovery.md#51--instructor-step-2-api-errors-and-recovery).
+
+#### Modern API and advanced architecture exploration are deferred
+
+`-AssessmentMode Modern` remains **explicit experimental opt-in**, not the core module or
+a successful live integration claim. Its retained 2024-03-03-preview top-level profile still
+requires its own provider advertisement, does not select an unimplemented 2025 version,
+and retains source-linked result checks and ManualReview instead of automatic replication.
+The isolated Modern request was rejected with HTTP 400 `MalformedRequestBody`; no Modern
+assessment was created by that test. More API information is needed before curriculum use.
+**Neither mode silently falls back to the other.** Optional portal application/PaaS comparisons
+and a student's advanced architecture inquiry do not trigger app/SQL/container/PaaS code
+changes, new assessment automation or changes to Steps 3–6.
+
+### Current runtime and complete checkout
+
+Initial deployment includes Tomcat 10.1/OpenJDK 17, the original named WAR, protected JNDI
+credentials, SQL mixed mode/shared restricted login, lab aliases and Nginx desk/API proxy.
+No manual app install, extra password prompt or traffic command is needed by students.
+SQL-independent health precedes SQL setup; final success requires actual SQL readiness/data,
+named UI and proxy readiness. Discovery credentials still need appliance-side validation.
+The `AgentBased` wrapper/filter remains a Module 3 grouping/instructor agentless shortcut,
+not proof of a Mobility Service migration path or a waiver of guest discovery permissions.
+
+The checkout contains all app source, WAR/runtime binary assets and rebuild/tests under
+[apps/contoso-orderdesk](apps/contoso-orderdesk/README.md). A new checkout has no workspace
+or output-folder dependency. Read the pinned JDBC/local-checksum prerequisite options there.
+**Learner Windows deployment and migration need no Python on the learner/instructor machine.**
+Region, project, workload-readiness and traffic controls are already inline PowerShell.
+The recent offline regressions and full-checkout packager are now consolidated into the
+existing checker; the three recent Python test files and root `build.py` are removed.
+Earlier Linux guest helpers (including runtime extraction and HTTP traffic) still use Python
+inside the Linux guests. The older optional maintainer integration/app tests and app rebuild
+helper also retain Python; converting those would change the workload/platform, not simplify
+Windows deployment.
+
+From the checkout root in **Windows PowerShell 5.1**:
+
+```powershell
+.\scripts\check-lab-scripts.ps1                       # Parse only; no file writes.
+.\scripts\check-lab-scripts.ps1 -RunRegressionChecks  # Offline; no Azure/VM actions.
+.\scripts\check-lab-scripts.ps1 -PackagePath '..\azure-migrate-workshop-ubuntu2404.zip'
+```
+
+Packaging automatically requires parser/regression success, verifies the existing
+`runtime.sha256`, refreshes `SHA256SUMS` and verifies ZIP CRC/per-file SHA256. It uses built-in
+.NET, does not rebuild app assets, and requires an existing destination folder **outside the
+checkout**. Use `-OverwritePackage` explicitly to replace that chosen ZIP; no implicit
+packaging/writes occur by default. `-UpdateChecksums` refreshes only the manifest after checks.
+The **169 defined check groups** include the 11 Classic-completion regressions alongside
+retained AST/helper, communication, assessment/context, backend/provider, Modern, discovery,
+Step 6/controller and lexical contracts. These are not live Azure/traffic tests. The native
+checker, its PowerShell fixtures and native packager were **not executed in this environment**. Optional older maintainer checks remain
+`python3 -B tests/integration_checks.py` and
+`python3 -B apps/contoso-orderdesk/tests/static_checks.py`.
+No Java/SQL/appliance test is claimed by the static validation report. Optional 3001 staging
+is scoped to a reviewed older application on an **already-24.04** guest only; it is neither
+an OS upgrade nor a path to update the existing 22.04 lab. New deployment needs no staging.
+
+### Guest communication readiness (configure-host and Step 2)
+
+VM power, app health and an **Enabled** integration service do not prove guest-to-host
+communication. New deployment now requires all four guests' live Hyper-V KVP CIM component
+(`Msvm_KvpExchangeComponent`) to be enabled, have numeric primary `OperationalStatus = 2`
+and supply nonblank recognized-family `OSName`/`OSVersion`. LostCommunication (13), NoContact
+(12), incompatible protocol (7), degraded (3), missing/unknown status or failed CIM reads
+block completion. An unimplemented/null inherited `CommunicationStatus` is allowed; a known
+bad value is not. Localized status text and HealthState are not readiness gates.
+
+Linux provisioning installs **both running-kernel** `linux-tools-$(uname -r)` and
+`linux-cloud-tools-$(uname -r)`, checks the exact executable and enables KVP. It intentionally
+keeps KVP stopped until cloud-init's scheduled reboot. Critical installation failures are
+recorded and KVP is masked so later runcmd items/reboot cannot hide them; no `-virtual`
+fallback or kernel/OS upgrade is attempted. Joint application/KVP readiness retries for at
+most 20 minutes, requires three consecutive observations, and is checked again immediately
+before the completion marker. The existing host-preparation JSON gains numeric KVP/OS rows.
+
+Step 2 separately probes the **selected Azure host** before prerequisites success, project
+key, download/import or discovery/assessment. Complete, unique marked JSON and all four
+expected VM identities are required; errors/unknowns stop rather than enter the WinRM repair
+prompt. The probe is read-only and requires no Linux password from the learner. Updating this
+package does **not** repair an already deployed guest; follow [Module 1 section 2](docs/Module-1-Discovery.md#2-prepare-the-hyper-v-host), then rerun Step 2. Do not rerun provisioning on a completed host.
+
+For release acceptance, verify `/etc/os-release` reports 24.04 on both Linux guests and
+that fresh appliance inventory shows their OS metadata plus Tomcat 10.1/Java 17 and a
+visible Contoso Order Desk Java web asset. Local HTTP success cannot waive this check.
+Do not promise that changing the OS or Servlet namespace fixes an appliance classifier
+or compressed-WAR/custom-CATALINA_BASE discovery issue; that remains unproven.
+
+These checks prove host-observed KVP transport and available OS metadata, **not** direct
+post-reboot `systemctl` status, appliance-side OS classification or fresh software/web
+inventory. Appliance credentials, SSH permissions and discovery remain separate checks.
+This completion-field correction adds no delivered files: the complete package contains **62 files**.
+
+### Workload power and optional traffic handoff
+
+Instructor Steps 1 and 2 verify the selected Azure host and exactly four nested workloads
+are Running through read-only Azure Run Command. Missing/off/saved/paused/unknown states
+stop progress with manual host-side repair instructions; no nested VM is automatically
+started. Running proves power state only, not app health. Step 1 rechecks before verified
+project guidance, then offers optional background sample-order traffic **after WHAT TO DO
+NEXT**, default No. An absent/unverified project receives no offer.
+
+`-LabTraffic Skip` makes no generator changes. Fully supplied Step 1 environment inputs
+also skip the traffic prompt by default; `-LabTraffic Prompt` explicitly requests the safe
+`[y/N]` prompt, and `-LabTraffic Start` explicitly opts in. An optional
+`-LabTrafficPassword` accepts a SecureString; otherwise the deployment password is prompted
+privately after opt-in. Supported workstation launches use protected managed Run Command;
+verified elevated on-host launches run the staged script interactively. Unsupported remote
+prerequisites cause a clear not-initiated message and host-interactive fallback. Traffic
+persists across consoles/reboots: lab completion does **not** stop it. Stop on the host with
+`C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable`, or stop/remove VMs during teardown.
+See [traffic prerequisites and results](docs/Lab-Traffic.md). After cutover, use the
+[native post-migration traffic controller](docs/post-migration-labtraffic.md) to inventory
+inherited jobs, safely repoint aliases and run bounded traffic before Step 6; Check again
+after hardening. Test copies require pre-boot source isolation and explicit `-TestMigration`.
+
+### Separate source and migration regions: quota preflight
+
+Step 1 now asks for a **migration target region different from the actual source Hyper-V
+host region**, with no inherited source default. It validates names/display names against
+`Get-AzLocation`. The host's actual VM region, project data geography and resource-group
+metadata location are three different settings. Resource-group metadata does not bind child
+resource regions; existing VNet/NSG regions do, and conflicts stop before provider/resource
+writes. Networks cannot be moved: use a fresh landing zone if necessary.
+
+Example only, **not** a promise of subscription access, SKU availability or capacity:
+
+```powershell
+$sourceRg = 'rg-ces-source-01' # Existing deployed source group.
+$sourceRegion = 'eastus'       # Example only; the actual host region is read, not assumed.
+$migrationTargetRegion = 'westus2'
+$targetRg = 'rg-ces-target-01'
+$projectName = 'ces-migrate-01'
+.\scripts\migrate-step1-setup-project.ps1 -SourceResourceGroup $sourceRg `
+    -TargetResourceGroup $targetRg -Location $migrationTargetRegion -MigrateProjectName $projectName
+.\scripts\migrate-step2-discover-assess.ps1 -SourceResourceGroup $sourceRg `
+    -TargetResourceGroup $targetRg -Location $migrationTargetRegion -MigrateProjectName $projectName
+```
+
+Step 1 needs `Az.Compute` as well as Accounts/Resources/Network. Its **read-only subscription
+quota heads-up** shows a UTC timestamp, masked current subscription and both regions' actual
+reported Total Regional vCPUs, relevant VM-family quotas and regional VM-count usage/limits/
+remaining. Usage includes resources outside the workshop and VM scale sets. Both regional
+and family vCPU quota must fit. Allocated and deallocated VMs count; deallocation is not a
+quota-release strategy. The nested four workloads and `MigrateAppl` are not separate Azure
+VMs: only their Azure Hyper-V host consumes source Azure VM quota, already included in usage.
+
+Planning defaults mirror step 3: B2s + B2ms + B1ms + B1ms, normally **6 vCPUs** for one full
+new target **or** test set (four Azure VMs), derived from live SKU `vCPUs`/family metadata.
+**12 vCPUs**/eight new VMs is only the hypothetical full-target-plus-full-test overlap in the
+same target region. Step 4 normally cleans tests before step 5, and replication disks do not
+reserve VM cores. Forecasts are not actual usage or reservations: existing target VMs are
+already reported, so do not add them again. Rerun with `-ForecastVmSizes` listing actual
+planned sizes (repeat a size for each VM) if choices/counts change. This does not change step 3
+or portal migration sizing.
+
+Missing rows/SKU metadata, unregistered Compute or denied/failed reads show **Unknown**, never
+zero or assumed free capacity. Insufficiency, Unknown or applicable SKU restrictions in the
+target planning baseline trigger `[1] Choose another target region` (recommended),
+`[2] Continue NETWORK-ONLY despite warnings`,
+or `[3] Cancel`. With supplied `-Location`, warnings stop before writes unless explicitly
+acknowledged by `-AllowQuotaWarning`; that switch permits only step 1 networking and is **not**
+an Azure quota bypass, VM allocation approval or region-conflict override. Fully supplied
+source/target/project/location values avoid step 1's entry/pause questions; supply
+`-HyperVHostVMName` too if source VM selection is ambiguous. Region validity alone does not
+prove quota, policy, zone/SKU eligibility or physical capacity.
+
+**Choose and verify the migration target before portal Create resources / Finalize discovery
+locks that project's migration target.** All subsequent migrations/test networks must match.
+The preflight does not verify that project/recovery lock; inspect existing resources in the
+portal. It neither creates nor remaps the Azure Migrate project or its data geography.
+Step 2's assessment uses the chosen target, not source metadata; without optional
+`-TargetResourceGroup` it explicitly asks for the assessment target region. Steps 3–6 derive
+location from the actual target VNet and reject an explicitly conflicting `-Location` before
+writes; step 4 also checks an existing test VNet. The 3a/3b wrappers pass location through.
+See [VM quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas).
+
+### A note from the author
+
+These notes record environment issues met while building and running this lab, and why parts of the scripts look the way they do. They are observations from one subscription and one region, not a compatibility matrix.
+
+**The host size default changed from `Standard_E8s_v5` to `Standard_E8s_v7`.** The v5 size was not available to the subscription this lab was built in. Esv7 offers the same 8 vCPU / 64 GB shape and reports nested virtualization support, so it became the default. `deploy-lab.ps1` validates whatever size you pass against your own subscription's SKU metadata and quota, so a different family works if it meets the lab's floor.
+
+**Esv7 is a Generation 2 only series, and its sizes require an OS image with NVMe support.** The workshop's Windows Server 2022 Gen2 host image satisfies both. If you change the host image, check those two properties first.
+
+**Deployment pins the image catalog API version and forces Standard security on the temporary guest disk.** Both are deliberate. Letting the installed Az.Compute module pick its own API version produced inconsistent results across machines, and the disk cmdlets will otherwise default a Trusted Launch image lookup that is incompatible with exporting the disk to nested Hyper-V guests.
+
+**The Azure Migrate appliance VHD Microsoft publishes for Hyper-V is Generation 1.** Module 1 creates the appliance VM with `-Generation 1` for that reason. Confirm the current generation and disk format in Microsoft's article before you run it — a Generation 2 VM will not boot a Generation 1 VHD, and the failure looks like a corrupt download.
+
+**The lab stages the appliance on the host's own OS disk.** An earlier revision attached a separate managed data disk for this. It was removed because the 512 GB OS disk already has the capacity and a data disk bills continuously, including while the VM is deallocated.
+
+No attempt has been made to solve for environments beyond the one this was built in. If you hit a different compatibility problem — a region without the host size, a policy that blocks disk export, a proxy that blocks a package source — please open an issue with the error and your region and subscription type. Feedback of that kind is what turns one environment's findings into guidance that holds up more broadly.
+
+### Maintenance and provenance
+
+Parse every script with PowerShell before sharing changes, and confirm the documentation links resolve. The host-side scripts target Windows PowerShell 5.1; the deployment client works on either 5.1 or PowerShell 7.
+
+Preserve upstream license/attribution notices when merging this reviewed source into the workshop repository. This supplied baseline does not include a LICENSE file; do not infer Microsoft-derived attribution or silently manufacture licensing metadata.
+
+### Retained console-launch history
+
+In an open window it also clears any leftover `Write-Host` / `Write-Warning` override left
+behind by a `migrate-step` script run earlier in that session. Those scripts install console
+overrides to mask subscription IDs, and a leftover one used to make `deploy-lab.ps1` fail on a
+`Write-Host` line.
+
+## Log of Changes
+
+<strong style="color: red;">Not to be included in final distribution.</strong>
+
+### Documentation-only README and Version Notes reorganization (2026-10-13)
+
+Renamed the root `CHANGES.md` to `VersionNotes.md` and restored the student-facing
+README introduction, business context, architecture/workload rationale, learning path,
+prerequisites, quick start, migration methodology, architectural decisions, cost/cleanup,
+repository structure and resource links. Moved the retained runtime, assessment,
+communication, traffic, region/quota and maintainer notes here. Historical dated entries
+and numbered troubleshooting sections are retained with their original dates and bodies;
+only heading depth and section placement changed. Release integration updates exactly
+four script comment/help filename references, the existing checker's moved-document
+source contract and the Python manifest test's rename-aware path/inventory checks.
+The original baseline hashes and historical provenance are retained with an explicit
+root rename mapping; current hashes, release-validation metadata and root checksums
+are refreshed. No executable deployment/migration behavior, workload or runtime changes.
+Offline release verification is recorded in the static validation report (2026-10-14);
+native PowerShell and full live lab acceptance remain outstanding.
+
+#### Reference check for the student introduction
+
+The supplied **Azure Migrate L300 Deck.PPTX** (slides 3–11 and 30–31) and
+**Azure Migrate L300 FINAL.pptx** (slides 8, 9, 13, 16, 56, 57 and 60) informed the
+central-hub, discovery/assessment, mixed-workload and Hyper-V host-replication explanation.
+Their template appliance prerequisites and downtime language were not copied as current
+support requirements. Sample workload analogies describe learning intent, not production
+parity or verified PaaS suitability.
+
+The following official Microsoft Learn articles had displayed update dates within
+2025-10-13 through 2026-10-13 when checked for this edit. These dates establish source
+recency, not successful execution of the workshop:
+
+- [Azure Migrate overview](https://learn.microsoft.com/en-us/azure/migrate/migrate-services-overview) — updated 2026-05-18.
+- [Hyper-V migration](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-hyper-v) — updated 2026-10-10.
+- [Azure VM assessment](https://learn.microsoft.com/en-us/azure/migrate/review-assessment?view=migrate) — updated 2026-08-25.
+- [Classic assessment calculations](https://learn.microsoft.com/en-us/azure/migrate/concepts-assessment-calculation?view=migrate-classic) — updated 2026-02-26.
+- [Esv7 specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/memory-optimized/esv7-series) — updated 2026-08-24.
+- [Java migration resources](https://learn.microsoft.com/en-us/azure/app-service/app-service-java-migration) — updated 2025-12-12.
+
+Article references are limited to concise product-level support, without quotations or
+copied summaries. The lab implementation and workload explanations come from the supplied
+workshop material and scripts. The classic-view reference does not establish automatic
+Hyper-V PaaS assessment or migration compatibility.
+
+The README's general Cloud Adoption Framework link is background context, not an
+in-window article-update claim. No fixed-count “6 Rs” definition is asserted. Internal
+switch/NAT and workload details describe the supplied implementation rather than a
+Microsoft production-topology certification. Existing dated entries below describe their
+own revisions, test counts and superseded decisions; they are not current acceptance claims.
+
+### Changes from the supplied workshop
 
 **TD SYNNEX | Cloud Enablement Services**
 
@@ -28,7 +417,7 @@ This is the complete branch-ready source, not a changes-only overlay. See
 
 ---
 
-## Current: Classic assessment completion with optional provisioning metadata (2026-10-13)
+### Current: Classic assessment completion with optional provisioning metadata (2026-10-13)
 
 Exactly **8 existing files changed, 0 added/deleted, 62 files per package**: Step 2,
 the existing checker, README, Module 1, this log, static report, baseline manifest and
@@ -59,7 +448,7 @@ in `STATIC-VALIDATION-REPORT.md`; publication is a separate delivery-owner actio
 
 ---
 
-## Earlier: post-migration traffic and exact NSG application edges (2026-10-13)
+### Earlier: post-migration traffic and exact NSG application edges (2026-10-13)
 
 Exactly two new files: `scripts/post-migration-labtraffic.ps1` and
 `docs/post-migration-labtraffic.md`; eight existing-file updates (Step 6, existing native
@@ -90,7 +479,7 @@ explicit native/live-runtime limits; no live deployment/migration success is cla
 
 ---
 
-## Current: explicit Hyper-V discovery in Step 3 (2026-10-08)
+### Current: explicit Hyper-V discovery in Step 3 (2026-10-08)
 
 Matched minimal fix in both maintained branches: the existing
 `Get-AzMigrateDiscoveredServer` call in `migrate-step3-replicate.ps1` now passes
@@ -116,7 +505,7 @@ were executed; no redeployment is required to replace this script in a running l
 
 All earlier entries below describe their own revisions and validation limits.
 
-## Earlier: restore the original Classic Azure VM module (2026-10-08)
+### Earlier: restore the original Classic Azure VM module (2026-10-08)
 
 Both maintained labs now default to **AssessmentMode Classic**, the grouped Azure VM
 MachineAssessment 2024-01-15 path. Classic does not mean a retired first-generation Migrate
@@ -154,7 +543,7 @@ full-script run; the isolated Modern request was rejected and created no assessm
 Earlier entries below are historical. Their Modern-default and stricter group provisioning/
 capability assumptions are superseded here; recorded tests/counts describe their revisions.
 
-## Earlier: focused assessment provider-catalog normalization (2026-10-07)
+### Earlier: focused assessment provider-catalog normalization (2026-10-07)
 
 Both maintained branches retain default Modern and their distinct runtimes. Step 2 now
 normalizes only relevant exact resource types, merges harmless duplicate rows/version
@@ -185,7 +574,7 @@ Earlier entries below are historical revision evidence. Their blanket malformed/
 catalog rejection policy and prior native group counts are superseded here; their recorded
 executions and preservation results describe those earlier revisions, not this one.
 
-## Earlier: Ubuntu 24.04-only Modern server assessment profile (2026-10-07)
+### Earlier: Ubuntu 24.04-only Modern server assessment profile (2026-10-07)
 
 Step 2 adds `-AssessmentMode Modern|Classic`, default **Modern on this branch only**.
 The inline reviewed profile catalog intersects actual provider metadata with the documented
@@ -225,7 +614,7 @@ checks and deterministic 60-file ZIP/CRC/SHA256/readback. Native fixture groups:
 DEFINED, NOT EXECUTED** (108 retained + 22 Modern). No PowerShell AST/native tests, live
 Azure/Hyper-V, Java/SQL, package installation, OS upgrade, Git or Office guide edits.
 
-## Earlier: provider metadata and parent API repair (2026-10-07)
+### Earlier: provider metadata and parent API repair (2026-10-07)
 
 The preceding revision wrongly required 2024-01-15 on the parent assessmentProjects
 resource and treated every omitted nested provider row as unsupported. The actual
@@ -248,7 +637,7 @@ Exactly 8 existing files changed per branch, 52 untouched byte-for-byte, 60 file
 Azure read/write or successful assessment creation is claimed. ZIP/tree checksum readback
 is verified; preserve the lab and rerun Step 2 using its real backend, not deployment.
 
-## Earlier: actual assessment backend and stable machine/group APIs (2026-10-07)
+### Earlier: actual assessment backend and stable machine/group APIs (2026-10-07)
 
 The parent-version/nested-catalog support claims below are superseded by the current repair.
 
@@ -275,7 +664,7 @@ PowerShell/Java execution, installs, app rebuild, Git or Office guide edits. See
 static report for evidence, remaining native/live acceptance and authoritative API references
 in Module 1. Update the same full branch and rerun Step 2, not deployment/rebuild.
 
-## Earlier: context-authenticated assessment requests and honest completion (2026-10-07)
+### Earlier: context-authenticated assessment requests and honest completion (2026-10-07)
 
 Both maintained branches receive the same focused Step 2 fix. `Invoke-AzRestMethod` owns
 ARM authentication/refresh via the pinned validated Az context and current-cloud endpoint;
@@ -310,7 +699,7 @@ assessment creation remain unexecuted; authentication repair does not certify se
 References: [Az 14 migration](https://learn.microsoft.com/en-us/powershell/azure/migrate-az-14.0.0),
 [context-backed ARM requests](https://learn.microsoft.com/en-us/powershell/azure/manage-azure-resources-invoke-azrestmethod).
 
-## Earlier: separate Ubuntu 24.04 / Tomcat 10.1 rebuild (2026-10-07)
+### Earlier: separate Ubuntu 24.04 / Tomcat 10.1 rebuild (2026-10-07)
 
 Full separate 60-file checkout/ZIP, not an overlay. Both Linux guests use Noble's exact-name
 SHA256-checked moving current QCOW2, distinct Ubuntu2404 cache names, the same fixed disks,
@@ -342,7 +731,7 @@ Release requires Windows PowerShell 5.1/native groups and fresh Azure/Hyper-V/ap
 Ubuntu OS + Tomcat/Java software + visible Java web-asset acceptance. Local health checks
 are not proof of discovery and the rebuild makes no claim to solve prior classifier issues.
 
-## Earlier: require guest communication, not just health (2026-10-07)
+### Earlier: require guest communication, not just health (2026-10-07)
 
 Focused changes in existing `scripts/host/configure-host.ps1` and
 `scripts/migrate-step2-discover-assess.ps1`: identical inline read-only KVP/CIM and safe XML
@@ -371,7 +760,7 @@ PowerShell 5.1 and live Azure/Hyper-V/appliance acceptance still need target val
 
 Reference: [Msvm_KvpExchangeComponent status and guest intrinsic items](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-kvpexchangecomponent).
 
-## Earlier: merge the supplied Step 2 discovery fix (2026-10-06)
+### Earlier: merge the supplied Step 2 discovery fix (2026-10-06)
 
 Merged the latest edited Step 2's explicit `-SourceMachineType 'HyperV'` into the current
 branch, rather than replacing it with the older script/package. The discovery poll now
@@ -393,7 +782,7 @@ remain unexecuted here.
 
 Reference: [Get-AzMigrateDiscoveredServer, Hyper-V example](https://learn.microsoft.com/en-us/powershell/module/az.migrate/get-azmigratediscoveredserver?view=azps-16.3.0).
 
-## Earlier: consolidate recent maintenance tooling into PowerShell (2026-10-06)
+### Earlier: consolidate recent maintenance tooling into PowerShell (2026-10-06)
 
 The existing `scripts/check-lab-scripts.ps1` now owns the 12 regional, 5 project-guidance
 and 25 workload-readiness/traffic check groups through `-RunRegressionChecks`, with no Pester
@@ -417,7 +806,7 @@ The original 72 static checks passed before consolidation; the retained 30 check
 archive integrity checks passed afterward. Native PowerShell checks/packaging and live
 Azure/Hyper-V execution remain untested here. The legacy workshop-update is untouched.
 
-## Earlier: workload power gates and final traffic opt-in (2026-10-06)
+### Earlier: workload power gates and final traffic opt-in (2026-10-06)
 
 Steps 1 and 2 now independently read the resolved Azure Hyper-V host's actual power code
 and exactly four nested workload states through Azure Run Command. Small marked JSON/end
@@ -456,7 +845,7 @@ No timer/completion detector is added. Deployment, app code, stages 3–6 and th
 are unchanged. Updated reusable notes and 25 new Python fixture/lexical checks complement the
 retained project-guidance regressions; no PowerShell or Azure execution is claimed.
 
-## Earlier: Step 1 project-dependent completion guidance (2026-10-06)
+### Earlier: Step 1 project-dependent completion guidance (2026-10-06)
 
 When the requested Azure Migrate project is absent, Step 1 finishes on the portal project
 creation instructions, followed by a command to rerun Step 1 with the same resource groups,
@@ -467,7 +856,7 @@ reported as unverified, not as proof of absence, and instruct portal/access veri
 before a retry rather than creating a duplicate. No deployment, quota or migration behavior
 is changed. Five lexical regressions cover these output branches; no live lookup is claimed.
 
-## Current: separate migration target region and quota heads-up (2026-10-06)
+### Current: separate migration target region and quota heads-up (2026-10-06)
 
 Step 1 no longer inherits the source resource-group region. The learner explicitly chooses a
 subscription-listed target region different from the **actual source host VM** region, with
@@ -496,7 +885,7 @@ Helpers remain self-contained; no common.ps1 dependency, app/JDBC change, or Pul
 Twelve new Python reference-fixture/lexical regression checks supplement all 30 prior checks;
 they are not PowerShell AST execution, live quota evidence or Azure allocation tests.
 
-## Current: Tomcat initial deployment (2026-10-05)
+### Current: Tomcat initial deployment (2026-10-05)
 
 | Area | Implemented behavior |
 |---|---|
@@ -520,7 +909,37 @@ No material was imported from Pull 12 modules. Existing-lab staging/rollback is 
 as a fallback. Personal account/session override notes and obsolete source-only pointers were
 removed. The prior dated parser report is omitted because it is not evidence for this revision.
 
-## Which script completes which module step
+### Current: Appliance verification and installation correction (2026-10-05)
+
+- Removed learner VHD/guest-partition expansion and Step 2's automatic VHD resize. The
+  roughly 80 GB requirement remains: inspect capacity read-only; discrepancies require
+  instructor review of the verified package, not a learner resizing workaround. Historical
+  section 3c is superseded. Host deployment's automatic ApplianceStore partition remains.
+- Module 1 selects one explicit ZIP path and stops on a current official Hyper-V ZIP hash
+  mismatch before extraction. Rename/copy/extraction do not change source ZIP bytes;
+  recompression/internal renames do, and VHD writes are not source ZIP changes. A mismatch's
+  cause is unresolved without the exact artifact, source and actual/expected hashes.
+- Deployment rehashes the actual ZIP at the end, reports full path/bytes and cached-record
+  agreement separately, and compares any supplied expected hash before reporting MATCH.
+  Staging no longer trusts a completion marker alone or overwrites an existing ZIP by default.
+- Step 2 refuses ambiguous ZIP/disk/configuration selection and stale/unrecorded extracted
+  content; it records and rechecks extraction file hashes independently of the ZIP hash.
+  Copy-import preserves exported generation, places all destinations on the actual store,
+  checks physical copy space/headroom, renames before boot and guards DHCP/MAC conflicts.
+  Source ZIP and extraction folders are retained; no verification bypass is offered.
+- Corrected host-store versus guest capacity, UTC accuracy versus display time zone,
+  actual deployed host/Linux username, initial Tomcat labapp login versus SQL discovery
+  permissions, guest OS verification and nested-switch/WinRM/installer/project boundaries.
+
+Sources: [Microsoft appliance requirements and Verify security](https://learn.microsoft.com/en-us/azure/migrate/migrate-appliance?view=migrate),
+[Hyper-V appliance import tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-hyper-v?view=migrate),
+and [Compare-VM compatibility/import parameters](https://learn.microsoft.com/en-us/powershell/module/hyper-v/compare-vm?view=windowsserver2025-ps).
+Four regression checks cover the new flow, including a fictional ZIP rename/copy/extract
+fixture; they do not validate a real Microsoft archive or execute Hyper-V/Azure/PowerShell.
+
+## Troubleshooting & Open Items
+
+### Which script completes which module step
 
 The scripts and the modules are run separately, so this is the map between them. It also appears
 in `README.md`, and each script carries its own copy in a `MODULE COVERAGE` block that
@@ -550,7 +969,7 @@ Nothing automates Module 4: it is analysis, with no lab state to reach.
 
 ---
 
-## 1. The lab builds four workload VMs, not five
+### 1. The lab builds four workload VMs, not five
 
 Pull 12 created a fifth nested VM, `MigrateAppl`, as a bare Windows Server guest that Module 1 then
 installed the Azure Migrate appliance onto. That VM is no longer created.
@@ -572,7 +991,7 @@ In `scripts/host/configure-host.ps1`:
 The appliance instead arrives as Microsoft's published VHD, downloaded and imported by the
 instructor in Module 1.
 
-## 2. Host size default is `Standard_E8s_v7`
+### 2. Host size default is `Standard_E8s_v7`
 
 `Standard_E8s_v5` was not available in the subscription this lab was built in. The default is now
 `Standard_E8s_v7` — the same 8 vCPU / 64 GiB shape, Generation 2, Premium SSD, with nested
@@ -586,14 +1005,14 @@ size names changed.
 > workshop's `2022-datacenter-g2` host image satisfies both. See *A note from the author* in the
 > README.
 
-## 3. Appliance staging uses the host OS disk, not a data disk
+### 3. Appliance staging uses the host OS disk, not a data disk
 
 The 512 GB OS disk has ample spare capacity, so no additional managed data disk is attached. An
 earlier revision of this work did attach a 128 GB `StandardSSD_LRS` data disk; it was removed
 because a data disk bills continuously — including while the VM is deallocated — for space the lab
 already owns. How that space is presented is described in 3b below.
 
-## 3a. Guest disks and memory are statically allocated
+### 3a. Guest disks and memory are statically allocated
 
 The guest VHDs were dynamic, so 140 GB of declared capacity consumed far less at first and grew
 unpredictably through the workshop. They are now **fixed**: `Convert-VHD -VHDType Fixed` in both the
@@ -621,7 +1040,7 @@ deferring it to first use, which adds roughly 20–40 minutes on a 512 GB Premiu
 Module 0 moves from 30–60 minutes to **50–100 minutes**, and the conversion timeout rises from 1800
 to 5400 seconds. A new troubleshooting entry records that slow guest disk creation is expected.
 
-## 3b. The appliance gets its own partition
+### 3b. The appliance gets its own partition
 
 `-ApplianceStagingMinimumFreeGB` and the free-space check on `C:` are replaced by a dedicated
 partition. A new step, **Create appliance store partition**, sizes `C:` and creates a 100 GB NTFS
@@ -657,7 +1076,7 @@ Module 1 section 3 now downloads, extracts, imports and runs the appliance entir
 adds an optional `Convert-VHD -VHDType Fixed` step for the appliance disk — guarded by a free-space
 check, with a documented fallback if the expanded size does not fit.
 
-## 3c. The appliance disk is grown to Microsoft's documented size
+### 3c. The appliance disk is grown to Microsoft's documented size
 
 > **Historical — superseded by the current appliance-flow revision below.** The manual VHD
 > and guest-partition expansion instructions described here are removed. Do not use the
@@ -682,7 +1101,7 @@ the virtual disk before Windows has booted from it is markedly simpler than afte
 Module 0 section 3.7 now lists the appliance's disk, memory and vCPU requirements separately from
 the host partition that stores it.
 
-## 4. Lab firewall posture is configured, not left to the instructor
+### 4. Lab firewall posture is configured, not left to the instructor
 
 Previously, making a guest answer a ping required enabling the **File and Printer Sharing** group by
 hand — which works only because ICMPv4 echo happens to live in that group, and which also opens SMB
@@ -709,7 +1128,7 @@ later narrowed. Both are removed and recreated if present, so re-running is safe
 **Not changed:** the Azure NSG. The host's public NIC still permits RDP from the single `/32`
 supplied at deployment.
 
-## 4a. Hyper-V guest daemons on the Linux guests
+### 4a. Hyper-V guest daemons on the Linux guests
 
 Ubuntu cloud images ship the Hyper-V kernel modules but not the userspace daemons. Without the
 Data Exchange (KVP) daemon the host cannot report a guest's operating system or IP address, and
@@ -803,7 +1222,7 @@ that these commands need `sudo`: Ubuntu cloud images leave root locked by design
 without `sudo` falls through to a polkit prompt for a root password that does not exist. Module 0
 section 3.6 lists the extra package source.
 
-## 4b. Software inventory prerequisites
+### 4b. Software inventory prerequisites
 
 An assessment run against a live lab returned **no applications**, despite IIS, ASP.NET, SQL Server
 Express, Nginx and Node.js all being installed. Software inventory is a separate mechanism from VM
@@ -833,7 +1252,7 @@ credentials rather than missing applications, and the connection checks to run i
 also records that software inventory and the Azure VM assessment are different views — applications
 never appear in the assessment.
 
-## 4c. Subscription ID and admin address are masked at entry
+### 4c. Subscription ID and admin address are masked at entry
 
 `deploy-lab.ps1` takes `-SubscriptionId` and `-AdminSourceCidr` as **SecureString**, so neither is
 visible while being typed — relevant when a delivery is screen-shared or recorded. New helpers
@@ -876,7 +1295,7 @@ repository and would fail on first run:
 Both are corrected, and both documents now state that the migrate and cleanup scripts depend on the
 active context rather than an explicit subscription.
 
-## 4d. A failed deployment resumes instead of requiring a rebuild
+### 4d. A failed deployment resumes instead of requiring a rebuild
 
 Pull 12 replaced the original lab's "create if absent" pattern with hard refusals — an existing
 resource group, a `setup-complete.json` marker, or an existing guest VM each threw. The intent was
@@ -900,7 +1319,7 @@ half-provisioned guest cannot be trusted. The host logs that it is resuming.
 The post-cutover protection is preserved: once guest setup has succeeded, the group is refused with
 a message saying why.
 
-## 4e. Lost monitoring no longer reads as failure
+### 4e. Lost monitoring no longer reads as failure
 
 A live run ended with *"Setup status has been unavailable for 300 seconds"* at 21:34 UTC. The host
 finished successfully at 21:59 UTC — the client had stopped watching 26 minutes early because its
@@ -925,7 +1344,7 @@ Module 0 gains a matching troubleshooting entry, including the two cleanup steps
 have performed had it still been watching — revoking and removing `WinServerBase-temp`, and removing
 the completed Run Command.
 
-## 4f. Progress reporting follows the host through its phases
+### 4f. Progress reporting follows the host through its phases
 
 The deployment reported 13 steps, of which the last — *Guest setup* — covered the entire host
 payload. That is 40 to 80 minutes of the run, so the counter sat on `Step 13/13` for the majority of
@@ -951,7 +1370,7 @@ The failure and status-unavailable paths also report against the current phase r
 constant, so a stall or an error now names the phase it stopped in instead of saying `Guest setup`
 regardless of how far the run got.
 
-## 5. Optional traffic mesh
+### 5. Optional traffic mesh
 
 `scripts/enable-lab-traffic.ps1` is new. It wires the four independent samples into one
 small-business order desk so Azure Migrate dependency analysis has real connections to observe:
@@ -997,7 +1416,7 @@ use Windows authentication); `C:\LabTraffic\` and a scheduled task on `OnPrem-We
 package, `lab-traffic.js`, the `lab-traffic` systemd unit and `/etc/lab-traffic.env` (mode 600) on
 `OnPrem-Linux-App`; one Nginx conf file on `OnPrem-Linux-Web`.
 
-### Fix: ssh stderr aborted Linux configuration
+#### Fix: ssh stderr aborted Linux configuration
 
 `Invoke-LabLinuxPayload` sets `$ErrorActionPreference = 'Stop'`. Merging a native executable's
 stderr with `2>&1` under `Stop` turns each stderr line into a terminating `NativeCommandError`, and
@@ -1009,7 +1428,7 @@ block; `$LASTEXITCODE` is captured immediately and used for the success test; `-
 suppresses the notice; and output is flattened to a string before the marker match. The same
 bracketing pattern already existed around the `oscdimg` call in `configure-host.ps1`.
 
-## 6. Helper functions
+### 6. Helper functions
 
 - `Assert-LabResourceGroup` and `Assert-LabWorkloadNames` are removed from `common.ps1`. Their only
   callers were Pull 12's `cleanup-lab.ps1` and test scripts, neither of which is part of this lab.
@@ -1021,9 +1440,9 @@ bracketing pattern already existed around the `oscdimg` call in `configure-host.
 - The `LAB_PROGRESS` marker machinery in `health.ps1` is retained: `Wait-LabManagedSetup` consumes it
   and `deploy-lab.ps1` calls that directly for live progress during guest setup.
 
-## 7. Documentation
+### 7. Documentation
 
-### `docs/Module-0-Setup.md`
+#### `docs/Module-0-Setup.md`
 
 Rewritten from the instructor to the student, following the unmodified lab's conventions: numbered
 sub-steps, `> **Note:** / **Tip:** / **Warning:**` callouts, **Expected result** labels and direct
@@ -1066,7 +1485,7 @@ Specific points:
 - Image-catalog and disk-security implementation detail is removed; it was troubleshooting residue,
   not lab narrative. The behaviour is unchanged in the scripts and explained in the README note.
 
-### `docs/Module-1-Discovery.md`
+#### `docs/Module-1-Discovery.md`
 
 Rewritten to the same conventions. Section 3 is broken into 3.1–3.5 — generate the project key,
 confirm staging space, download and verify the archive, import the VHD, complete first boot — and
@@ -1095,12 +1514,12 @@ at first boot, and section 4 adds an ordered "no servers appear at all" table.
 > **OS details** can be read, not whether the VM is discovered, so it is not the cause of an empty
 > inventory.
 
-### `docs/Lab-Traffic.md`
+#### `docs/Lab-Traffic.md`
 
 New. What the mesh creates, how to run and verify it from the staged copy, the names-not-addresses
 rationale, load guidance, and the exact per-guest changes.
 
-### `README.md`
+#### `README.md`
 
 Diagram, module table and script table updated. Adds **A note from the author**, recording the
 compatibility findings met while building this lab — the v5 → v7 change, the Esv7 Gen2/NVMe
@@ -1110,7 +1529,7 @@ region, closing with an invitation for feedback from anyone who meets a differen
 
 ---
 
-## 8. Lab-wide consistency reconciliation
+### 8. Lab-wide consistency reconciliation
 
 Modules 2-5 and `migrate-step1` through `migrate-step6` were still carrying values from
 the lab they were forked from. They now agree with Modules 0 and 1.
@@ -1153,7 +1572,7 @@ the download-and-import logic is untouched and still runs by default.
 `OnPrem-Linux-Web`, `OnPrem-Linux-App`), the `192.168.0.0/24` guest addressing, and the
 cross-links among Modules 2-5 were consistent throughout and were not touched.
 
-## 9. State-bridging scripts for Modules 2 and 3
+### 9. State-bridging scripts for Modules 2 and 3
 
 The step scripts are an automation track that reaches the same state as the manual
 modules. They were decomposed by PHASE (step 3 replicated all four VMs, step 4 tested all
@@ -1198,7 +1617,7 @@ environment following Module 3 sections 5-7.
 from what actually exists in the target resource group and only fails if it finds none, so
 Module 5 automation works against a half-migrated estate without modification.
 
-## 10. Prompts find the resources instead of asking you to recall them
+### 10. Prompts find the resources instead of asking you to recall them
 
 The first pass at interactive entry removed hard-coded defaults but still asked for every name
 as free text. That reproduced the problem it was meant to solve: the learner had to know the
@@ -1232,7 +1651,7 @@ retention - remain typed, because nothing can look them up.
 only checked against what the subscription actually contains, and a name that does not exist is
 rejected with the list of names that do.
 
-## 11. Appliance naming reverted to a single parameter
+### 11. Appliance naming reverted to a single parameter
 
 The previous round split the appliance name into `-ApplianceVMName` and `-ApplianceProjectName`.
 That added a prompt without adding information, since the lab uses one name for both. It has
@@ -1250,7 +1669,7 @@ from Microsoft's exported configuration and offers no rename step - appears in t
 whatever name it carries. If it is not there yet, the final list entry names it and the script
 downloads and imports it as before.
 
-## 12. Parameter entry across the migrate-step scripts
+### 12. Parameter entry across the migrate-step scripts
 
 All eight scripts take no value silently, and prompts validate before accepting. Pressing Enter
 does not accept the example shown in a prompt. Subscription and tenant IDs are masked wherever
@@ -1265,7 +1684,7 @@ Two consistency items were resolved:
   its header now states that nothing loads it at run time and that it is the copy to edit first.
   An unused file that looks authoritative is worse than no file at all.
 
-## 13. Each migrate-step script now starts on its own
+### 13. Each migrate-step script now starts on its own
 
 `migrate-step2-discover-assess.ps1` could not be run bare from the scripts folder. It failed
 before showing a single prompt, and the reason was the startup sequence rather than the prompts:
@@ -1303,7 +1722,7 @@ The startup is now self-sufficient in all eight:
 subscription and asks its questions. The README Start-here block no longer sets the context by
 hand before running them.
 
-## 14. Failures are recorded to a file and the window stays open
+### 14. Failures are recorded to a file and the window stays open
 
 A failure was unreadable when the script was launched by double-click or *Run with PowerShell*:
 the trap ended with `exit 1`, the console closed on the spot, and the error went with it.
@@ -1315,7 +1734,7 @@ and its number, the script stack trace, and the loaded Az module versions. It pa
 same masking as the screen output, so subscription and tenant IDs are truncated in the file too.
 Set `LAB_NO_PAUSE=1` to skip the pause for an unattended run.
 
-## 15. Module loading is best-effort again
+### 15. Module loading is best-effort again
 
 Section 13 changed the module check from `Get-Command Get-AzContext` to
 `Import-Module <module> -ErrorAction Stop` for a list of required modules. That was too strict:
@@ -1328,7 +1747,7 @@ Modules are now imported best-effort. What is actually verified is that `Get-AzC
 module that fails to import produces a warning naming it, not a refusal. Only a genuinely
 missing cmdlet stops the run.
 
-## 16. The actual cause: a parse error in migrate-step2
+### 16. The actual cause: a parse error in migrate-step2
 
 `migrate-step2-discover-assess.ps1` could not run at all, with or without parameters. Its
 section 4 instruction block contained:
@@ -1357,7 +1776,7 @@ This was the failure behind every "step 2 fails before prompting" report, includ
 attributed earlier to the sign-in sequence and to module loading. Those two were real weaknesses
 and the changes to them stand on their own, but neither was the cause here.
 
-## 17. A parse check that runs nothing
+### 17. A parse check that runs nothing
 
 `scripts/check-lab-scripts.ps1` runs the PowerShell parser over every `.ps1` beside it and
 reports the file, line, column and message for anything that will not parse. It executes no
@@ -1367,7 +1786,7 @@ A syntax error is invisible to every safeguard inside a script, because none of 
 yet. This catches that class in a second, and it would have caught the fault above immediately.
 Worth running after editing any lab script, and before a workshop.
 
-## 18. Resource groups are typed, not listed
+### 18. Resource groups are typed, not listed
 
 Listing every resource group in the subscription was the wrong shape for a training
 subscription, which can hold a great many groups belonging to other people. The learner knows
@@ -1388,7 +1807,7 @@ names are not ones a learner is expected to memorise: the Azure Migrate project 
 source group, the VMs in that group, the appliance VM from the Hyper-V host's own inventory, the
 workload group, and the subscription when none is current.
 
-## 19. Step 2 no longer asks for a target resource group
+### 19. Step 2 no longer asks for a target resource group
 
 Every use of `-TargetResourceGroup` in `migrate-step2-discover-assess.ps1` was traced: a
 pre-flight existence check, and reading the group's region for `Resolve-LabLocation`. Nothing
@@ -1411,7 +1830,7 @@ the pre-flight check and the `Assert-LabResources` argument are all removed, and
 read from the source resource group instead. `migrate-step3` onwards still ask for the target
 group, because those genuinely deploy into it.
 
-## 20. A default that Enter accepts, for lab-wide settings only
+### 20. A default that Enter accepts, for lab-wide settings only
 
 `Read-LabParameter` gained `-Default`. A prompt carrying one shows it in square brackets and
 Enter accepts it:
@@ -1439,7 +1858,7 @@ is `AsOnPremises`, because performance-based sizing needs days of utilisation da
 not produce; `reservedInstance` is `None`; and the group and assessment are named
 `AllServers-Group` and `Workshop-Assessment`.
 
-## 21. Appliance selection moved after the pre-flight
+### 21. Appliance selection moved after the pre-flight
 
 Moving the appliance question earlier (section 11) put it above the line that defines
 `Invoke-HostScript`, so the call failed at run time:
@@ -1457,7 +1876,7 @@ helper functions are defined, the pre-flight has confirmed the Hyper-V host exis
 running, and the appliance name is settled before the project key that needs it. The earlier
 placement also queried the host before anything had verified the host was up.
 
-## 22. check-lab-scripts.ps1 now catches calls made before their definition
+### 22. check-lab-scripts.ps1 now catches calls made before their definition
 
 The parse check could not see the fault above, because it is not a syntax error. The checker now
 walks each script's syntax tree, records the line that defines each function, and reports any
@@ -1472,7 +1891,7 @@ FAIL  migrate-step2-discover-assess.ps1  (1 call(s) before definition)
       line 741: 'Invoke-HostScript' is called here but not defined until line 811
 ```
 
-## 23. A valid resource group reported as not found
+### 23. A valid resource group reported as not found
 
 A resource group that plainly exists could be rejected at the prompt. The lookup was correct;
 where it looked was not.
@@ -1501,7 +1920,7 @@ declined or finds nothing.
 It also lists resource groups in the current subscription whose names resemble what was typed,
 capped at eight, which catches a plain typo without printing the whole subscription.
 
-## 24. Two more checks in check-lab-scripts.ps1
+### 24. Two more checks in check-lab-scripts.ps1
 
 Alongside parse errors and calls made before their definition, the checker's companion scan now
 also looks for `*-Lab*` helper functions that are called somewhere in a file but never defined
@@ -1509,7 +1928,7 @@ in it. Every migrate-step script inlines its own helpers, so a helper that exist
 `common.ps1` resolves during development and fails at run time for a learner. That class would
 otherwise reach a live run.
 
-## 25. common.ps1 and migrate-common.ps1 are gone
+### 25. common.ps1 and migrate-common.ps1 are gone
 
 Two shared files have been removed. Delete both from your checkout.
 
@@ -1538,7 +1957,7 @@ Verified after the move: no function in `deploy-lab.ps1` is called before the li
 it, and the five helpers it takes from `health.ps1` are all used after the line that
 dot-sources it.
 
-## 26. migrate-step1 no longer creates an unusable Azure Migrate project
+### 26. migrate-step1 no longer creates an unusable Azure Migrate project
 
 Generating a project key failed in the browser with:
 
@@ -1579,7 +1998,7 @@ beside `Write-NextSteps`. The companion scan in `check-lab-scripts.ps1` catches 
 repair it is the one that fails. Delete it and create a replacement in the portal under the same
 name, or use a new name.
 
-## 27. Host preparation for discovery is automated (Module 1 section 2)
+### 27. Host preparation for discovery is automated (Module 1 section 2)
 
 Deployment now applies Module 1 section 2 itself, as a new PHASE 7 in `configure-host.ps1`.
 Microsoft's table of what its host-preparation script does maps to five items; four are applied,
@@ -1617,7 +2036,7 @@ look when the appliance cannot reach the host.
 if it is skipped. Sections 2.1 and 2.2 separate Microsoft's script from what deployment did
 differently.
 
-## 28. The appliance VHD downloads during deployment
+### 28. The appliance VHD downloads during deployment
 
 The appliance VHD is published at a fixed link and does not depend on the project key - only
 *registration* does. The ~11 GB download now starts as a background job at the beginning of
@@ -1644,7 +2063,7 @@ published value - a hash is only worth something checked against the vendor's.
 The import is **not** automated. Section 3.4 still builds the VM by hand, and `migrate-step2`
 still imports it on the automated path.
 
-## 29. Every script states which module steps it completes
+### 29. Every script states which module steps it completes
 
 The scripts and the modules are run separately, so a script that silently overlaps a module
 step - or silently skips one - is a trap. Each script now carries a `MODULE COVERAGE` block in
@@ -1669,7 +2088,7 @@ Each block names the sections completed, and - more usefully - the ones NOT comp
 Every section number in these blocks was checked against the module files rather than written
 from memory.
 
-## 30. migrate-step2 checks host preparation as well as the appliance
+### 30. migrate-step2 checks host preparation as well as the appliance
 
 **The appliance was already skipped.** `migrate-step2` lists the VMs on the Hyper-V host and
 sets `$doImport` from whether the chosen name is among them. When `MigrateAppl` is already
@@ -1700,9 +2119,9 @@ The guest group memberships are not re-checked here, because this script does no
 account the lab was built with. `hyperv-prep.json` records it, which is why its presence is the
 first line of the report.
 
-## 31. Three faults found by the first real check-lab-scripts run
+### 31. Three faults found by the first real check-lab-scripts run
 
-### Encoding: four scripts could never parse in Windows PowerShell 5.1
+#### Encoding: four scripts could never parse in Windows PowerShell 5.1
 
 `migrate-step3`, `step4`, `step5` and `step6` contain box-drawing characters, emoji and curly
 quotes - 6, 785, 1509 and 1467 non-ASCII bytes - and had **no UTF-8 byte-order mark**. Windows
@@ -1724,7 +2143,7 @@ Fixed by rule, not case by case:
 
 `check-lab-scripts.ps1` now applies the same rule, so this cannot ship again.
 
-### A leaked console proxy could kill an unrelated script
+#### A leaked console proxy could kill an unrelated script
 
 ```
 Write-Host : The variable '$script:LabMaskedValues' cannot be retrieved because it has not been set.
@@ -1746,7 +2165,7 @@ carry the proxy.
 **Immediate workaround if you hit it again:** open a fresh PowerShell window. The proxy only
 exists in a session where a migrate-step script has already run.
 
-### The checker was crying wolf
+#### The checker was crying wolf
 
 It reported `Initialize-LabProgress`, `Write-LabHealth`, `Wait-LabJob`, `Wait-LabManagedSetup`
 and `Complete-LabProgress` as undefined in `deploy-lab.ps1`, and four similar in
@@ -1758,7 +2177,7 @@ The checker now follows both: it walks dot-source commands and resolves the targ
 treats the splice marker as importing `health.ps1`. A checker that reports faults which are not
 faults gets ignored, which is worse than no checker.
 
-## 32. deploy-lab.ps1 launches the same way from a window or a right-click
+### 32. deploy-lab.ps1 launches the same way from a window or a right-click
 
 **The two banner lines about the appliance store and the fixed guest disks are removed.** The
 detail is in Module 0; it does not need restating every run.
@@ -1793,7 +2212,7 @@ unable to throw; this stops it being present at all.
 The follow-up scripts were left as they are, per the priority given: deploy must be flexible,
 the rest need not be.
 
-## 33. cleanup-lab.ps1 reports what it deleted, and what it cannot
+### 33. cleanup-lab.ps1 reports what it deleted, and what it cannot
 
 **Launch resilience, matching deploy-lab.** A `trap`, an error report beside the script with
 GUIDs redacted, a pause on every exit path, and removal of any leftover console override from
@@ -1836,7 +2255,7 @@ genuinely exists.
 `.EXAMPLE` with no directive between them, so `Get-Help` ran the example text into it. It now
 sits under `.NOTES`.
 
-## 34. The static appliance link served a stale image
+### 34. The static appliance link served a stale image
 
 A deployment log showed the pre-staged appliance extracting to:
 
@@ -1859,7 +2278,7 @@ Two independent signals say that is not the current appliance:
 link the portal serves. That link came from the unmodified lab's `migrate-step2`; section 28
 propagated it into the deployment pre-stage, which is what surfaced it.
 
-### Two holes this exposed
+#### Two holes this exposed
 
 **migrate-step2 skipped verification for a pre-staged appliance.** The worker began:
 
@@ -1890,7 +2309,7 @@ still the instructor who compares it.
 link, is unverified, has been seen to be stale, and must be checked against Microsoft's published
 SHA256 before import - with the project's own download link as the correct source.
 
-### Not a fault: the host-preparation warning
+#### Not a fault: the host-preparation warning
 
 The same log showed:
 
@@ -1906,9 +2325,9 @@ enabled, WinRM scoped to 192.168.0.0/24, the discovery account in all three grou
 services on all four guests, CredSSP correctly left off. The script's own SHA256 also matched
 Microsoft's published value, so the signature and hash checks both did their job.
 
-## 35. The appliance VHD download is now opt-in, and Module 1 speaks to the learner
+### 35. The appliance VHD download is now opt-in, and Module 1 speaks to the learner
 
-### Staging the appliance is a choice, defaulting to No
+#### Staging the appliance is a choice, defaulting to No
 
 `deploy-lab.ps1` gained `-IncludeApplianceVhd` (`Yes`/`No`). When it is not supplied the script
 asks once and takes **No** on Enter. No is right for a learner: nothing in Module 0 needs the
@@ -1924,7 +2343,7 @@ Section 34's build-number heuristic still runs either way.
 `configure-host.ps1` takes both as parameters and skips the download entirely when the answer is
 No, logging that Module 1 will fetch it.
 
-### Module 1 section 2 rewritten for the learner
+#### Module 1 section 2 rewritten for the learner
 
 The section described what this lab's deployment had done. It now describes what the **learner's
 own organisation** will face, because that is the transferable part:
@@ -1944,14 +2363,14 @@ that genuinely differ - WinRM scoped to the nested subnet, and the lab user's gr
 are kept, with the scoping framed as a habit worth carrying into an engagement. The explanation
 of why the script is not driven directly is gone; it is implementation, and it is in section 27.
 
-### Section 3.3 trimmed
+#### Section 3.3 trimmed
 
 The staged-appliance warning is now a short note: the archive may already be there, it is a
 convenience rather than a verification, check it against Microsoft's published value, and where
 to go if it does not match. The observed stale-build detail moved here, to section 34, with a
 pointer for instructors. A learner needs the hash-check habit, not the incident history.
 
-### Module 0 aligned with the same principle
+#### Module 0 aligned with the same principle
 
 The student now runs **one** script. The `migrate-step1-setup-project.ps1` call was removed from
 the Step 4 block and became an instructor note: the target landing zone is still needed before
@@ -1962,7 +2381,7 @@ Two "deployment did X" phrasings in Module 1 became "our lab environment", one o
 the more useful instruction to confirm those packages exist in their own estate before relying
 on dependency analysis.
 
-## 36. Module 0 claimed NAT gateways that no script creates
+### 36. Module 0 claimed NAT gateways that no script creates
 
 Two statements in Module 0 described infrastructure that does not exist:
 
@@ -2000,7 +2419,7 @@ group and the storage account - and which it cannot: the **VNet and subnet are s
 dropdown and must already exist**. That is the constraint that decides whether the landing zone
 has to be staged in advance.
 
-## 37. Module 2 builds the landing zone; step1 becomes optional
+### 37. Module 2 builds the landing zone; step1 becomes optional
 
 Module 2 assumed a target resource group and VNet already existed, and nothing student-facing
 created them. Section 36 established why that gap was easy to miss - the Azure Migrate project
@@ -2034,7 +2453,7 @@ point at Module 2 section 4.1 as the place the decisions are actually taught.
 is reference rather than change history. It remains in `README.md` and in each script's own
 `MODULE COVERAGE` block.
 
-## 38. The lab password is entered once for the traffic mesh
+### 38. The lab password is entered once for the traffic mesh
 
 `enable-lab-traffic.ps1` asked for the lab password, and then ssh asked again for each Linux
 guest, so the same password was typed three or four times in one run.
@@ -2057,7 +2476,7 @@ written to disk. The helper file itself is deleted when the script ends.
 `sudo` does not add a prompt: the guests are provisioned with `sudo: ALL=(ALL) NOPASSWD:ALL`,
 which was verified rather than assumed.
 
-## 39. Portal navigation in Modules 2 and 3 did not match the current experience
+### 39. Portal navigation in Modules 2 and 3 did not match the current experience
 
 Module 2 section 4.2 read:
 
@@ -2091,9 +2510,9 @@ the module.
 The underlying principle, now applied consistently: describe the operation, not the label. Labels
 in this service are being actively changed.
 
-## 40. Appliance hash verification moved to the end of the run, and terminology corrected
+### 40. Appliance hash verification moved to the end of the run, and terminology corrected
 
-### The hash was being asked for before anything could be verified
+#### The hash was being asked for before anything could be verified
 
 `deploy-lab.ps1` prompted for the published SHA256 immediately after the opt-in question - before
 the download had started, let alone finished. There was nothing to compare against yet, so the
@@ -2121,7 +2540,7 @@ and the script fetches it.
 staging and deletes the archive on a mismatch, which is the right behaviour when no one is
 watching.
 
-### Two different downloads were being described with one name
+#### Two different downloads were being described with one name
 
 The prompt said "the Hyper-V appliance archive", which conflates two unrelated downloads:
 
@@ -2135,9 +2554,9 @@ There is no such thing as a "Hyper-V appliance". The prompts and parameter help 
 Section 34 named the correct link throughout, but the prompt wording did not, which is how the
 two came to look like one thing.
 
-## 41. Appliance download source, and where its hash comes from
+### 41. Appliance download source, and where its hash comes from
 
-### Source of truth
+#### Source of truth
 
 The Azure Migrate appliance VHD download link and the SHA256 it should have are published
 **together, in the same table row**, under "Verify security":
@@ -2153,7 +2572,7 @@ The Azure Migrate appliance VHD download link and the SHA256 it should have are 
 **That is the page to check first if the hash ever fails.** Both values move when Microsoft
 republishes the appliance, and they move together.
 
-### The download source changed
+#### The download source changed
 
 `aka.ms/migrate/appliance/hyperv` was inherited from the lab this was forked from. It appears in
 no Microsoft documentation, and it was observed serving a Windows Server 2016 build with hash
@@ -2171,7 +2590,7 @@ it is a redirect that resolves in a browser, and it does not appear in search re
 off the live article. If a future run downloads something unexpected, that page is the first place
 to look.
 
-### Where the hash comes from, and why it is advisory
+#### Where the hash comes from, and why it is advisory
 
 There was no published hash anywhere in the scripts before this. The host computed the SHA256 of
 whatever it downloaded; the published value only ever arrived by someone pasting it.
@@ -2194,20 +2613,20 @@ the archive on mismatch - because in that case someone has asserted what the val
 When a verified hash differs from the reference, the script says so and suggests updating the
 constant in `deploy-lab.ps1`.
 
-## Not changed
+### Not changed
 
 `cleanup-lab.ps1` and `migrate-step1` through `migrate-step6` are the supplied versions. Modules 2
 through 5 are unchanged. No rehearsal launcher is present in this lab; if one is wanted later it can
 be modelled on Pull 12's `Start-LabRehearsal.ps1`, and all references to it have been removed from
 the documentation rather than left pointing at absent files.
 
-## Known open items
+### Known open items
 
 - **README links to `docs/Module-2-HyperV-Migration.md` and `docs/Module-3-Stateful-Migration.md`.**
   Those are Pull 12's filenames; this lab carries the supplied `Module-2-Agentless-Migration.md` and
   `Module-3-Agent-Based-Migration.md`. Deferred deliberately, to be handled with the Module 2/3 work.
 
-## Verification status
+### Verification status
 
 Documentation links and heading anchors were checked programmatically, code fences balanced, and the
 gzip+base64 traffic payload round-tripped byte-for-byte through the placeholder substitution that
@@ -2218,32 +2637,3 @@ cross-file helper resolution were checked statically.
 revision. The staging preflight, PHASE 6 payload decode, settings-file load and the Node, Nginx and
 SQL portions of the traffic mesh in particular should be exercised in a training subscription before
 partner delivery.
-
-
-## Current: Appliance verification and installation correction (2026-10-05)
-
-- Removed learner VHD/guest-partition expansion and Step 2's automatic VHD resize. The
-  roughly 80 GB requirement remains: inspect capacity read-only; discrepancies require
-  instructor review of the verified package, not a learner resizing workaround. Historical
-  section 3c is superseded. Host deployment's automatic ApplianceStore partition remains.
-- Module 1 selects one explicit ZIP path and stops on a current official Hyper-V ZIP hash
-  mismatch before extraction. Rename/copy/extraction do not change source ZIP bytes;
-  recompression/internal renames do, and VHD writes are not source ZIP changes. A mismatch's
-  cause is unresolved without the exact artifact, source and actual/expected hashes.
-- Deployment rehashes the actual ZIP at the end, reports full path/bytes and cached-record
-  agreement separately, and compares any supplied expected hash before reporting MATCH.
-  Staging no longer trusts a completion marker alone or overwrites an existing ZIP by default.
-- Step 2 refuses ambiguous ZIP/disk/configuration selection and stale/unrecorded extracted
-  content; it records and rechecks extraction file hashes independently of the ZIP hash.
-  Copy-import preserves exported generation, places all destinations on the actual store,
-  checks physical copy space/headroom, renames before boot and guards DHCP/MAC conflicts.
-  Source ZIP and extraction folders are retained; no verification bypass is offered.
-- Corrected host-store versus guest capacity, UTC accuracy versus display time zone,
-  actual deployed host/Linux username, initial Tomcat labapp login versus SQL discovery
-  permissions, guest OS verification and nested-switch/WinRM/installer/project boundaries.
-
-Sources: [Microsoft appliance requirements and Verify security](https://learn.microsoft.com/en-us/azure/migrate/migrate-appliance?view=migrate),
-[Hyper-V appliance import tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-discover-hyper-v?view=migrate),
-and [Compare-VM compatibility/import parameters](https://learn.microsoft.com/en-us/powershell/module/hyper-v/compare-vm?view=windowsserver2025-ps).
-Four regression checks cover the new flow, including a fictional ZIP rename/copy/extract
-fixture; they do not validate a real Microsoft archive or execute Hyper-V/Azure/PowerShell.
