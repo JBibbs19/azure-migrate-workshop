@@ -10,8 +10,6 @@
 
 ## 1. Overview — Choosing the Right Tool: A Solution Architect's Guide
 
-**Concept:**
-
 Selecting between Azure Migrate and Azure Site Recovery (ASR) is not a feature checkbox exercise — it is an **architectural decision** that shapes your migration timeline, operational posture, and long-term DR strategy. As a Cloud Solution Architect, you evaluate both tools against business requirements, risk tolerance, and the operational maturity of the organization you are advising.
 
 ### Historical Context
@@ -41,19 +39,23 @@ Before Azure Migrate, organizations used ASR's failover workflow for lift-and-sh
 
 **Why It Matters:** Migration is a project with a cutover; DR is an ongoing recovery capability. Confusing them can leave recovery requirements unaddressed.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. In your existing lab notes, record the two purposes: **Azure Migrate — one-time server rehost**; **ASR — separately planned ongoing DR**.
-2. Record the lab scope: `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, and `OnPrem-Linux-App`, all migrated as Azure IaaS VMs.
-3. Mark ASR deployment as **not performed** in the required exercise. Section 7 is optional and limited to reviewing portal settings.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your notes distinguish the migration already performed from a possible future DR deployment.
+1.  In your existing lab notes, record the two purposes: **Azure Migrate — one-time server rehost**; **ASR — separately planned ongoing DR**.
+
+2.  Record the lab scope: `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, and `OnPrem-Linux-App`, all migrated as Azure IaaS VMs.
+
+3.  Mark ASR deployment as **not performed** in the required exercise.
+
+    Section 7 is optional and limited to reviewing portal settings.
+
+**Expected Result:** Your notes distinguish the migration already performed from a possible future DR deployment.
 
 ---
 
 ## 2. Azure Site Recovery — Architecture Deep Dive
-
-**Concept:**
 
 Understanding ASR at the infrastructure level is essential for making informed architectural recommendations. Components depend on the source environment; a VMware/physical-server diagram is not the Hyper-V architecture used in this lab.
 
@@ -148,20 +150,29 @@ ASR cost is **ongoing** for DR. Current prices, currency, entitlement, and resou
 
 **Why It Matters:** Shared replication technology does not remove scenario-specific prerequisites or establish a recovery guarantee.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Identify the Hyper-V host provider in your comparison notes; distinguish it from guest-agent replication used by other source paths.
-2. Record one RPO requirement and one RTO requirement for the sample application. Label them **requirements**, not measured results.
-3. List the prerequisites for a future DR exercise: approved subscription and permissions, supported scenario/guest configuration, target region and capacity, network isolation, storage, budget, and disposable test data.
-4. Sketch a recovery-plan sequence: SQL → Tomcat → Nginx/IIS, with SQL readiness and an order-read check before declaring the application recovered.
+**Local workstation — student notes:**
 
-**Expected Outcome:** You have a source-appropriate architecture comparison, explicit recovery objectives, and a recovery-plan outline without changing replication or protection settings.
+1.  Identify the Hyper-V host provider in your comparison notes.
+
+2.  Distinguish it from guest-agent replication used by other source paths.
+
+3.  Record one RPO requirement for the sample application.
+
+4.  Record one RTO requirement for the sample application.
+
+5.  Label them **requirements**, not measured results.
+
+6.  List the prerequisites for a future DR exercise: approved subscription and permissions, supported scenario/guest configuration, target region and capacity, network isolation, storage, budget, and disposable test data.
+
+7.  Sketch a recovery-plan sequence: SQL → Tomcat → Nginx/IIS, with SQL readiness and an order-read check before declaring the application recovered.
+
+**Expected Result:** You have a source-appropriate architecture comparison, explicit recovery objectives, and a recovery-plan outline without changing replication or protection settings.
 
 ---
 
 ## 3. Comprehensive Comparison Matrix
-
-**Concept:**
 
 This comparison is designed for architecture review boards and stakeholder discussions. It provides the foundation for an Architecture Decision Record.
 
@@ -204,19 +215,23 @@ The difference is lifecycle intent: **migrate once** versus **protect continuous
 
 **Why It Matters:** Tool comparisons need to separate capabilities from configuration already present in the lab.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Select five dimensions from the matrix that matter to this lab, including primary purpose, replication architecture, recovery plans, cost, and post-migration DR.
-2. For each, record which tool addresses the requirement and whether that capability was actually configured in Modules 0–3.
-3. Mark ASR recovery plans and ongoing Azure-to-Azure protection as **not deployed**, unless you have separate evidence from an approved exercise.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your comparison distinguishes available product features from work you actually completed.
+1.  Select five dimensions from the matrix that matter to this lab, including primary purpose, replication architecture, recovery plans, cost, and post-migration DR.
+
+2.  For each, record which tool addresses the requirement.
+
+3.  For each, record whether that capability was actually configured in Modules 0–3.
+
+4.  Mark ASR recovery plans and ongoing Azure-to-Azure protection as **not deployed**, unless you have separate evidence from an approved exercise.
+
+**Expected Result:** Your comparison distinguishes available product features from work you actually completed.
 
 ---
 
 ## 4. Decision Framework — CSA Decision Tree
-
-**Concept:**
 
 The goal is not to pick a "winner" — it is to match the tool to the scenario.
 
@@ -256,19 +271,25 @@ VM count helps plan capacity and migration waves; it is not a fixed rule that se
 
 **Why It Matters:** A recommendation needs a business purpose and evidence, rather than a server-count or replication-frequency shortcut.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Apply the tree to this four-VM lab and record **Azure Migrate for server rehosting**.
-2. Record whether future DR is required for your scenario; if it is, note the RPO/RTO, protection timing, and prerequisites from Section 2.
-3. Add a short rationale explaining why ASR is evaluated separately rather than used to migrate these VMs again.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your tool decision matches the lab's migration purpose without claiming that DR is already configured.
+1.  Apply the tree to this four-VM lab.
+
+2.  Record **Azure Migrate for server rehosting**.
+
+3.  Record whether future DR is required for your scenario.
+
+4.  If it is, note the RPO/RTO, protection timing, and prerequisites from Section 2.
+
+5.  Add a short rationale explaining why ASR is evaluated separately rather than used to migrate these VMs again.
+
+**Expected Result:** Your tool decision matches the lab's migration purpose without claiming that DR is already configured.
 
 ---
 
 ## 5. Real-World Scenario Analysis
-
-**Concept:**
 
 A CSA translates abstract decision trees into concrete recommendations. These scenarios are comparisons, not additional deployments.
 
@@ -327,19 +348,23 @@ A CSA translates abstract decision trees into concrete recommendations. These sc
 
 **Why It Matters:** Similar VM estates can require different tools because their lifecycle purpose and recovery requirements differ.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Choose two scenarios: one migration scenario and the hybrid DR scenario.
-2. Record the tool, the business purpose, one prerequisite, and one validation question for each.
-3. Compare those recommendations with the four-VM lab. Do not create resources for these scenarios.
+**Local workstation — student notes:**
 
-**Expected Outcome:** You have two short scenario recommendations with reasons, rather than an unsupported claim that one tool fits every case.
+1.  Choose two scenarios: one migration scenario and the hybrid DR scenario.
+
+2.  Record the tool, the business purpose, one prerequisite, and one validation question for each.
+
+3.  Compare those recommendations with the four-VM lab.
+
+    Do not create resources for these scenarios.
+
+**Expected Result:** You have two short scenario recommendations with reasons, rather than an unsupported claim that one tool fits every case.
 
 ---
 
 ## 6. Migration + DR Integration Strategy
-
-**Concept:**
 
 ### The Recommended Pattern
 
@@ -377,20 +402,25 @@ The migration approach remains Azure Migrate in this lab. A future ASR exercise 
 
 **Why It Matters:** A DR plan needs an acceptance test and accountable timing; simply leaving migration resources in place is not a DR strategy.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Add a migration-to-operations timeline to your notes, using the example periods only where they fit your recovery requirements.
-2. Record the proposed DR purpose, required RPO/RTO, target region/network prerequisites, and who would approve a future deployment and its costs.
-3. Include a recovery-plan acceptance check: services ready, required private-IP dependencies reachable, and an order read from the recovered application. A write test would require explicit approval and disposable data.
-4. Mark actual DR protection and recovery testing as **planned/not performed** in this exercise.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your migration/DR record includes timing, prerequisites, and a recovery test without claiming an untested protection state.
+1.  Add a migration-to-operations timeline to your notes, using the example periods only where they fit your recovery requirements.
+
+2.  Record the proposed DR purpose, required RPO/RTO, target region/network prerequisites, and who would approve a future deployment and its costs.
+
+3.  Include a recovery-plan acceptance check: services ready, required private-IP dependencies reachable, and an order read from the recovered application.
+
+    A write test would require explicit approval and disposable data.
+
+4.  Mark actual DR protection and recovery testing as **planned/not performed** in this exercise.
+
+**Expected Result:** Your migration/DR record includes timing, prerequisites, and a recovery test without claiming an untested protection state.
 
 ---
 
 ## 7. Hands-On: Understanding the ASR Setup Process
-
-**Concept:**
 
 Since all four VMs use Azure Migrate in Modules 2 and 3, this section is an **optional portal walkthrough**, not a re-migration or a requirement to deploy DR. The goal is to compare available ASR settings with the Azure Migrate experience.
 
@@ -398,54 +428,95 @@ Since all four VMs use Azure Migrate in Modules 2 and 3, this section is an **op
 
 ### 7.1 Create a Recovery Services Vault — Optional Approved Lab Only
 
-**Concept:**
-
 A **Recovery Services vault** is the management entity for ASR. It manages replication configuration and recovery operations. Vault placement depends on the selected DR scenario; it is not inferred from a resource group's name or location.
 
-**Student Actions — Optional:**
+#### Hands-On Steps — Optional
 
-1. If no dedicated lab resource creation has been approved, record **skipped — no DR resources approved** and continue to Section 8.
-2. Otherwise, open the [Azure portal](https://portal.azure.com), search **Recovery Services vaults**, and select **+ Create**.
-3. Review the following values for the separately approved scope:
+**Local workstation — student notes:**
 
-   | Setting | Value |
-   |---|---|
-   | Subscription | Approved lab subscription |
-   | Resource group | Approved dedicated DR lab resource group |
-   | Vault name | A new, uniquely named DR lab vault, such as `MigrateWorkshop-ASR-Lab-Vault` |
-   | Region | Region reviewed for the intended DR scenario |
-   | Tags | Lab owner, purpose, and environment |
+1.  If no dedicated lab resource creation has been approved, record **skipped — no DR resources approved** and continue to Section 8.
 
-4. Review permissions, region, and resource scope. If creation is not approved, **Cancel** before submitting. If it is approved, select **Review + create** → **Create** for this new vault only.
-5. Open the new vault and locate **Site Recovery**. Record its purpose separately from the migration vault.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Either no resource is created and the optional exercise is marked skipped, or one separately approved DR lab vault exists. No host or VM has been registered or protected.
+2.  Otherwise, open the [Azure portal](https://portal.azure.com).
+
+3.  Search **Recovery Services vaults**.
+
+4.  Select **+ Create**.
+
+5.  Review the following values for the separately approved scope:
+
+| Setting | Value |
+|---|---|
+| Subscription | Approved lab subscription |
+| Resource group | Approved dedicated DR lab resource group |
+| Vault name | A new, uniquely named DR lab vault, such as `MigrateWorkshop-ASR-Lab-Vault` |
+| Region | Region reviewed for the intended DR scenario |
+| Tags | Lab owner, purpose, and environment |
+
+6.  Review permissions, region, and resource scope.
+
+7.  If creation is not approved, **Cancel** before submitting.
+
+8.  If it is approved, select **Review + create** → **Create** for this new vault only.
+
+9.  Open the new vault.
+
+10. Locate **Site Recovery**.
+
+11. Record its purpose separately from the migration vault.
+
+**Expected Result:** Either no resource is created and the optional exercise is marked skipped, or one separately approved DR lab vault exists. No host or VM has been registered or protected.
 
 ### 7.2 Walk Through ASR Configuration for Hyper-V — Review and Cancel
 
-**Concept:**
-
 A Hyper-V site groups hosts for the DR source. A replication policy exposes scenario-specific frequency and recovery-point settings. These descriptions explain the workflow; they do not mean a new DR site or policy already exists.
 
-**Student Actions — Optional, Using Only the Approved New Vault:**
+#### Hands-On Steps — Optional
 
-1. Open **Site Recovery** → **Getting started**. Locate the Hyper-V-to-Azure preparation workflow, where available in the portal.
-2. Review the source-type and target-region/network fields. Record how they compare with the settings used for Azure Migrate.
-3. If a page exposes **Hyper-V site**, **Hyper-V server**, provider download, or registration-key options, note their purpose only. **Do not add a site/server, download a registration key, install a provider, or register the current host.**
-4. Review policy fields if they can be viewed without submitting configuration: copy frequency, recovery-point retention, and application-consistent snapshot frequency. Record that copy frequency alone is not achieved RPO.
-5. If a later page requires registration or an infrastructure write before showing more settings, stop there. Note the unavailable settings rather than creating prerequisites.
-6. **Cancel/close the walkthrough before any infrastructure submission, replication enablement, or Configure disaster recovery action.** Do not select current migrated VMs for protection.
-7. Record which settings you could review and confirm that no DR protection was enabled. Retain the new vault only within its approved lab resource lifecycle.
+**Local workstation — Azure portal:**
+
+1.  Open **Site Recovery** → **Getting started**.
+
+    Use only the approved new vault.
+
+2.  Locate the Hyper-V-to-Azure preparation workflow, where available in the portal.
+
+3.  Review the source-type and target-region/network fields.
+
+4.  Record how they compare with the settings used for Azure Migrate.
+
+5.  If a page exposes **Hyper-V site**, **Hyper-V server**, provider download, or registration-key options, note their purpose only.
+
+    **Do not add a site/server, download a registration key, install a provider, or register the current host.**
+
+6.  Review policy fields if they can be viewed without submitting configuration: copy frequency, recovery-point retention, and application-consistent snapshot frequency.
+
+7.  Record that copy frequency alone is not achieved RPO.
+
+8.  If a later page requires registration or an infrastructure write before showing more settings, stop there.
+
+9.  Note the unavailable settings rather than creating prerequisites.
+
+10. **Cancel/close the walkthrough before any infrastructure submission, replication enablement, or Configure disaster recovery action.**
+
+    Do not select current migrated VMs for protection.
+
+**Local workstation — student notes:**
+
+11. Record which settings you could review.
+
+12. Confirm that no DR protection was enabled.
+
+13. Retain the new vault only within its approved lab resource lifecycle.
 
 **Why It Matters:** Comparing a setup experience does not require creating a second replication architecture or changing the host that serves the migration lab.
 
-**Expected Outcome:** You can describe vault, source-site, provider, policy, and replication settings. The current Hyper-V host, migration vault, and existing protected VMs remain unchanged.
+**Expected Result:** You can describe vault, source-site, provider, policy, and replication settings. The current Hyper-V host, migration vault, and existing protected VMs remain unchanged.
 
 ---
 
 ## 8. Key Takeaways
-
-**Concept:**
 
 1. **There is no single "best" tool** — the right choice depends on the scenario, RPO/RTO requirements, and lifecycle phase.
 2. **Both tools can have a role:** Azure Migrate for the migration project, ASR for separately designed ongoing DR where required.
@@ -458,26 +529,35 @@ A Hyper-V site groups hosts for the DR source. A replication policy exposes scen
 
 **Why It Matters:** A clear decision record separates the recommendation, required student work, and optional future implementation.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Complete the ADR prompt in your existing notes using your comparison and scenario decisions.
-2. Confirm that migration purpose, DR purpose, prerequisites, RPO/RTO, recovery-plan outline, and actual completion status are recorded.
-3. Check that the record does not claim deployed ASR protection or a tested recovery time from this conceptual exercise.
+**Local workstation — student notes:**
 
-**Expected Outcome:** You have a completed comparison/decision exercise. No mandatory DR deployment has been introduced.
+1.  Complete the ADR prompt in your existing notes using your comparison and scenario decisions.
+
+2.  Confirm that migration purpose, DR purpose, prerequisites, RPO/RTO, recovery-plan outline, and actual completion status are recorded.
+
+3.  Check that the record does not claim deployed ASR protection or a tested recovery time from this conceptual exercise.
+
+**Expected Result:** You have a completed comparison/decision exercise. No mandatory DR deployment has been introduced.
 
 ---
 
 ## Next Steps
 
-**Concept:** Module 5 applies the Azure Well-Architected Framework to Day 2 operations: monitoring, data protection, security, cost, and patch assessment. Optional paid services remain subject to approved scope and budget.
+Module 5 applies the Azure Well-Architected Framework to Day 2 operations: monitoring, data protection, security, cost, and patch assessment. Optional paid services remain subject to approved scope and budget.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Proceed to **[Module 5: Post-Migration — Operational Excellence & Governance](Module-5-Post-Migration.md)**.
-2. Keep your migration/DR decision record available for the operations runbook.
+**Local workstation — workshop guide:**
 
-**Expected Outcome:** Your tool-selection record is ready to support the post-migration activities.
+1.  Proceed to **[Module 5: Post-Migration — Operational Excellence & Governance](Module-5-Post-Migration.md)**.
+
+**Local workstation — student notes:**
+
+2.  Keep your migration/DR decision record available for the operations runbook.
+
+**Expected Result:** Your tool-selection record is ready to support the post-migration activities.
 
 ---
 

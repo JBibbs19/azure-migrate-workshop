@@ -12,8 +12,6 @@
 
 ## 1. Overview — Day 2 Operations: Where Migrations Succeed or Fail
 
-**Concept:**
-
 The migration is not done at cutover. It is done when operations are **stable, secure, observable, and cost-optimized** in their new cloud environment.
 
 This module maps directly to the **Manage phase** of the Cloud Adoption Framework (CAF) and operationalizes the **Azure Well-Architected Framework (WAF)** across five pillars:
@@ -60,87 +58,142 @@ The static sites are not proof of database connectivity. `/api/health` checks ap
 
 **Why It Matters:** A known-good application baseline is needed before monitoring changes or network hardening. Module 3 contains the full migration validation and alias-repointing procedure; this module repeats only the operational checks needed before and after changes.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open **Azure portal** → **Virtual machines**. Select the actual target subscription/resource group and the four migrated VMs above, not any `-test` copies. Record each VM's power state, target region, and size.
-2. For each VM, open **Networking / Network settings** → the attached NIC → **IP configurations**. Record the actual primary private IP, subnet, NIC NSG, and subnet NSG. Use these actual target addresses throughout this module, not source-lab addresses or sample IPs.
-3. Choose an approved guest-access method: **VM → Run command → RunPowerShellScript/RunShellScript** when the Azure VM agent is ready, or approved RDP/SSH guest access. Check agent status in the VM's properties before relying on Run command. A workstation without a route to the private network cannot directly reach these addresses; lack of a public IP/FQDN is not a health failure.
-4. Confirm the local services and HTTP paths using the short checks below. Run each block **inside the named guest**, replacing placeholders before execution.
+**Local workstation — Azure portal:**
 
-   **OnPrem-Web — Windows PowerShell:**
+1.  Open **Azure portal** → **Virtual machines**.
 
-   ```powershell
-   Get-Service -Name W3SVC
-   (Invoke-WebRequest 'http://localhost/' -UseBasicParsing -TimeoutSec 10).StatusCode
-   ```
+2.  Select the actual target subscription/resource group and the four migrated VMs above, not any `-test` copies.
 
-   **OnPrem-SQL — Windows PowerShell:**
+3.  Record each VM's power state, target region, and size.
 
-   ```powershell
-   Get-Service -Name 'MSSQL$SQLEXPRESS'
-   Get-NetTCPConnection -State Listen -LocalPort 1433 |
-     Select-Object LocalAddress, LocalPort, State
-   ```
+4.  For each VM, open **Networking / Network settings** → the attached NIC → **IP configurations**.
 
-   **OnPrem-Linux-Web — shell:**
+5.  Record the actual primary private IP, subnet, NIC NSG, and subnet NSG.
 
-   ```bash
-   systemctl is-active nginx
-   curl --fail --show-error --max-time 10 http://127.0.0.1/
-   curl --fail --show-error --max-time 20 http://127.0.0.1:8080/api/ready
-   ```
+    Use these actual target addresses throughout this module, not source-lab addresses or sample IPs.
 
-   **OnPrem-Linux-App — shell:**
+6.  Choose an approved guest-access method: **VM → Run command → RunPowerShellScript/RunShellScript** when the Azure VM agent is ready, or approved RDP/SSH guest access.
 
-   ```bash
-   systemctl is-active contoso-orderdesk
-   curl --fail --show-error --max-time 10 http://127.0.0.1:3000/api/health
-   curl --fail --show-error --max-time 20 http://127.0.0.1:3000/api/ready
-   curl --fail --show-error --max-time 20 http://127.0.0.1:3000/api/orders
-   ```
+7.  Check agent status in the VM's properties before relying on Run command.
 
-5. Check the five directed application paths from their actual source guests. These are targeted connection/HTTP checks, not scans. Replace the placeholders with the private IPs collected in Step 2.
+    A workstation without a route to the private network cannot directly reach these addresses; lack of a public IP/FQDN is not a health failure.
 
-   | Run From | Destination | Required TCP Port | Purpose |
-   |---|---|---|---|
-   | `OnPrem-Web` | `OnPrem-SQL` | 1433 | Windows web-to-database path |
-   | `OnPrem-Web` | `OnPrem-Linux-App` | 3000 | Windows web-to-application path |
-   | `OnPrem-Linux-App` | `OnPrem-SQL` | 1433 | Tomcat JDBC database access |
-   | `OnPrem-Linux-App` | `OnPrem-Linux-Web` | 8080 | Application-to-Nginx proxy path |
-   | `OnPrem-Linux-Web` | `OnPrem-Linux-App` | 3000 | Nginx upstream application path |
+**OnPrem-Web (migrated) — Windows PowerShell:**
 
-   **OnPrem-Web — Windows PowerShell:**
+8.  Confirm the local services and HTTP paths using the short checks below.
 
-   ```powershell
-   $SqlIp = '<actual-SQL-private-IP>'
-   $AppIp = '<actual-Linux-App-private-IP>'
-   Test-NetConnection -ComputerName $SqlIp -Port 1433 -InformationLevel Detailed
-   Test-NetConnection -ComputerName $AppIp -Port 3000 -InformationLevel Detailed
-   Invoke-RestMethod -Uri "http://${AppIp}:3000/api/ready" -TimeoutSec 20
-   ```
+    Run each block **inside the named guest**, replacing placeholders before execution.
 
-   **OnPrem-Linux-App — shell:**
+    ```powershell
+    Get-Service -Name W3SVC
+    (Invoke-WebRequest 'http://localhost/' -UseBasicParsing -TimeoutSec 10).StatusCode
+    ```
 
-   ```bash
-   SQL_IP='<actual-SQL-private-IP>'
-   NGINX_IP='<actual-Linux-Web-private-IP>'
-   timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/1433' _ "$SQL_IP"
-   printf 'SQL TCP check exit code: %s\n' "$?"
-   curl --fail --show-error --max-time 20 "http://${NGINX_IP}:8080/api/ready"
-   ```
+**OnPrem-SQL (migrated) — Windows PowerShell:**
 
-   **OnPrem-Linux-Web — shell:**
+9.  Confirm the local services using the short checks below.
 
-   ```bash
-   APP_IP='<actual-Linux-App-private-IP>'
-   curl --fail --show-error --max-time 20 "http://${APP_IP}:3000/api/ready"
-   ```
+    ```powershell
+    Get-Service -Name 'MSSQL$SQLEXPRESS'
+    Get-NetTCPConnection -State Listen -LocalPort 1433 |
+      Select-Object LocalAddress, LocalPort, State
+    ```
 
-6. From an approved browser session in the Windows Web guest, where desktop access is available, open `http://<actual-Linux-App-private-IP>:3000/`. Confirm that the Order Desk shows customers and recent orders. This uses the Web → App path; do not open port 3000 to all clients merely to obtain a screenshot. If this browser path is unavailable, record that limitation and retain the guest HTTP results rather than claiming browser verification.
-7. **Optional write check:** Only with approved disposable lab data, submit **one** clearly labelled sample order through the Order Desk form and confirm that it appears on a subsequent read. Record its order ID, not credentials. Do not enable persistent traffic jobs or repeatedly submit the form.
-8. Record pass/fail/pending for the local services, private-IP paths, readiness, and order read. If aliases or endpoints still reference source/test VMs, return to Module 3's manual repointing steps before hardening. Repeat this baseline after Section 4 and after any later resize or patch/reboot.
+**OnPrem-Linux-Web (migrated) — SSH session:**
 
-**Expected Outcome:** You have an actual target-IP inventory and a recorded application baseline. All five required paths are checked from the correct guests; no monitoring, public endpoint, or background traffic is assumed to exist.
+10. Confirm the local services and HTTP paths using the short checks below.
+
+    ```bash
+    systemctl is-active nginx
+    curl --fail --show-error --max-time 10 http://127.0.0.1/
+    curl --fail --show-error --max-time 20 http://127.0.0.1:8080/api/ready
+    ```
+
+**OnPrem-Linux-App (migrated) — SSH session:**
+
+11. Confirm the local services and HTTP paths using the short checks below.
+
+    ```bash
+    systemctl is-active contoso-orderdesk
+    curl --fail --show-error --max-time 10 http://127.0.0.1:3000/api/health
+    curl --fail --show-error --max-time 20 http://127.0.0.1:3000/api/ready
+    curl --fail --show-error --max-time 20 http://127.0.0.1:3000/api/orders
+    ```
+
+**OnPrem-Web (migrated) — Windows PowerShell:**
+
+12. Check the five directed application paths from their actual source guests.
+
+    These are targeted connection/HTTP checks, not scans.
+
+| Run From | Destination | Required TCP Port | Purpose |
+|---|---|---|---|
+| `OnPrem-Web` | `OnPrem-SQL` | 1433 | Windows web-to-database path |
+| `OnPrem-Web` | `OnPrem-Linux-App` | 3000 | Windows web-to-application path |
+| `OnPrem-Linux-App` | `OnPrem-SQL` | 1433 | Tomcat JDBC database access |
+| `OnPrem-Linux-App` | `OnPrem-Linux-Web` | 8080 | Application-to-Nginx proxy path |
+| `OnPrem-Linux-Web` | `OnPrem-Linux-App` | 3000 | Nginx upstream application path |
+
+13. Replace the placeholders with the private IPs collected in Step 5.
+
+    ```powershell
+    $SqlIp = '<actual-SQL-private-IP>'
+    $AppIp = '<actual-Linux-App-private-IP>'
+    Test-NetConnection -ComputerName $SqlIp -Port 1433 -InformationLevel Detailed
+    Test-NetConnection -ComputerName $AppIp -Port 3000 -InformationLevel Detailed
+    Invoke-RestMethod -Uri "http://${AppIp}:3000/api/ready" -TimeoutSec 20
+    ```
+
+**OnPrem-Linux-App (migrated) — SSH session:**
+
+14. Replace the placeholders with the private IPs collected in Step 5.
+
+    ```bash
+    SQL_IP='<actual-SQL-private-IP>'
+    NGINX_IP='<actual-Linux-Web-private-IP>'
+    timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/1433' _ "$SQL_IP"
+    printf 'SQL TCP check exit code: %s\n' "$?"
+    curl --fail --show-error --max-time 20 "http://${NGINX_IP}:8080/api/ready"
+    ```
+
+**OnPrem-Linux-Web (migrated) — SSH session:**
+
+15. Replace the placeholder with the private IP collected in Step 5.
+
+    ```bash
+    APP_IP='<actual-Linux-App-private-IP>'
+    curl --fail --show-error --max-time 20 "http://${APP_IP}:3000/api/ready"
+    ```
+
+**OnPrem-Web (migrated) — browser:**
+
+16. From an approved browser session in the Windows Web guest, where desktop access is available, open `http://<actual-Linux-App-private-IP>:3000/`.
+
+17. Confirm that the Order Desk shows customers and recent orders.
+
+    This uses the Web → App path; do not open port 3000 to all clients merely to obtain a screenshot.
+
+    If this browser path is unavailable, record that limitation and retain the guest HTTP results rather than claiming browser verification.
+
+18. **Optional write check:** Only with approved disposable lab data, submit **one** clearly labelled sample order through the Order Desk form.
+
+19. Confirm that it appears on a subsequent read.
+
+20. Record its order ID, not credentials.
+
+    Do not enable persistent traffic jobs or repeatedly submit the form.
+
+**Local workstation — student notes:**
+
+21. Record pass/fail/pending for the local services, private-IP paths, readiness, and order read.
+
+    If aliases or endpoints still reference source/test VMs, return to Module 3's manual repointing steps before hardening.
+
+    Repeat this baseline after Section 4 and after any later resize or patch/reboot.
+
+**Expected Result:** You have an actual target-IP inventory and a recorded application baseline. All five required paths are checked from the correct guests; no monitoring, public endpoint, or background traffic is assumed to exist.
 
 ---
 
@@ -148,13 +201,9 @@ The static sites are not proof of database connectivity. `/api/health` checks ap
 
 > **WAF Pillar: Operational Excellence**
 
-**Concept:**
-
 Monitoring is not "install an agent and set some alerts." An observability strategy defines *what* you measure, *why* you measure it, *who* responds, and *how fast*.
 
 ### 2.1 Azure Monitor Architecture — The Modern Approach
-
-**Concept:**
 
 The modern guest-log collection architecture uses **Data Collection Rules (DCRs)** and the **Azure Monitor Agent (AMA)**. A DCR defines sources and destinations; a **DCR association connects a VM to that rule**. A rule without the VM association does not collect that VM's guest data.
 
@@ -182,42 +231,69 @@ Platform metrics are available independently of AMA. Guest memory counters and g
 
 **Why It Matters:** Installing AMA or creating an empty DCR alone is not evidence that the expected data is arriving.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open one migrated VM → **Monitoring** → **Metrics**. Select **Percentage CPU**, a recent time range, and an appropriate aggregation. Review the chart and repeat for the other three VMs.
-2. Record the observed metric/time range. A new VM may have only a short history; do not invent a multi-week baseline.
-3. Confirm the lab's approved monitoring resource group, region, permissions, retention, and ingestion budget before creating the workspace and rules below. If these are unavailable, record the collection exercise as not completed rather than claiming it was configured.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Platform-metric review is recorded, and guest collection is identified as a separate student configuration activity.
+1.  Open one migrated VM → **Monitoring** → **Metrics**.
+
+2.  Select **Percentage CPU**, a recent time range, and an appropriate aggregation.
+
+3.  Review the chart.
+
+4.  Repeat for the other three VMs.
+
+**Local workstation — student notes:**
+
+5.  Record the observed metric/time range.
+
+    A new VM may have only a short history; do not invent a multi-week baseline.
+
+6.  Confirm the lab's approved monitoring resource group, region, permissions, retention, and ingestion budget before creating the workspace and rules below.
+
+    If these are unavailable, record the collection exercise as not completed rather than claiming it was configured.
+
+**Expected Result:** Platform-metric review is recorded, and guest collection is identified as a separate student configuration activity.
 
 ### 2.2 Create a Log Analytics Workspace
 
-**Concept:**
-
 A Log Analytics workspace is the destination for the guest logs and performance data selected in the DCRs. Ingestion and retention settings affect cost.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Search **Log Analytics workspaces** in the portal → **+ Create**.
-2. Configure the approved values:
+**Local workstation — Azure portal:**
 
-   | Setting | Value |
-   |---|---|
-   | Subscription | Approved lab subscription |
-   | Resource group | Actual target lab resource group |
-   | Name | Unique lab name, such as `law-migrate-workshop` |
-   | Region | Reviewed region for this lab's monitoring data |
-   | Tags | Existing lab ownership/environment conventions |
+1.  Search **Log Analytics workspaces** in the portal.
 
-3. Select **Review + create** → **Create**. Open the workspace after deployment completes.
-4. Review **Usage and estimated costs** and the available retention settings. Keep the agreed settings; do not expand collection or retention without an approved budget.
-5. Record the workspace name and resource ID for the next step. If an approved workspace already exists, verify its scope and use it rather than creating a duplicate.
+2.  Select **+ Create**.
 
-**Expected Outcome:** An approved workspace is available and identified; no guest collection is claimed yet.
+3.  Configure the approved values:
+
+| Setting | Value |
+|---|---|
+| Subscription | Approved lab subscription |
+| Resource group | Actual target lab resource group |
+| Name | Unique lab name, such as `law-migrate-workshop` |
+| Region | Reviewed region for this lab's monitoring data |
+| Tags | Existing lab ownership/environment conventions |
+
+4.  Select **Review + create** → **Create**.
+
+5.  Open the workspace after deployment completes.
+
+6.  Review **Usage and estimated costs** and the available retention settings.
+
+    Keep the agreed settings; do not expand collection or retention without an approved budget.
+
+**Local workstation — student notes:**
+
+7.  Record the workspace name and resource ID for the next step.
+
+    If an approved workspace already exists, verify its scope and use it rather than creating a duplicate.
+
+**Expected Result:** An approved workspace is available and identified; no guest collection is claimed yet.
 
 ### 2.3 Configure Data Collection Rules and Associate the VMs
-
-**Concept:**
 
 DCRs define what telemetry to collect and where to deliver it. Separate Windows and Linux rules keep this exercise's sources and VM associations clear. The portal's DCR resource workflow can deploy AMA to the selected Azure VMs.
 
@@ -228,60 +304,136 @@ DCRs define what telemetry to collect and where to deliver it. Separate Windows 
 
 These are bounded baseline sources, not complete application instrumentation. IIS/Nginx text logs, SQL-specific counters, and Tomcat/JVM application telemetry require additional source-specific collection if later approved. Linux Syslog collection does not automatically collect every systemd journal entry.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. For the selected VMs, review **Identity** and the managed-identity requirement shown by the collection workflow. With the required permission, enable the approved system-assigned identity if needed; otherwise use the lab's approved identity configuration. Do not change unrelated identities or subscription-wide permissions.
-2. Search **Monitor** → **Data Collection Rules** → **+ Create**. Enter `dcr-migrate-windows` (or a unique equivalent), the approved subscription/resource group/region, and **Windows** as the platform type.
-3. On **Resources**, select **Add resources** and select **only** `OnPrem-Web` and `OnPrem-SQL`. Review the AMA installation/identity choice presented by the wizard. Adding these resources establishes the required VM-to-DCR associations when the rule is saved.
-4. On **Collect and deliver**, add **Performance Counters** using the supported basic preset/counters shown for Windows, including CPU and available memory where offered. Set the destination to **Azure Monitor Logs** and select the workspace from Section 2.2.
-5. Add **Windows Event Logs** for **Application** and **System**, selecting Warning, Error, and Critical levels. Select the same workspace as destination. Do not select every channel or verbose level by default.
-6. Select **Review + create** → **Create**. Open the saved rule → **Resources** and confirm that both Windows VM resource IDs are listed.
-7. Repeat **Create** for `dcr-migrate-linux`, platform **Linux**, and associate **only** `OnPrem-Linux-Web` and `OnPrem-Linux-App` under **Resources**.
-8. Add supported basic Linux **Performance Counters**, then **Linux Syslog** for the selected facilities at Warning and more severe levels. Select the same workspace as the destination for both sources, then **Review + create** → **Create**.
-9. Open the saved Linux rule → **Resources** and confirm both Ubuntu VM resource IDs. Review **Data sources** and destinations on both saved rules. If a source was not offered or not selected, record it as absent rather than claiming it is collected.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Each of the four VMs is explicitly associated with an OS-appropriate DCR that has configured sources and the intended workspace destination.
+1.  For the selected VMs, review **Identity** and the managed-identity requirement shown by the collection workflow.
+
+2.  With the required permission, enable the approved system-assigned identity if needed; otherwise use the lab's approved identity configuration.
+
+    Do not change unrelated identities or subscription-wide permissions.
+
+3.  Search **Monitor** → **Data Collection Rules** → **+ Create**.
+
+4.  Enter `dcr-migrate-windows` (or a unique equivalent), the approved subscription/resource group/region, and **Windows** as the platform type.
+
+5.  On **Resources**, select **Add resources**.
+
+6.  Select **only** `OnPrem-Web` and `OnPrem-SQL`.
+
+7.  Review the AMA installation/identity choice presented by the wizard.
+
+    Adding these resources establishes the required VM-to-DCR associations when the rule is saved.
+
+8.  On **Collect and deliver**, add **Performance Counters** using the supported basic preset/counters shown for Windows, including CPU and available memory where offered.
+
+9.  Set the destination to **Azure Monitor Logs** and select the workspace from Section 2.2.
+
+10. Add **Windows Event Logs** for **Application** and **System**, selecting Warning, Error, and Critical levels.
+
+11. Select the same workspace as destination.
+
+    Do not select every channel or verbose level by default.
+
+12. Select **Review + create** → **Create**.
+
+13. Open the saved rule → **Resources**.
+
+14. Confirm that both Windows VM resource IDs are listed.
+
+15. Repeat **Create** for `dcr-migrate-linux`, platform **Linux**.
+
+16. Associate **only** `OnPrem-Linux-Web` and `OnPrem-Linux-App` under **Resources**.
+
+17. Add supported basic Linux **Performance Counters**.
+
+18. Add **Linux Syslog** for the selected facilities at Warning and more severe levels.
+
+19. Select the same workspace as the destination for both sources.
+
+20. Select **Review + create** → **Create**.
+
+21. Open the saved Linux rule → **Resources**.
+
+22. Confirm both Ubuntu VM resource IDs.
+
+23. Review **Data sources** and destinations on both saved rules.
+
+    If a source was not offered or not selected, record it as absent rather than claiming it is collected.
+
+**Expected Result:** Each of the four VMs is explicitly associated with an OS-appropriate DCR that has configured sources and the intended workspace destination.
 
 ### 2.4 Install/Verify Azure Monitor Agent and Check Data Arrival
 
-**Concept:**
-
 AMA runs on each selected guest and uses its associated rule. Successful extension deployment is a prerequisite, not a guarantee that telemetry has already arrived.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open each VM → **Extensions + applications**. Confirm `AzureMonitorWindowsAgent` on the two Windows VMs and `AzureMonitorLinuxAgent` on the two Ubuntu VMs, with successful provisioning. If missing after DCR creation, return to the rule's **Resources** workflow and complete its AMA deployment option for that VM. Do not install a different legacy monitoring agent.
-2. Recheck that the VM resource IDs appear under the correct DCR's **Resources**, and that the rule routes to the correct workspace. Record any missing identity, extension, association, or destination as incomplete.
-3. Allow for collection and ingestion delay. Open the workspace → **Logs**, set a time range that includes the collection start, and run:
+**Local workstation — Azure portal:**
 
-   ```kusto
-   Heartbeat
-   | where TimeGenerated > ago(1h)
-   | summarize LastSeen = max(TimeGenerated) by Computer, _ResourceId
-   | order by Computer asc
-   ```
+1.  Open each VM → **Extensions + applications**.
 
-4. Compare the returned resource IDs with your four-VM inventory, rather than relying only on computer names. Record the latest observed timestamp for each VM. If the lab has been collecting longer, adjust the query/time range deliberately.
-5. For the configured performance source, run:
+2.  Confirm `AzureMonitorWindowsAgent` on the two Windows VMs and `AzureMonitorLinuxAgent` on the two Ubuntu VMs, with successful provisioning.
 
-   ```kusto
-   Perf
-   | where TimeGenerated > ago(1h)
-   | summarize Samples = count(), LastSeen = max(TimeGenerated)
-       by Computer, ObjectName, CounterName
-   | order by Computer asc, CounterName asc
-   ```
+    If missing after DCR creation, return to the rule's **Resources** workflow and complete its AMA deployment option for that VM.
 
-6. If guest events have arrived, open the **Event** table for Windows and **Syslog** for Linux in the workspace and review a small recent sample. Warning-level events may not occur during a short lab. Do not generate failures just to populate a table or claim that a missing table contains data.
-7. If data is not yet present, record **pending — no arrival verified**, recheck the four configuration points above, and revisit after ingestion has had time to occur. Keep the platform-metric result separate from guest-log verification; an empty result is not a successful collection check.
+    Do not install a different legacy monitoring agent.
+
+3.  Recheck that the VM resource IDs appear under the correct DCR's **Resources**, and that the rule routes to the correct workspace.
+
+4.  Record any missing identity, extension, association, or destination as incomplete.
+
+5.  Allow for collection and ingestion delay.
+
+6.  Open the workspace → **Logs**.
+
+7.  Set a time range that includes the collection start, and run:
+
+    ```kusto
+    Heartbeat
+    | where TimeGenerated > ago(1h)
+    | summarize LastSeen = max(TimeGenerated) by Computer, _ResourceId
+    | order by Computer asc
+    ```
+
+8.  Compare the returned resource IDs with your four-VM inventory, rather than relying only on computer names.
+
+9.  Record the latest observed timestamp for each VM.
+
+    If the lab has been collecting longer, adjust the query/time range deliberately.
+
+10. For the configured performance source, run:
+
+    ```kusto
+    Perf
+    | where TimeGenerated > ago(1h)
+    | summarize Samples = count(), LastSeen = max(TimeGenerated)
+        by Computer, ObjectName, CounterName
+    | order by Computer asc, CounterName asc
+    ```
+
+11. If guest events have arrived, open the **Event** table for Windows and **Syslog** for Linux in the workspace.
+
+12. Review a small recent sample.
+
+    Warning-level events may not occur during a short lab.
+
+    Do not generate failures just to populate a table or claim that a missing table contains data.
+
+13. If data is not yet present, record **pending — no arrival verified**.
+
+14. Recheck the four configuration points above.
+
+15. Revisit after ingestion has had time to occur.
+
+    Keep the platform-metric result separate from guest-log verification; an empty result is not a successful collection check.
 
 **Why It Matters:** Actual timestamps and resource IDs prove collection more reliably than a saved rule or an extension success message.
 
-**Expected Outcome:** You have either verified actual Heartbeat/performance/log arrivals for the selected sources or recorded the specific pending/incomplete status. Central collection of existing application files/journals is not implied.
+**Expected Result:** You have either verified actual Heartbeat/performance/log arrivals for the selected sources or recorded the specific pending/incomplete status. Central collection of existing application files/journals is not implied.
 
 ### 2.5 Alert Strategy — Avoiding Alert Fatigue
-
-**Concept:**
 
 If every alert fires, no alert matters. Useful alerts drive **action**, not noise.
 
@@ -297,17 +449,49 @@ If every alert fires, no alert matters. Useful alerts drive **action**, not nois
 
 CPU platform metrics are suitable for the basic alert exercise. Guest-disk, HTTP error-rate, and backup alerts need their relevant telemetry or protection configuration first. An action-group notification test validates delivery, not application outage detection.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. With approved alerting scope/cost, open **Monitor** → **Alerts** → **+ Create** → **Alert rule**.
-2. Set **Scope** to one migrated VM. Choose the platform signal **Percentage CPU**, condition **Greater than 90%**, aggregation **Average**, over a five-minute window (or the equivalent options shown). Use these as lab example thresholds, not a production response guarantee.
-3. Under **Actions**, create/select an approved action group such as `ag-migrate-warning`. Add an email notification to a lab-approved recipient. Do not add billable SMS or external webhooks without approval.
-4. Set a clear rule name, severity **2 — Warning**, the approved resource group, and a description naming the response action. Review the estimated charges and select **Create** only within the approved scope.
-5. Open the action group → **Test**, select the email notification type, send a test, and confirm receipt. Record the result separately from whether the CPU rule has fired.
-6. Repeat for the other migrated VMs if approved. Do not force CPU load or stop services to trigger a notification.
-7. Record any additional desired alerts and their prerequisites, for example backup failure only after backup is configured, or HTTP errors only after the application log source is configured.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Your alert record identifies actual rule scope, threshold, severity, recipient, and notification-test status. Uncreated rules or unavailable signals are marked deferred rather than assumed active.
+1.  With approved alerting scope/cost, open **Monitor** → **Alerts** → **+ Create** → **Alert rule**.
+
+2.  Set **Scope** to one migrated VM.
+
+3.  Choose the platform signal **Percentage CPU**, condition **Greater than 90%**, aggregation **Average**, over a five-minute window (or the equivalent options shown).
+
+    Use these as lab example thresholds, not a production response guarantee.
+
+4.  Under **Actions**, create/select an approved action group such as `ag-migrate-warning`.
+
+5.  Add an email notification to a lab-approved recipient.
+
+    Do not add billable SMS or external webhooks without approval.
+
+6.  Set a clear rule name, severity **2 — Warning**, the approved resource group, and a description naming the response action.
+
+7.  Review the estimated charges.
+
+8.  Select **Create** only within the approved scope.
+
+9.  Open the action group → **Test**.
+
+10. Select the email notification type.
+
+11. Send a test.
+
+12. Confirm receipt.
+
+    Record the result separately from whether the CPU rule has fired.
+
+13. Repeat for the other migrated VMs if approved.
+
+    Do not force CPU load or stop services to trigger a notification.
+
+**Local workstation — student notes:**
+
+14. Record any additional desired alerts and their prerequisites, for example backup failure only after backup is configured, or HTTP errors only after the application log source is configured.
+
+**Expected Result:** Your alert record identifies actual rule scope, threshold, severity, recipient, and notification-test status. Uncreated rules or unavailable signals are marked deferred rather than assumed active.
 
 ---
 
@@ -315,13 +499,9 @@ CPU platform metrics are suitable for the basic alert exercise. Guest-disk, HTTP
 
 > **WAF Pillar: Reliability**
 
-**Concept:**
-
 Backup is the minimum viable data protection. A complete strategy includes policies aligned to RPO, tested restore procedures, and DR planning. Backup retention and backup frequency are different settings.
 
 ### 3.1 Backup Policy Design — RPO-Based Thinking
-
-**Concept:**
 
 The business question is: **How much data can you afford to lose?** A daily backup does not satisfy a one-hour RPO just because its retention is 30 days.
 
@@ -334,78 +514,157 @@ The business question is: **How much data can you afford to lose?** A daily back
 
 Thirty-day daily retention is a lab example, not a universal compliance requirement. Actual recovery-point age and a successful restore determine what can be recovered.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Record required RPO and RTO for the sample application using your Module 4 decision record.
-2. Record which parts are VM/configuration recovery and which depend on the `ContosoApp` database.
-3. Choose whether to perform the optional backup exercise below. Confirm permissions, eligible VM configuration, region, storage/retention charges, and approved budget **before** creating or enabling protection. Otherwise mark backup implementation **deferred** and retain the policy design.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your protection record states requirements, a policy proposal, and whether backup configuration is approved; it does not claim an unsupported hourly RPO.
+1.  Record required RPO and RTO for the sample application using your Module 4 decision record.
+
+2.  Record which parts are VM/configuration recovery and which depend on the `ContosoApp` database.
+
+3.  Choose whether to perform the optional backup exercise below.
+
+4.  Confirm permissions, eligible VM configuration, region, storage/retention charges, and approved budget **before** creating or enabling protection.
+
+    Otherwise mark backup implementation **deferred** and retain the policy design.
+
+**Expected Result:** Your protection record states requirements, a policy proposal, and whether backup configuration is approved; it does not claim an unsupported hourly RPO.
 
 ### 3.2 Create a Recovery Services Vault and Backup Policy — Optional
 
-**Concept:**
-
 Azure VM backup uses a supported Recovery Services vault and policy. This exercise uses a **new dedicated backup vault**, not the Azure Migrate-created migration vault and not the optional ASR comparison vault. No source Hyper-V registration is required for backing up the migrated Azure VMs.
 
-**Student Actions — Optional, Approved Scope Only:**
+#### Hands-On Steps — Optional, Approved Scope Only
 
-1. Search **Recovery Services vaults** → **+ Create**. Select the approved subscription, dedicated lab resource group, and a unique backup name such as `MigrateWorkshop-Backup-Vault`.
-2. Select the same region as the Azure VMs to be backed up. Apply the lab ownership/environment tags. Review the vault's redundancy, security, and retention implications before proceeding; do not rely on immediate deletion of protected data to end all charges.
-3. Select **Review + create** → **Create**, then open the new vault.
-4. Open **Backup policies** → **+ Add**, select **Azure Virtual Machine**, and choose a policy type offered for the selected VMs.
-5. Set a lab policy such as the following, using the supported options shown:
+**Local workstation — Azure portal:**
 
-   | Setting | Example Lab Value |
-   |---|---|
-   | Policy name | `DailyBackup-30DayRetention` |
-   | Schedule | Daily, at an approved off-peak time; record the time zone |
-   | Daily recovery-point retention | 30 days, only if approved |
-   | Instant-restore retention | Supported default or approved value shown |
-   | Weekly/monthly/yearly retention | No additional long-term retention unless approved |
+1.  Search **Recovery Services vaults** → **+ Create**.
 
-6. Review the policy and select **Create**. Record the actual vault name, policy, schedule/time zone, retention, and approved VM scope.
+2.  Select the approved subscription, dedicated lab resource group, and a unique backup name such as `MigrateWorkshop-Backup-Vault`.
 
-**Expected Outcome:** A separate approved Azure VM backup vault/policy exists, or this optional activity is explicitly deferred. Migration and DR resources remain unchanged.
+3.  Select the same region as the Azure VMs to be backed up.
+
+4.  Apply the lab ownership/environment tags.
+
+5.  Review the vault's redundancy, security, and retention implications before proceeding.
+
+    Do not rely on immediate deletion of protected data to end all charges.
+
+6.  Select **Review + create** → **Create**.
+
+7.  Open the new vault.
+
+8.  Open **Backup policies** → **+ Add**.
+
+9.  Select **Azure Virtual Machine**.
+
+10. Choose a policy type offered for the selected VMs.
+
+11. Set a lab policy such as the following, using the supported options shown:
+
+| Setting | Example Lab Value |
+|---|---|
+| Policy name | `DailyBackup-30DayRetention` |
+| Schedule | Daily, at an approved off-peak time; record the time zone |
+| Daily recovery-point retention | 30 days, only if approved |
+| Instant-restore retention | Supported default or approved value shown |
+| Weekly/monthly/yearly retention | No additional long-term retention unless approved |
+
+12. Review the policy.
+
+13. Select **Create**.
+
+**Local workstation — student notes:**
+
+14. Record the actual vault name, policy, schedule/time zone, retention, and approved VM scope.
+
+**Expected Result:** A separate approved Azure VM backup vault/policy exists, or this optional activity is explicitly deferred. Migration and DR resources remain unchanged.
 
 ### 3.3 Enable Backup for the Approved VMs — Optional
 
-**Concept:**
-
 Enabling a policy schedules protection; it does not mean an initial recovery point already exists.
 
-**Student Actions — Optional:**
+#### Hands-On Steps — Optional
 
-1. In the new backup vault, select **Backup** → workload location **Azure** → **Virtual machine**.
-2. Select the policy from Section 3.2 → **Add**. Review the eligible migrated VM list and select only the approved scope. If the budget covers all four, select `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, and `OnPrem-Linux-App`; otherwise record the chosen subset.
-3. Check the listed VM names/resource IDs against the target inventory, not the `-test` VMs. Review any eligibility message before continuing.
-4. Select **Enable backup**. Open **Backup items** → **Azure Virtual Machine** and inspect each selected item's status.
-5. Record enabled/pending/failed separately for each VM. Do not record a successful recovery point until Section 3.4 verifies one.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Backup configuration status is recorded for the approved VMs without confusing policy enablement with completed backup protection.
+1.  In the new backup vault, select **Backup**.
+
+2.  Select workload location **Azure** → **Virtual machine**.
+
+3.  Select the policy from Section 3.2 → **Add**.
+
+4.  Review the eligible migrated VM list and select only the approved scope.
+
+    If the budget covers all four, select `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, and `OnPrem-Linux-App`; otherwise record the chosen subset.
+
+5.  Check the listed VM names/resource IDs against the target inventory, not the `-test` VMs.
+
+6.  Review any eligibility message before continuing.
+
+7.  Select **Enable backup**.
+
+8.  Open **Backup items** → **Azure Virtual Machine**.
+
+9.  Inspect each selected item's status.
+
+10. Record enabled/pending/failed separately for each VM.
+
+    Do not record a successful recovery point until Section 3.4 verifies one.
+
+**Expected Result:** Backup configuration status is recorded for the approved VMs without confusing policy enablement with completed backup protection.
 
 ### 3.4 Trigger and Verify a Backup — Optional
 
-**Concept:**
-
 A completed backup and an isolated restore test provide different evidence. An in-progress job is not a verified recovery point.
 
-**Student Actions — Optional:**
+#### Hands-On Steps — Optional
 
-1. In the backup vault → **Backup items** → **Azure Virtual Machine**, select an approved protected VM, such as `OnPrem-Web`.
-2. Select **Backup now**, choose an approved retain-until date within the lab policy, and confirm.
-3. Open **Backup jobs**, select the new job, and review its detailed status. Initial snapshot and transfer can take time; record **in progress** if it has not completed by the end of the session.
-4. After completion, return to the backup item → **Recovery points**. Record the actual recovery-point timestamp and consistency type reported. Do not assume application consistency for every VM or SQL installation.
-5. **Optional isolated restore test:** With separately approved compute/storage/network cost, select **Restore VM** from a verified recovery point. Choose **Create new** or **Restore disks** as appropriate, a distinct restore name, and an approved isolated recovery VNet/subnet. Do not replace the current VM, overwrite source data, or connect a duplicate application to the live/source database.
-6. If a restore is performed, validate only within the isolated recovery environment and record the result. Record the approved retention/cleanup decision for the restore resources; do not delete existing source or migration resources as part of this exercise.
+**Local workstation — Azure portal:**
+
+1.  In the backup vault → **Backup items** → **Azure Virtual Machine**, select an approved protected VM, such as `OnPrem-Web`.
+
+2.  Select **Backup now**.
+
+3.  Choose an approved retain-until date within the lab policy.
+
+4.  Confirm.
+
+5.  Open **Backup jobs**.
+
+6.  Select the new job.
+
+7.  Review its detailed status.
+
+    Initial snapshot and transfer can take time; record **in progress** if it has not completed by the end of the session.
+
+8.  After completion, return to the backup item → **Recovery points**.
+
+9.  Record the actual recovery-point timestamp and consistency type reported.
+
+    Do not assume application consistency for every VM or SQL installation.
+
+10. **Optional isolated restore test:** With separately approved compute/storage/network cost, select **Restore VM** from a verified recovery point.
+
+11. Choose **Create new** or **Restore disks** as appropriate, a distinct restore name, and an approved isolated recovery VNet/subnet.
+
+    Do not replace the current VM, overwrite source data, or connect a duplicate application to the live/source database.
+
+12. If a restore is performed, validate only within the isolated recovery environment.
+
+**Local workstation — student notes:**
+
+13. Record the result.
+
+14. Record the approved retention/cleanup decision for the restore resources.
+
+    Do not delete existing source or migration resources as part of this exercise.
 
 **Why It Matters:** The evidence is a completed job plus an actual recovery point; a restore test is additional evidence, not something inferred from a green configuration screen.
 
-**Expected Outcome:** Your record contains the actual job and recovery-point status, or a clear pending/deferred result. A restore is claimed only if the optional isolated test was completed.
+**Expected Result:** Your record contains the actual job and recovery-point status, or a clear pending/deferred result. A restore is claimed only if the optional isolated test was completed.
 
 ### 3.5 SQL Server Backup Considerations
-
-**Concept:**
 
 `OnPrem-SQL` runs **SQL Server Express 2022**. SQL Express has no SQL Server Agent for scheduled SQL Agent jobs. VM backup consistency depends on the actual guest/application backup outcome; it is not a blanket SQL workload-backup or application-consistency guarantee.
 
@@ -415,35 +674,61 @@ A completed backup and an isolated restore test provide different evidence. An i
 | **Native SQL full backup** | Separately approved manual database task, with protected backup storage and a restore test |
 | **SQL workload backup services** | Separate support/edition/configuration review; not assumed enabled or supported by this exercise |
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Record SQL Express as the database edition and distinguish VM recovery from database-level recovery.
-2. If native SQL backup is separately approved, use an approved guest session on `OnPrem-SQL`: **SQL Server Management Studio** → **Databases** → **ContosoApp** → **Tasks** → **Back Up**. Select **Full**, select an approved disk path writable by the SQL service, and review the destination before selecting **OK**.
-3. If performed, verify the backup task's result and record how the backup will be held in approved private storage. Do not publish the backup, embed credentials, or create a SQL Agent job.
-4. Record database restore testing as a separate isolated activity if not performed. Do not infer a database RPO from the presence of a `.bak` file alone.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your notes accurately describe SQL Express protection and any actual manual backup result, without claiming a SQL workload-backup service or SQL Agent schedule.
+1.  Record SQL Express as the database edition.
+
+2.  Distinguish VM recovery from database-level recovery.
+
+**OnPrem-SQL (migrated) — SQL Server Management Studio:**
+
+3.  If native SQL backup is separately approved, use an approved guest session on `OnPrem-SQL`.
+
+4.  Open **SQL Server Management Studio** → **Databases** → **ContosoApp** → **Tasks** → **Back Up**.
+
+5.  Select **Full**.
+
+6.  Select an approved disk path writable by the SQL service.
+
+7.  Review the destination before selecting **OK**.
+
+8.  If performed, verify the backup task's result.
+
+**Local workstation — student notes:**
+
+9.  Record how the backup will be held in approved private storage.
+
+    Do not publish the backup, embed credentials, or create a SQL Agent job.
+
+10. Record database restore testing as a separate isolated activity if not performed.
+
+    Do not infer a database RPO from the presence of a `.bak` file alone.
+
+**Expected Result:** Your notes accurately describe SQL Express protection and any actual manual backup result, without claiming a SQL workload-backup service or SQL Agent schedule.
 
 ### 3.6 Disaster Recovery — Tie Back to Module 4
 
-**Concept:**
-
 Azure-to-Azure ASR can be evaluated for cross-region DR after migration. It requires a separate design for region, network, support, capacity, costs, replication, and recovery plans. The stabilization timing in Module 4 is an example; business recovery requirements determine protection timing.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Bring forward your Module 4 DR purpose, RPO/RTO, prerequisites, and recovery-plan outline.
-2. Record DR implementation as **not performed** in this module, unless separately approved and evidenced outside the required exercise. Do not select **Configure disaster recovery** on the current VMs for this comparison.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Backup activity and future DR planning are distinct, with no assumption that migration replication continues as DR.
+1.  Bring forward your Module 4 DR purpose, RPO/RTO, prerequisites, and recovery-plan outline.
+
+2.  Record DR implementation as **not performed** in this module, unless separately approved and evidenced outside the required exercise.
+
+    Do not select **Configure disaster recovery** on the current VMs for this comparison.
+
+**Expected Result:** Backup activity and future DR planning are distinct, with no assumption that migration replication continues as DR.
 
 ---
 
 ## 4. Security Hardening — Zero Trust Approach
 
 > **WAF Pillar: Security**
-
-**Concept:**
 
 Migrated workloads carry their on-premises security posture into the cloud. Hardening applies Zero Trust principles: verify explicitly, use least-privilege access, and assume breach. The immediate lab objective is role-specific access without breaking the existing application.
 
@@ -465,38 +750,71 @@ Review optional flow logging, Bastion/JIT, and Defender scope
 
 ### 4.1 Network Security — NSG Design Principles
 
-**Concept:**
-
 The foundational rule is default-deny inbound with explicit allows per workload role. Both NIC and subnet NSGs apply, and an allow in one does not override a deny in the other. Outbound policy, routes, and guest firewalls also affect connectivity.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Confirm that Section 1's baseline and actual target private-IP inventory are current.
-2. Open each VM → **Networking / Network settings** and its NIC. Review the **Effective security rules** view and the associated NSG's **Inbound security rules** and **Outbound security rules**.
-3. Open the VNet → **Subnets** → the VM's subnet and review any subnet NSG. Record existing allow/deny priorities, rules relevant to the five application paths, and the approved management path.
-4. Identify whether a NIC NSG is dedicated to one VM or shared. Do not change unrelated/shared NSGs or delete all custom rules. If a shared policy needs a change beyond your approved scope, record the blocker rather than editing it.
-5. Keep portal **Run command** available where the agent is ready while changing guest management access. It is a control-plane guest-command path, not an inbound RDP/SSH rule; it does not remove the need to verify network access.
+**Local workstation — student notes:**
 
-**Expected Outcome:** You have a before-change record of NIC/subnet policy, relevant priorities, and a usable management method.
+1.  Confirm that Section 1's baseline and actual target private-IP inventory are current.
+
+**Local workstation — Azure portal:**
+
+2.  Open each VM → **Networking / Network settings** and its NIC.
+
+3.  Review the **Effective security rules** view.
+
+4.  Review the associated NSG's **Inbound security rules** and **Outbound security rules**.
+
+5.  Open the VNet → **Subnets** → the VM's subnet.
+
+6.  Review any subnet NSG.
+
+7.  Record existing allow/deny priorities, rules relevant to the five application paths, and the approved management path.
+
+8.  Identify whether a NIC NSG is dedicated to one VM or shared.
+
+    Do not change unrelated/shared NSGs or delete all custom rules.
+
+    If a shared policy needs a change beyond your approved scope, record the blocker rather than editing it.
+
+9.  Keep portal **Run command** available where the agent is ready while changing guest management access.
+
+    It is a control-plane guest-command path, not an inbound RDP/SSH rule; it does not remove the need to verify network access.
+
+**Expected Result:** You have a before-change record of NIC/subnet policy, relevant priorities, and a usable management method.
 
 ### 4.2 Remove Overly Permissive Rules — Stage Before Restricting
 
-**Concept:**
-
 Removing broad access before staging specific allows can lock out management or stop the application. Existing unrelated rules and shared policies are outside this lab change.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Identify only the lab-specific broad rules that need narrowing, recording their original values for rollback. Do not remove them yet.
-2. If the NIC has no dedicated NSG, use **Network security groups** → **+ Create** to create an approved role-specific NIC NSG in the target region. Associate it through **Network interfaces** → select only the intended VM NIC. If replacing a shared NIC association, first review the required existing rules and obtain approval for that NIC-only change; do not modify the shared NSG itself.
-3. Record the approved HTTP client network and management source. For direct public RDP/SSH, use the actual **My public IP /32** only when that path is approved and routable. For an existing approved Bastion path, use the actual Bastion subnet and its required policy. An unknown client IP is a reason to stop that rule change, not to allow `*`.
-4. Add and review the specific application/management allows in Section 4.3 **before** removing or narrowing any broad rule or adding the final deny.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Changes are limited to reviewed lab NIC policy, with specific allows planned before restrictions.
+1.  Identify only the lab-specific broad rules that need narrowing, recording their original values for rollback.
+
+    Do not remove them yet.
+
+2.  If the NIC has no dedicated NSG, use **Network security groups** → **+ Create** to create an approved role-specific NIC NSG in the target region.
+
+3.  Associate it through **Network interfaces** → select only the intended VM NIC.
+
+    If replacing a shared NIC association, first review the required existing rules and obtain approval for that NIC-only change; do not modify the shared NSG itself.
+
+4.  Record the approved HTTP client network and management source.
+
+    For direct public RDP/SSH, use the actual **My public IP /32** only when that path is approved and routable.
+
+    For an existing approved Bastion path, use the actual Bastion subnet and its required policy.
+
+    An unknown client IP is a reason to stop that rule change, not to allow `*`.
+
+5.  Add and review the specific application/management allows in Section 4.3 **before** removing or narrowing any broad rule or adding the final deny.
+
+**Expected Result:** Changes are limited to reviewed lab NIC policy, with specific allows planned before restrictions.
 
 ### 4.3 Apply Role-Based NSG Rules — Microsegmentation
-
-**Concept:**
 
 The following table preserves the actual five application dependencies. Each `<role-IP>` means the **actual target NIC private IPv4 address** recorded in Section 1, with `/32` added for the rule. These are not source-lab addresses or a set of sample target addresses.
 
@@ -514,77 +832,156 @@ The following table preserves the actual five application dependencies. Each `<r
 
 Port 3000 is allowed only from Web and Nginx; SQL 1433 only from Web and App; Nginx 8080 only from App. HTTP 80 is limited to the appropriate client network. HTTPS 443 is not a required health path because TLS is not configured in this lab. No NAT gateway or public endpoint is assumed to have been created.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open a dedicated NIC NSG → **Inbound security rules** → **+ Add**. For each application row targeting that NIC, set:
+**Local workstation — Azure portal:**
 
-   | Rule Field | Student Value |
-   |---|---|
-   | Source | **IP Addresses**, using the actual peer `/32` or approved HTTP client CIDR |
-   | Source port ranges | `*` — client ephemeral ports, not unrestricted source addresses |
-   | Destination | **IP Addresses**, using the destination NIC private IP `/32` |
-   | Service | **Custom** |
-   | Destination port ranges | The single TCP port in the table |
-   | Protocol / Action | **TCP / Allow** |
-   | Priority | An unused value lower than `4000`; the table values are examples |
-   | Name | Clear peer-and-port name, such as `Allow-SQL-From-Web` |
+1.  Open a dedicated NIC NSG → **Inbound security rules** → **+ Add**.
 
-2. Add the appropriate management allow only for your chosen verified management path. Do not create RDP/SSH rules with an unrestricted source. A private-only VM does not become reachable from your workstation just because an NSG rule is added.
-3. Repeat for the other dedicated NIC NSGs. Review the saved rules and **effective** NIC/subnet rules for each dependency, including outbound restrictions at the source. If a shared subnet policy denies an application path, record it for the authorized scope owner rather than weakening unrelated controls.
-4. Verify the approved management session and repeat the five source-to-destination checks in Section 1. Confirm that the planned specific rules have the correct addresses/ports/priorities; broad existing allows must not be mistaken for proof that the final restricted policy is correct.
-5. Narrow/remove only the broad lab rules identified in Section 4.2, after the specific allows and management path are verified. Preserve unrelated custom rules. Do not retain a higher-precedence broad allow that bypasses the intended restriction.
-6. On each dedicated NIC NSG, add or maintain a reviewed **DenyAll** inbound rule at priority **4000**, protocol **Any**, source **Any**, destination that VM's private IP `/32`, destination ports `*`. All required allows must have lower priority numbers. If priority 4000 is occupied, review that rule rather than overwriting it blindly.
-7. Immediately repeat Section 1's local service, five-edge, readiness, and order-read checks, plus management access. Record before/after results. If a change blocks a required path, use the saved rule record and portal access to correct/revert **that change**, not to open all ports or erase the NSG.
+2.  For each application row targeting that NIC, set:
 
-**Expected Outcome:** Reviewed NIC rules enforce role-specific access while all five application paths and the chosen management path still work. Shared/subnet blockers and uncompleted changes are recorded explicitly.
+| Rule Field | Student Value |
+|---|---|
+| Source | **IP Addresses**, using the actual peer `/32` or approved HTTP client CIDR |
+| Source port ranges | `*` — client ephemeral ports, not unrestricted source addresses |
+| Destination | **IP Addresses**, using the destination NIC private IP `/32` |
+| Service | **Custom** |
+| Destination port ranges | The single TCP port in the table |
+| Protocol / Action | **TCP / Allow** |
+| Priority | An unused value lower than `4000`; the table values are examples |
+| Name | Clear peer-and-port name, such as `Allow-SQL-From-Web` |
+
+3.  Add the appropriate management allow only for your chosen verified management path.
+
+    Do not create RDP/SSH rules with an unrestricted source.
+
+    A private-only VM does not become reachable from your workstation just because an NSG rule is added.
+
+4.  Repeat for the other dedicated NIC NSGs.
+
+5.  Review the saved rules and **effective** NIC/subnet rules for each dependency, including outbound restrictions at the source.
+
+    If a shared subnet policy denies an application path, record it for the authorized scope owner rather than weakening unrelated controls.
+
+**Migrated guest VMs — Section 1 guest sessions:**
+
+6.  Verify the approved management session.
+
+7.  Repeat the five source-to-destination checks in Section 1.
+
+**Local workstation — Azure portal:**
+
+8.  Confirm that the planned specific rules have the correct addresses/ports/priorities.
+
+    Broad existing allows must not be mistaken for proof that the final restricted policy is correct.
+
+9.  Narrow/remove only the broad lab rules identified in Section 4.2, after the specific allows and management path are verified.
+
+    Preserve unrelated custom rules.
+
+    Do not retain a higher-precedence broad allow that bypasses the intended restriction.
+
+10. On each dedicated NIC NSG, add or maintain a reviewed **DenyAll** inbound rule at priority **4000**, protocol **Any**, source **Any**, destination that VM's private IP `/32`, destination ports `*`.
+
+    All required allows must have lower priority numbers.
+
+    If priority 4000 is occupied, review that rule rather than overwriting it blindly.
+
+**Migrated guest VMs — Section 1 guest sessions:**
+
+11. Immediately repeat Section 1's local service, five-edge, readiness, and order-read checks, plus management access.
+
+**Local workstation — student notes:**
+
+12. Record before/after results.
+
+    If a change blocks a required path, use the saved rule record and portal access to correct/revert **that change**, not to open all ports or erase the NSG.
+
+**Expected Result:** Reviewed NIC rules enforce role-specific access while all five application paths and the chosen management path still work. Shared/subnet blockers and uncompleted changes are recorded explicitly.
 
 ### 4.4 VNet Flow Logs + Traffic Analytics — Optional
 
-**Concept:**
-
 Flow logging provides network-traffic visibility. The optional current portal workflow is **virtual network flow logging**, not creation of new legacy NSG flow logs. Storage and Traffic Analytics can add charges; they are not required to complete the application checks.
 
-**Student Actions — Optional:**
+#### Hands-On Steps — Optional
 
-1. Open **Network Watcher** → **Flow logs** → **+ Create** and review the available **Virtual network** target workflow for the approved target region.
-2. Select only the approved target VNet, subscription, and region. Review an approved storage destination, retention, and any Traffic Analytics workspace/processing options.
-3. Create the flow log only if this VNet scope, storage, retention, and processing budget are approved. Otherwise cancel and record **reviewed — not enabled**. If the workflow is unavailable for the chosen scope, record that result rather than switching to legacy NSG flow-log creation.
-4. If enabled, inspect the flow-log resource status and later data/analytics availability. Do not claim instant traffic visibility or centrally collected application logs.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** The current VNet flow-logging option is reviewed, and any actual enablement/status is recorded without adding mandatory logging costs.
+1.  Open **Network Watcher** → **Flow logs** → **+ Create**.
+
+2.  Review the available **Virtual network** target workflow for the approved target region.
+
+3.  Select only the approved target VNet, subscription, and region.
+
+4.  Review an approved storage destination, retention, and any Traffic Analytics workspace/processing options.
+
+5.  Create the flow log only if this VNet scope, storage, retention, and processing budget are approved.
+
+6.  Otherwise cancel and record **reviewed — not enabled**.
+
+    If the workflow is unavailable for the chosen scope, record that result rather than switching to legacy NSG flow-log creation.
+
+7.  If enabled, inspect the flow-log resource status and later data/analytics availability.
+
+    Do not claim instant traffic visibility or centrally collected application logs.
+
+**Expected Result:** The current VNet flow-logging option is reviewed, and any actual enablement/status is recorded without adding mandatory logging costs.
 
 ### 4.5 Azure Bastion — Eliminate Open Management Ports
 
-**Concept:**
-
 Azure Bastion can provide portal-based RDP/SSH to private VMs. It requires suitable network configuration, access permissions, and an approved deployment/SKU budget. It is not automatically present in this lab.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open a VM → **Connect** → **Bastion** and review whether an approved deployment already exists for the target network.
-2. If one exists, connect using an authorized guest account and confirm the session works before changing direct RDP/SSH rules. Preserve the actual required Bastion-subnet policy.
-3. If none exists, review the **Bastions** creation settings only if a separate deployment is approved. Review VNet, supported subnet/SKU requirements, region, public/private connectivity options, and charges before creating anything. Otherwise record **not deployed** and retain the restricted management method chosen in Section 4.2.
-4. Remove/narrow a direct public management rule only after the replacement path is tested. Do not delete the management path you are currently relying on.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Your runbook states the management path actually available; Bastion is not reported as deployed merely because its creation page was reviewed.
+1.  Open a VM → **Connect** → **Bastion**.
+
+2.  Review whether an approved deployment already exists for the target network.
+
+3.  If one exists, connect using an authorized guest account.
+
+4.  Confirm the session works before changing direct RDP/SSH rules.
+
+    Preserve the actual required Bastion-subnet policy.
+
+5.  If none exists, review the **Bastions** creation settings only if a separate deployment is approved.
+
+6.  Review VNet, supported subnet/SKU requirements, region, public/private connectivity options, and charges before creating anything.
+
+    Otherwise record **not deployed** and retain the restricted management method chosen in Section 4.2.
+
+7.  Remove/narrow a direct public management rule only after the replacement path is tested.
+
+    Do not delete the management path you are currently relying on.
+
+**Expected Result:** Your runbook states the management path actually available; Bastion is not reported as deployed merely because its creation page was reviewed.
 
 ### 4.6 JIT VM Access via Microsoft Defender for Cloud
 
-**Concept:**
-
 Just-In-Time (JIT) access can time-limit approved management access for eligible configurations. Licensing, permissions, and existing network rules affect availability. JIT is not a reason to enable paid plans across an unrelated subscription.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open **Microsoft Defender for Cloud** → **Workload protections** → **Just-in-time VM access**, where available.
-2. Review eligibility and existing configuration for the lab VMs. Record whether the current plan and approved scope support JIT.
-3. If separately approved and eligible, review the chosen VM's management port, approved source IP, and maximum request duration before configuring/requesting access. Test the selected path and record its expiry. Otherwise leave configuration unchanged and record **reviewed — not enabled**.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** JIT availability and any approved change are recorded without assuming licensing or altering company-wide protection settings.
+1.  Open **Microsoft Defender for Cloud** → **Workload protections** → **Just-in-time VM access**, where available.
+
+2.  Review eligibility and existing configuration for the lab VMs.
+
+3.  Record whether the current plan and approved scope support JIT.
+
+4.  If separately approved and eligible, review the chosen VM's management port, approved source IP, and maximum request duration before configuring/requesting access.
+
+    Otherwise leave configuration unchanged and record **reviewed — not enabled**.
+
+5.  Test the selected path.
+
+6.  Record its expiry.
+
+**Expected Result:** JIT availability and any approved change are recorded without assuming licensing or altering company-wide protection settings.
 
 ### 4.7 Identity, Access & Threat Protection
-
-**Concept:**
 
 Identity, resource access, and threat protection complement network controls. Least privilege means granting only the operations needed at the appropriate scope; VM Contributor is not automatically the right role for every task or guest login.
 
@@ -595,23 +992,45 @@ Identity, resource access, and threat protection complement network controls. Le
 | **RBAC least privilege** | Resource scope, inherited role assignments, and necessary operations |
 | **Defender for Servers / SQL** | Current plans, eligible resources, recommendations, and approved licensing/billing scope |
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open each lab VM/resource group → **Access control (IAM)** → **View my access** and **Role assignments**. Review inherited versus direct roles. Record excessive access for authorized review; do not grant yourself Owner or remove another user's access.
-2. Review the VM **Identity** configuration used for monitoring. Do not display private application configuration or SQL credentials in notes/screenshots.
-3. Open **Microsoft Defender for Cloud** → **Recommendations** or inventory, filter to the lab resource scope, and record relevant findings for the Windows/Ubuntu VMs and SQL VM.
-4. Review **Environment settings** and currently enabled plans only within your permitted scope. Do not enable a subscription-wide paid plan to complete a lab checklist. Any plan change needs explicit approval of licensing, billing, affected resources, and scope; reviewing recommendations without enablement is a valid exercise result.
-5. Record which controls are active, which were merely reviewed, and which need approval.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** The application remains healthy after NSG changes, and identity/threat-protection records describe actual scope and status rather than a blanket claim that Zero Trust or paid protection has been achieved.
+1.  Open each lab VM/resource group → **Access control (IAM)**.
+
+2.  Open **View my access** and **Role assignments**.
+
+3.  Review inherited versus direct roles.
+
+4.  Record excessive access for authorized review; do not grant yourself Owner or remove another user's access.
+
+5.  Review the VM **Identity** configuration used for monitoring.
+
+    Do not display private application configuration or SQL credentials in notes/screenshots.
+
+6.  Open **Microsoft Defender for Cloud** → **Recommendations** or inventory.
+
+7.  Filter to the lab resource scope.
+
+8.  Record relevant findings for the Windows/Ubuntu VMs and SQL VM.
+
+9.  Review **Environment settings** and currently enabled plans only within your permitted scope.
+
+    Do not enable a subscription-wide paid plan to complete a lab checklist.
+
+    Any plan change needs explicit approval of licensing, billing, affected resources, and scope; reviewing recommendations without enablement is a valid exercise result.
+
+**Local workstation — student notes:**
+
+10. Record which controls are active, which were merely reviewed, and which need approval.
+
+**Expected Result:** The application remains healthy after NSG changes, and identity/threat-protection records describe actual scope and status rather than a blanket claim that Zero Trust or paid protection has been achieved.
 
 ---
 
 ## 5. Cost Optimization — Strategic, Not Tactical
 
 > **WAF Pillar: Cost Optimization**
-
-**Concept:**
 
 Cost optimization is not "resize VMs." It is a **continuous discipline** spanning right-sizing, commitment review, and governance controls, not a one-time exercise.
 
@@ -631,26 +1050,61 @@ Apply only approved changes; review again later
 
 ### 5.1 Right-Sizing Process
 
-**Concept:**
-
 A representative post-migration baseline is needed before right-sizing. The original 2–4 week review window is a planning example; a short lab session is not enough to establish production sizing.
 
-The lab plan selects eligible B2 or D2 targets in ascending current regional, OS-specific pay-as-you-go compute cost order, with 2 vCPUs each and minimum RAM of 4 GiB for Web, 8 GiB for SQL, and 2 GiB for each Linux VM. An assessment recommendation is not proof that a size was selected for the migrated VM.
+The planned lab sizes were `Standard_B2s`, `Standard_B2ms`, `Standard_B1ms`, and `Standard_B1ms` for Web, SQL, Linux Web, and Linux App respectively. `Standard_D2as_v5` for all four is an optional fallback when B-series is unavailable in the actual region/quota/capacity. An assessment recommendation such as `Standard_D2als_v6` is not proof that this SKU was selected for the migrated VM.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open **Azure Advisor** → **Cost**, filter to the lab scope, and review any right-size/shutdown recommendations. A newly migrated VM may not yet have a recommendation.
-2. Open each VM → **Size** and record the **actual** size. Do not substitute the planned or assessed size for the deployed result.
-3. Open **Monitoring** → **Metrics**. Review CPU, disk, and network over the available history. For guest memory, use the configured guest collection and its actual data; do not assume memory is a platform metric just because CPU is available.
-4. Compare sustained demand with peaks and workload role. For B-series, review CPU-credit behavior where available; low average CPU alone does not establish that a smaller burstable VM is suitable.
-5. Record a recommendation, evidence period, missing data, and expected maintenance impact. Leave size unchanged if the lab has no representative baseline.
-6. **Optional approved resize:** During an approved application maintenance window, open **Size**, review available sizes and current displayed prices in the actual region, and select **Resize** only after confirming quota/capacity and downtime implications. Do not stop all four VMs during live writes. Recheck Section 1's application baseline afterward.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Actual sizes and a justified sizing recommendation are recorded. Any approved resize is distinguished from a proposal and followed by application validation.
+1.  Open **Azure Advisor** → **Cost**.
+
+2.  Filter to the lab scope.
+
+3.  Review any right-size/shutdown recommendations.
+
+    A newly migrated VM may not yet have a recommendation.
+
+4.  Open each VM → **Size**.
+
+5.  Record the **actual** size.
+
+    Do not substitute the planned or assessed size for the deployed result.
+
+6.  Open **Monitoring** → **Metrics**.
+
+7.  Review CPU, disk, and network over the available history.
+
+8.  For guest memory, use the configured guest collection and its actual data; do not assume memory is a platform metric just because CPU is available.
+
+9.  Compare sustained demand with peaks and workload role.
+
+    For B-series, review CPU-credit behavior where available; low average CPU alone does not establish that a smaller burstable VM is suitable.
+
+**Local workstation — student notes:**
+
+10. Record a recommendation, evidence period, missing data, and expected maintenance impact.
+
+    Leave size unchanged if the lab has no representative baseline.
+
+**Local workstation — Azure portal:**
+
+11. **Optional approved resize:** During an approved application maintenance window, open **Size**.
+
+12. Review available sizes and current displayed prices in the actual region.
+
+13. Select **Resize** only after confirming quota/capacity and downtime implications.
+
+    Do not stop all four VMs during live writes.
+
+**Migrated guest VMs — Section 1 guest sessions:**
+
+14. Recheck Section 1's application baseline afterward.
+
+**Expected Result:** Actual sizes and a justified sizing recommendation are recorded. Any approved resize is distinguished from a proposal and followed by application validation.
 
 ### 5.2 Commitment Discounts
-
-**Concept:**
 
 Commitments make sense only after workload and ownership are stable. Current prices and terms depend on region, size, currency, offer, and entitlement; no fixed savings percentage or monthly D2 cost is assumed here.
 
@@ -661,17 +1115,27 @@ Commitments make sense only after workload and ownership are stable. Current pri
 | **Savings plan** | Applicable hourly spend commitment and term | Approved predictable eligible compute spend |
 | **Azure Hybrid Benefit** | Qualifying Windows/SQL licensing entitlement | Explicit licensing review; not assumed from a migrated VM or SQL Express installation |
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Review the actual VM price/offer in the portal and the applicable reservation/savings-plan options without purchasing a commitment.
-2. If Azure Hybrid Benefit is being considered, record entitlement as **verified** or **not verified** using the approved licensing process. Do not enable it merely to reduce a displayed estimate.
-3. Record whether a short-lived lab justifies any commitment. Leave purchases and licensing changes out of this exercise unless separately approved.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Your cost recommendation uses current portal values and explicit eligibility rather than canned savings or assumed licenses.
+1.  Review the actual VM price/offer in the portal.
+
+2.  Review the applicable reservation/savings-plan options without purchasing a commitment.
+
+**Local workstation — student notes:**
+
+3.  If Azure Hybrid Benefit is being considered, record entitlement as **verified** or **not verified** using the approved licensing process.
+
+    Do not enable it merely to reduce a displayed estimate.
+
+4.  Record whether a short-lived lab justifies any commitment.
+
+    Leave purchases and licensing changes out of this exercise unless separately approved.
+
+**Expected Result:** Your cost recommendation uses current portal values and explicit eligibility rather than canned savings or assumed licenses.
 
 ### 5.3 Cost Governance
-
-**Concept:**
 
 Tags support accountability and cost review. Budgets provide notifications; they do not automatically stop the application or cap subscription spending. Policy assignments can affect resources beyond the lab.
 
@@ -683,32 +1147,85 @@ Tags support accountability and cost review. Budgets provide notifications; they
 | `Application` | Workload grouping | `MigrationWorkshop` |
 | `ManagedBy` | Operational responsibility | Approved operations team |
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open each approved lab resource → **Tags**. Review existing values, add/update only the agreed lab tags, and **Save**. Preserve unrelated tags. Do not put credentials or secrets in tags.
-2. Open **Cost Management** → select the actual approved **scope** → **Cost analysis**. Filter/group by resource group/resource and review compute, disks, monitoring, networking, and any optional backup/protection resources.
-3. Record the displayed cost period, currency, actual VM SKUs, and data availability. Include all four VMs at their actual selected B2 or D2 sizes; do not apply a fixed-series estimate or a canned monthly total.
-4. If budget creation is approved and your role permits it, open **Budgets** → **+ Add** at the smallest supported approved scope. Confirm the resource-group/subscription scope before creating anything.
-5. Enter a name such as `migrate-workshop-budget`, a monthly reset period, approved amount/currency, and dates. Configure approved recipients with example thresholds of actual cost 50% and 80%, and forecast cost 100%; adjust to the approved budget.
-6. Review and select **Create** only for that approved scope. If you lack budget rights, record the reviewed amount/scope and **creation deferred** rather than changing subscription access.
-7. Review existing cost-related **Azure Policy** assignments if permitted; do not assign new allowed-size, allowed-region, deny, or modify policies at a shared/company scope for this lab.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Tags and actual cost scope are reviewed; any budget created is explicitly scoped and evidenced. No subscription-wide policy or spending-stop guarantee is implied.
+1.  Open each approved lab resource → **Tags**.
+
+2.  Review existing values.
+
+3.  Add/update only the agreed lab tags.
+
+    Preserve unrelated tags.
+
+    Do not put credentials or secrets in tags.
+
+4.  Select **Save**.
+
+5.  Open **Cost Management** → select the actual approved **scope** → **Cost analysis**.
+
+6.  Filter/group by resource group/resource.
+
+7.  Review compute, disks, monitoring, networking, and any optional backup/protection resources.
+
+8.  Record the displayed cost period, currency, actual VM SKUs, and data availability.
+
+    Include all four VMs if they use the `Standard_D2as_v5` fallback; do not apply a B-series estimate or a canned monthly total.
+
+9.  If budget creation is approved and your role permits it, open **Budgets** → **+ Add** at the smallest supported approved scope.
+
+10. Confirm the resource-group/subscription scope before creating anything.
+
+11. Enter a name such as `migrate-workshop-budget`, a monthly reset period, approved amount/currency, and dates.
+
+12. Configure approved recipients with example thresholds of actual cost 50% and 80%, and forecast cost 100%; adjust to the approved budget.
+
+13. Review and select **Create** only for that approved scope.
+
+    If you lack budget rights, record the reviewed amount/scope and **creation deferred** rather than changing subscription access.
+
+14. Review existing cost-related **Azure Policy** assignments if permitted; do not assign new allowed-size, allowed-region, deny, or modify policies at a shared/company scope for this lab.
+
+**Expected Result:** Tags and actual cost scope are reviewed; any budget created is explicitly scoped and evidenced. No subscription-wide policy or spending-stop guarantee is implied.
 
 ### 5.4 Identify and Eliminate Waste
 
-**Concept:**
-
 Unattached disks and unused public IPs can still have a purpose, including rollback or recovery. Non-production shutdown schedules can save compute, but they interrupt this multi-VM application and do not eliminate all storage charges.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open the target resource group → filter for **Disks** and **Public IP addresses**. Inspect attachment/association status and ownership tags.
-2. Record possible unused resources and their migration/test/backup/rollback purpose. Do not delete a disk, public IP, vault, or source VM based only on its apparent inactivity.
-3. Open each VM → **Operations** → **Auto-shutdown** and review current configuration. Enable or change it only if separately approved for this lab, with a coordinated stop/start plan, time zone, and notification. Do not interrupt live order writes.
-4. Record which resources need an authorized cleanup decision and which optional resources continue to incur charges. Keep rollback/recovery retention decisions separate from cost recommendations.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Potential waste and approved scheduling decisions are recorded without deleting needed recovery resources or stopping the application unexpectedly.
+1.  Open the target resource group.
+
+2.  Filter for **Disks** and **Public IP addresses**.
+
+3.  Inspect attachment/association status and ownership tags.
+
+**Local workstation — student notes:**
+
+4.  Record possible unused resources and their migration/test/backup/rollback purpose.
+
+    Do not delete a disk, public IP, vault, or source VM based only on its apparent inactivity.
+
+**Local workstation — Azure portal:**
+
+5.  Open each VM → **Operations** → **Auto-shutdown**.
+
+6.  Review current configuration.
+
+7.  Enable or change it only if separately approved for this lab, with a coordinated stop/start plan, time zone, and notification.
+
+    Do not interrupt live order writes.
+
+**Local workstation — student notes:**
+
+8.  Record which resources need an authorized cleanup decision and which optional resources continue to incur charges.
+
+    Keep rollback/recovery retention decisions separate from cost recommendations.
+
+**Expected Result:** Potential waste and approved scheduling decisions are recorded without deleting needed recovery resources or stopping the application unexpectedly.
 
 ---
 
@@ -716,61 +1233,99 @@ Unattached disks and unused public IPs can still have a purpose, including rollb
 
 > **WAF Pillar: Reliability + Security**
 
-**Concept:**
-
 Patch visibility and controlled installation are separate activities. **Azure Update Manager** provides current assessment; this required exercise does not install patches or reboot the four application VMs.
 
 ### 6.1 Configure Azure Update Manager — Assess Current Status
 
-**Concept:**
-
 An assessment checks the Windows/Ubuntu guest update state. It is not a patch deployment, and its result is specific to the actual assessment timestamp.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Open **Azure Update Manager** → **Machines**, filter to the actual target subscription/resource group, and select the four migrated VMs, not test copies.
-2. Check that each VM is running and its Azure VM agent is ready before relying on assessment. Record a not-ready/unsupported/permission result rather than treating it as success.
-3. Select **Check for updates** (assessment), not **Install updates** or a one-time deployment. Review the selected VM scope before confirming.
-4. Open each machine's assessment result after it completes. Record the last assessment time, available security/other update counts, reboot-pending indication, and any failed/pending status shown.
-5. Keep the existing application running. Do not automatically reboot all VMs or install an update during live writes to make the status green.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** A current Windows and Ubuntu patch-assessment record exists, including actual completion/pending status; no patch installation is claimed.
+1.  Open **Azure Update Manager** → **Machines**.
+
+2.  Filter to the actual target subscription/resource group.
+
+3.  Select the four migrated VMs, not test copies.
+
+4.  Check that each VM is running and its Azure VM agent is ready before relying on assessment.
+
+    Record a not-ready/unsupported/permission result rather than treating it as success.
+
+5.  Select **Check for updates** (assessment), not **Install updates** or a one-time deployment.
+
+6.  Review the selected VM scope before confirming.
+
+7.  Open each machine's assessment result after it completes.
+
+8.  Record the last assessment time, available security/other update counts, reboot-pending indication, and any failed/pending status shown.
+
+9.  Keep the existing application running.
+
+    Do not automatically reboot all VMs or install an update during live writes to make the status green.
+
+**Expected Result:** A current Windows and Ubuntu patch-assessment record exists, including actual completion/pending status; no patch installation is claimed.
 
 ### 6.2 Schedule Maintenance Windows — Optional
 
-**Concept:**
-
 A maintenance schedule must account for SQL, Tomcat, Nginx, and IIS dependencies. A schedule that reboots all four simultaneously can interrupt transactions. The original weekly-window pattern is a design example, not a mandatory enabled schedule.
 
-**Student Actions:**
+#### Hands-On Steps — Optional
 
-1. Record a proposed maintenance window, time zone, update scope, reboot policy, application stop/start sequence, and post-change validation using Section 1.
-2. If schedule creation is separately approved, open **Azure Update Manager** → **Maintenance configurations** → **+ Create** and select **Guest (Azure VM)** maintenance scope.
-3. Review the approved name, region/resource group, schedule, supported duration, reboot setting, and machine patch-orchestration prerequisites shown. Select only the approved machine subset; do not automatically attach all four to the same reboot window.
-4. Under **Updates**, review the classifications actually available for each OS, such as Windows Critical/Security and supported Linux Security/other classifications. Do not assume both operating systems expose identical options.
-5. Create the configuration only when the schedule, machine assignments, prerequisites, and billing effects are approved. Otherwise cancel and record **planned — not enabled**.
+**Local workstation — student notes:**
 
-**Expected Outcome:** A maintenance proposal is recorded, and an active schedule is claimed only if explicitly approved and created. No automatic installation/reboot is introduced by the required assessment exercise.
+1.  Record a proposed maintenance window, time zone, update scope, reboot policy, application stop/start sequence, and post-change validation using Section 1.
+
+**Local workstation — Azure portal:**
+
+2.  If schedule creation is separately approved, open **Azure Update Manager** → **Maintenance configurations** → **+ Create**.
+
+3.  Select **Guest (Azure VM)** maintenance scope.
+
+4.  Review the approved name, region/resource group, schedule, supported duration, reboot setting, and machine patch-orchestration prerequisites shown.
+
+5.  Select only the approved machine subset; do not automatically attach all four to the same reboot window.
+
+6.  Under **Updates**, review the classifications actually available for each OS, such as Windows Critical/Security and supported Linux Security/other classifications.
+
+    Do not assume both operating systems expose identical options.
+
+7.  Create the configuration only when the schedule, machine assignments, prerequisites, and billing effects are approved.
+
+    Otherwise cancel and record **planned — not enabled**.
+
+**Expected Result:** A maintenance proposal is recorded, and an active schedule is claimed only if explicitly approved and created. No automatic installation/reboot is introduced by the required assessment exercise.
 
 ### 6.3 Enable Periodic Assessment — Optional
 
-**Concept:**
-
 Periodic assessment can maintain update visibility without itself being the scheduled installation policy. Permissions, supported guest configuration, and applicable costs still need review.
 
-**Student Actions:**
+#### Hands-On Steps — Optional
 
-1. In Update Manager, open **Update settings** for the approved VMs and review **Periodic assessment** separately from patch orchestration/installation settings.
-2. If approved, enable periodic assessment for the selected scope and save. Otherwise leave it unchanged and record the current setting.
-3. Record the actual setting and next review date. Do not change reboot/install orchestration while enabling assessment. After any later approved installation/reboot, repeat Section 1's application checks.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Periodic-assessment status is recorded accurately; assessment is not confused with automatic patching.
+1.  In Update Manager, open **Update settings** for the approved VMs.
+
+2.  Review **Periodic assessment** separately from patch orchestration/installation settings.
+
+3.  If approved, enable periodic assessment for the selected scope and save.
+
+    Otherwise leave it unchanged and record the current setting.
+
+**Local workstation — student notes:**
+
+4.  Record the actual setting and next review date.
+
+    Do not change reboot/install orchestration while enabling assessment.
+
+    After any later approved installation/reboot, repeat Section 1's application checks.
+
+**Expected Result:** Periodic-assessment status is recorded accurately; assessment is not confused with automatic patching.
 
 ---
 
 ## 7. Day 2 Operations Runbook
-
-**Concept:**
 
 This is the checklist used for operational handoff after migration cutover. It records what was actually completed and what remains planned; a lab exercise is not proof of a production-ready environment.
 
@@ -809,21 +1364,41 @@ Statuses are **verified**, **pending**, **failed**, **deferred**, or **not appro
 
 **Why It Matters:** Operational evidence needs clear ownership and due dates, including work that could not be completed or that needs a separate approval.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Complete the checklist in your existing lab notes. For each item, add the actual status, resource scope, evidence timestamp/screenshot reference where useful, owner, and next review date. Do not include passwords, tokens, SQL connection secrets, or protected configuration contents.
-2. For a failed health check, record the affected service/path and compare with the last known-good rule/configuration. For a monitoring gap, record the missing extension/association/source/destination/data result. Keep these focused observations, not a claim that all application logs were centrally collected.
-3. Record the chosen management method, backup/restore status, patch-assessment result, and any maintenance/rollback decision needed for future changes.
-4. Bring forward the Module 4 ADR, clearly separating migration completion, backup evidence, and future DR planning.
-5. Review optional resources and ongoing charges against their approved lab lifecycle. Record follow-up decisions rather than deleting source VMs, migration vaults, or recovery data as part of this module.
+**Local workstation — student notes:**
 
-**Expected Outcome:** Your Day 2 record is an actionable handoff with verified facts, explicit deferrals, and assigned follow-up — not a prefilled claim that every optional service is deployed.
+1.  Complete the checklist in your existing lab notes.
+
+2.  For each item, add the actual status, resource scope, evidence timestamp/screenshot reference where useful, owner, and next review date.
+
+    Do not include passwords, tokens, SQL connection secrets, or protected configuration contents.
+
+3.  For a failed health check, record the affected service/path.
+
+4.  Compare it with the last known-good rule/configuration.
+
+5.  For a monitoring gap, record the missing extension/association/source/destination/data result.
+
+    Keep these focused observations, not a claim that all application logs were centrally collected.
+
+6.  Record the chosen management method, backup/restore status, patch-assessment result, and any maintenance/rollback decision needed for future changes.
+
+7.  Bring forward the Module 4 ADR, clearly separating migration completion, backup evidence, and future DR planning.
+
+**Local workstation — Azure portal:**
+
+8.  Review optional resources and ongoing charges against their approved lab lifecycle.
+
+**Local workstation — student notes:**
+
+9.  Record follow-up decisions rather than deleting source VMs, migration vaults, or recovery data as part of this module.
+
+**Expected Result:** Your Day 2 record is an actionable handoff with verified facts, explicit deferrals, and assigned follow-up — not a prefilled claim that every optional service is deployed.
 
 ---
 
 ## 8. Workshop Summary & Next Steps
-
-**Concept:**
 
 ### Module Recap — Mapped to Cloud Adoption Framework
 
@@ -877,13 +1452,21 @@ The following documentation links are retained as optional reading, not addition
 
 **Why It Matters:** Workshop completion means you can explain your decisions and actual results. It does not imply untested protection, production availability, or deployment of optional paid services.
 
-**Student Actions:**
+#### Hands-On Steps
 
-1. Review the recap against your own Modules 0–5 results. Correct any unchecked, pending, or deferred activity rather than marking it complete automatically.
-2. Confirm the final post-hardening application checks and the operations checklist are recorded.
-3. Record outstanding approvals, continuing resource charges, and the next review date. Keep future modernization and DR deployment outside this completed IaaS migration exercise.
+**Local workstation — student notes:**
 
-**Expected Outcome:** You have a consistent student record of the four-VM Ubuntu 24.04 migration lab and its actual Day 2 operations results.
+1.  Review the recap against your own Modules 0–5 results.
+
+2.  Correct any unchecked, pending, or deferred activity rather than marking it complete automatically.
+
+3.  Confirm the final post-hardening application checks and the operations checklist are recorded.
+
+4.  Record outstanding approvals, continuing resource charges, and the next review date.
+
+    Keep future modernization and DR deployment outside this completed IaaS migration exercise.
+
+**Expected Result:** You have a consistent student record of the four-VM Ubuntu 24.04 migration lab and its actual Day 2 operations results.
 
 ---
 
