@@ -11,7 +11,7 @@
     By default this parses each .ps1 beside it, checks encoding and standalone helpers, and
     makes no file changes. It never runs a complete deployment or migration script.
     -RunRegressionChecks additionally executes only whitelisted AST-extracted helpers and
-    a restricted literal NSG table with synthetic inputs and local read-only dependency mocks;
+    restricted literal VM/NSG tables and stage-argument fixtures with synthetic inputs and local read-only mocks;
     traffic/security/guidance checks are labeled source contracts. No Azure modules, sign-in, prompts or VM actions are used.
     -PackagePath explicitly requests full-checkout ZIP packaging with fresh SHA256SUMS,
     deterministic entry names/timestamps and CRC/SHA256 readback. Packaging automatically
@@ -220,7 +220,7 @@ function Test-LabFunctionUsedBeforeDefined {
 
 function Get-LabOfflineHelperNames {
     return @('ConvertTo-LabRegionKey', 'Read-LabTargetRegion', 'Resolve-LabTargetNetworkLocation',
-        'Get-LabField', 'Get-LabQuotaRow', 'Get-LabSkuPlan', 'Get-LabRunCommandText', 'Assert-LabWorkloadPower',
+        'Get-LabField', 'Test-LabField', 'Get-LabCapability', 'Get-LabSizingWorkloads', 'Get-LabSizingCandidates', 'Test-LabRetailUri', 'Invoke-LabRetailPage', 'Get-LabRetailSnapshot', 'Get-LabRetailRate', 'Get-LabCostOrderedOptions', 'Get-LabCostTargetPlan', 'Show-LabCostTargetPlan', 'Get-LabTargetSizeOptions', 'Test-LabTargetSizeMapping', 'Select-LabTargetVmSizes', 'Show-LabTargetSizeSelection', 'Get-LabReplicationField', 'ConvertTo-LabReplicationArmId', 'Get-LabReplicationObjectId', 'Resolve-LabReplicationWorkload', 'Get-LabReplicationSelectedMachines', 'Test-LabReplicationCommandContract', 'Get-LabReplicationApiDecision', 'Get-LabReplicationVaultDiagnostic', 'Get-LabArmFailure', 'Test-LabArmPageUri', 'Get-LabProjectVaultAssociation', 'Get-LabVaultSafeText', 'Get-LabProviderProjection', 'Get-LabVaultInventoryTime', 'ConvertTo-LabVaultUtcTime', 'Get-LabReplicationInventoryProjection', 'Format-LabSafeErrorDiagnostic', 'Get-LabHyperVManualHandoff', 'Get-LabField', 'Get-LabQuotaRow', 'Get-LabSkuPlan', 'Get-LabRunCommandText', 'Assert-LabWorkloadPower',
         'Get-LabKvpReadinessRow', 'Get-LabGuestCommunicationRows', 'ConvertFrom-LabGuestCommunicationPayload', 'Assert-LabGuestCommunication', 'Get-LabAssessmentField', 'Get-LabAssessmentContextStamp', 'Invoke-LabAssessmentRequest', 'Invoke-LabAssessmentCreation', 'ConvertTo-LabAssessmentSegment', 'Test-LabAssessmentPath', 'ConvertTo-LabAssessmentNextPath', 'Assert-LabAssessmentResponse', 'Invoke-LabAssessmentRead', 'Get-LabAssessmentCollection', 'Get-LabAssessmentCatalog', 'Assert-LabAssessmentProvider', 'Resolve-LabAssessmentProject', 'Get-LabAssessmentMachineMap', 'Get-LabAssessmentMembership', 'Get-LabAssessmentSettings', 'Assert-LabAssessmentIdentity', 'Assert-LabAssessmentSettings', 'Wait-LabAssessmentGroup', 'Get-LabAssessmentArray', 'Test-LabAssessmentGroupReady', 'Assert-LabAssessedMachines', 'Get-LabClassicAssessmentState', 'Get-LabAssessmentCompletion', 'Assert-LabAssessmentMachineMapStable', 'ConvertTo-LabAssessmentCanonicalId', 'Get-LabAssessmentProfile', 'Initialize-LabAssessmentGroup', 'Assert-LabModernSettingSubset', 'Assert-LabModernAssessment', 'Assert-LabModernAssessedMachines', 'Show-LabModernRecommendations', 'Get-LabModernAssessmentCompletion', 'Get-LabModernArray')
 }
 
@@ -256,7 +256,16 @@ function Invoke-LabOfflineRegression {
                 $CommandId -cne 'RunPowerShellScript' -or $ScriptString -notmatch 'LAB_(?:GUEST_STATE_JSON|KVP_JSON)') { throw 'Unexpected inventory probe.' }
             $fixtureState.Reads++; return $fixtureState.Result
         }
-        function Read-Host { param($Prompt); throw 'Offline regression must never prompt.' }
+        $selectionFixture = @{ Answers = @(); Reads = 0 }
+        function Read-Host {
+            param($Prompt)
+            if ($selectionFixture.Answers.Count -eq 0) { throw 'Offline regression must never prompt without a queued selection fixture.' }
+            $assessmentFixture.Logs += [string]$Prompt
+            $selectionFixture.Reads++
+            $answer = $selectionFixture.Answers[0]
+            $selectionFixture.Answers = @($selectionFixture.Answers | Select-Object -Skip 1)
+            return $answer
+        }
         function Write-Host { param($Object, $ForegroundColor); $assessmentFixture.Logs += [string]$Object }
 
         $assessmentFixture = @{ Logs = @(); Available = $true; Context = $null; Current = $null; Stamp = ''; Calls = @(); Responses = @(); Throw = '' }
@@ -285,9 +294,13 @@ function Invoke-LabOfflineRegression {
         $helperNames = Get-LabOfflineHelperNames
         $allowedCommands = @('Where-Object', 'ForEach-Object', 'Write-Host', 'Write-Warning', 'ConvertFrom-Json',
             'Get-AzLocation', 'Get-AzVirtualNetwork', 'Get-AzVM', 'Invoke-AzVMRunCommand', 'Read-Host', 'ConvertTo-Json', 'Start-Sleep',
-            'Get-VM', 'Get-CimInstance', 'Get-CimAssociatedInstance', 'Get-Command', 'Get-AzContext', 'Invoke-AzRestMethod') + $helperNames
+            'Get-Variable', 'Sort-Object', 'Invoke-RestMethod', 'Get-VM', 'Get-CimInstance', 'Get-CimAssociatedInstance', 'Get-Command', 'Get-AzContext', 'Invoke-AzRestMethod') + $helperNames
         foreach ($name in $helperNames) {
-            $helperAst = if ($name -in @('Get-LabKvpReadinessRow', 'Get-LabGuestCommunicationRows', 'ConvertFrom-LabGuestCommunicationPayload', 'Assert-LabGuestCommunication', 'Get-LabAssessmentField', 'Get-LabAssessmentContextStamp', 'Invoke-LabAssessmentRequest', 'Invoke-LabAssessmentCreation', 'ConvertTo-LabAssessmentSegment', 'Test-LabAssessmentPath', 'ConvertTo-LabAssessmentNextPath', 'Assert-LabAssessmentResponse', 'Invoke-LabAssessmentRead', 'Get-LabAssessmentCollection', 'Get-LabAssessmentCatalog', 'Assert-LabAssessmentProvider', 'Resolve-LabAssessmentProject', 'Get-LabAssessmentMachineMap', 'Get-LabAssessmentMembership', 'Get-LabAssessmentSettings', 'Assert-LabAssessmentIdentity', 'Assert-LabAssessmentSettings', 'Wait-LabAssessmentGroup', 'Get-LabAssessmentArray', 'Test-LabAssessmentGroupReady', 'Assert-LabAssessedMachines', 'Get-LabClassicAssessmentState', 'Get-LabAssessmentCompletion', 'Assert-LabAssessmentMachineMapStable', 'ConvertTo-LabAssessmentCanonicalId', 'Get-LabAssessmentProfile', 'Initialize-LabAssessmentGroup', 'Assert-LabModernSettingSubset', 'Assert-LabModernAssessment', 'Assert-LabModernAssessedMachines', 'Show-LabModernRecommendations', 'Get-LabModernAssessmentCompletion', 'Get-LabModernArray')) {
+            $helperAst = if ($name -ceq 'Get-LabHyperVManualHandoff') {
+                [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'scripts/migrate-step4-test-migrate.ps1'), [ref]$null, [ref]$null)
+            } elseif ($name -in @('Get-LabReplicationField', 'ConvertTo-LabReplicationArmId', 'Get-LabReplicationObjectId', 'Resolve-LabReplicationWorkload', 'Get-LabReplicationSelectedMachines', 'Test-LabReplicationCommandContract', 'Get-LabReplicationApiDecision', 'Get-LabReplicationVaultDiagnostic', 'Get-LabArmFailure', 'Test-LabArmPageUri', 'Get-LabProjectVaultAssociation', 'Get-LabVaultSafeText', 'Get-LabProviderProjection', 'Get-LabVaultInventoryTime', 'ConvertTo-LabVaultUtcTime', 'Get-LabReplicationInventoryProjection', 'Format-LabSafeErrorDiagnostic')) {
+                [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'scripts/migrate-step3-replicate.ps1'), [ref]$null, [ref]$null)
+            } elseif ($name -in @('Get-LabKvpReadinessRow', 'Get-LabGuestCommunicationRows', 'ConvertFrom-LabGuestCommunicationPayload', 'Assert-LabGuestCommunication', 'Get-LabAssessmentField', 'Get-LabAssessmentContextStamp', 'Invoke-LabAssessmentRequest', 'Invoke-LabAssessmentCreation', 'ConvertTo-LabAssessmentSegment', 'Test-LabAssessmentPath', 'ConvertTo-LabAssessmentNextPath', 'Assert-LabAssessmentResponse', 'Invoke-LabAssessmentRead', 'Get-LabAssessmentCollection', 'Get-LabAssessmentCatalog', 'Assert-LabAssessmentProvider', 'Resolve-LabAssessmentProject', 'Get-LabAssessmentMachineMap', 'Get-LabAssessmentMembership', 'Get-LabAssessmentSettings', 'Assert-LabAssessmentIdentity', 'Assert-LabAssessmentSettings', 'Wait-LabAssessmentGroup', 'Get-LabAssessmentArray', 'Test-LabAssessmentGroupReady', 'Assert-LabAssessedMachines', 'Get-LabClassicAssessmentState', 'Get-LabAssessmentCompletion', 'Assert-LabAssessmentMachineMapStable', 'ConvertTo-LabAssessmentCanonicalId', 'Get-LabAssessmentProfile', 'Initialize-LabAssessmentGroup', 'Assert-LabModernSettingSubset', 'Assert-LabModernAssessment', 'Assert-LabModernAssessedMachines', 'Show-LabModernRecommendations', 'Get-LabModernAssessmentCompletion', 'Get-LabModernArray')) {
                 [System.Management.Automation.Language.Parser]::ParseFile($step2Path, [ref]$null, [ref]$null)
             } else { $ast }
             $definitions = @($helperAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
@@ -332,8 +345,8 @@ function Invoke-LabOfflineRegression {
             return [pscustomobject]@{ Name = $Name; ResourceType = 'virtualMachines'; Locations = @($Location); Family = $Family;
                 Capabilities = @([pscustomobject]@{ Name = 'vCPUs'; Value = [string]$Cores }, [pscustomobject]@{ Name = 'vCPUsAvailable'; Value = '1' }); Restrictions = $Restrictions }
         }
-        $skus = @((New-Sku 'Standard_B2s' 2), (New-Sku 'Standard_B2ms' 2), (New-Sku 'Standard_B1ms' 1))
-        $sizes = @('Standard_B2s', 'Standard_B2ms', 'Standard_B1ms', 'Standard_B1ms')
+        $skus = @((New-Sku 'FictionalSkuA' 2), (New-Sku 'FictionalSkuB' 2), (New-Sku 'FictionalSkuC' 1))
+        $sizes = @('FictionalSkuA', 'FictionalSkuB', 'FictionalSkuC', 'FictionalSkuC')
         function New-PowerPayload {
             param([string[]]$States = @('Running', 'Running', 'Running', 'Running'))
             $rows = @(for ($i = 0; $i -lt 4; $i++) { [pscustomobject]@{ Name = $required[$i]; State = $States[$i] } })
@@ -346,6 +359,605 @@ function Invoke-LabOfflineRegression {
             return (Assert-LabWorkloadPower -Stage 'Offline synthetic inventory')
         }
         $checks = [ordered]@{}
+        function New-SizingSku {
+            param([string]$Name = 'Standard_B2s_v2', [string]$Family = 'familyA', [int]$Memory = 8)
+            $sku = New-Sku $Name 2 $Family
+            $sku.Capabilities = @(
+                [pscustomobject]@{ Name = 'vCPUs'; Value = '2' }, [pscustomobject]@{ Name = 'vCPUsAvailable'; Value = '2' },
+                [pscustomobject]@{ Name = 'CpuArchitectureType'; Value = 'x64' }, [pscustomobject]@{ Name = 'HyperVGenerations'; Value = 'V1,V2' },
+                [pscustomobject]@{ Name = 'MemoryGB'; Value = [string]$Memory }, [pscustomobject]@{ Name = 'DiskControllerTypes'; Value = 'SCSI,NVMe' },
+                [pscustomobject]@{ Name = 'PremiumIO'; Value = 'True' })
+            return $sku
+        }
+        function New-SizingUsage {
+            param([int]$A = 8, [int]$B = 8)
+            return @('cores', 'virtualMachines', 'familyA', 'familyB' | ForEach-Object {
+                $limit = switch ($_) { 'cores' { 8 } 'virtualMachines' { 4 } 'familyA' { $A } 'familyB' { $B } }
+                [pscustomobject]@{ Name = [pscustomobject]@{ Value = $_ }; CurrentValue = 0; Limit = $limit; Unit = 'Count' }
+            })
+        }
+        function New-RetailRow {
+            param([string]$Name = 'Standard_B2s_v2', [decimal]$Rate = 1, [string]$OS = 'Linux')
+            $suffix = if ($OS -ceq 'Windows') { ' Windows' } else { '' }
+            return [pscustomobject]@{ armSkuName = $Name; armRegionName = 'westus2'; currencyCode = 'USD'; serviceName = 'Virtual Machines';
+                type = 'Consumption'; unitOfMeasure = '1 Hour'; isPrimaryMeterRegion = $true; productName = ('Virtual Machines Fixture Series' + $suffix);
+                meterName = 'Fixture'; skuName = 'Fixture'; tierMinimumUnits = 0; effectiveStartDate = '2026-01-01T00:00:00Z'; retailPrice = $Rate }
+        }
+        function New-RetailFixture {
+            param([object[]]$Rows, [bool]$Complete = $true)
+            return [pscustomobject]@{ Complete = $Complete; Items = $Rows; RetrievedAt = [DateTimeOffset]'2026-10-15T00:00:00Z' }
+        }
+        $retailFixture = @{ Calls = 0; Pages = @(); TimeoutOnce = $false; Fail = $false; Uris = @() }
+        function Invoke-RestMethod {
+            [CmdletBinding()]param($Uri, $Method, $TimeoutSec, $MaximumRedirection)
+            if ($Method -cne 'Get' -or $TimeoutSec -ne 30 -or $MaximumRedirection -ne 0 -or -not (Test-LabRetailUri $Uri)) { throw 'Unexpected retail request.' }
+            $retailFixture.Calls++; $retailFixture.Uris += $Uri
+            if ($retailFixture.TimeoutOnce -and $retailFixture.Calls -eq 1) { throw [System.Net.WebException]::new('Synthetic timeout', [System.Net.WebExceptionStatus]::Timeout) }
+            if ($retailFixture.Fail) { throw 'Synthetic non-retryable request failure.' }
+            if ($retailFixture.Pages.Count -eq 0) { throw 'Unexpected extra page.' }
+            $result = $retailFixture.Pages[0]
+            $retailFixture.Pages = @($retailFixture.Pages | Select-Object -Skip 1)
+            return $result
+        }
+        $checks['target-sizing/lifecycle_architecture_generation_controller_metadata [pure helper]'] = {
+            $usage = New-SizingUsage; $valid = New-SizingSku
+            Assert-Check (@(Get-LabSizingCandidates @($valid) $usage 'westus2')[0].Eligible)
+            foreach ($name in @('Standard_B2als_v2', 'Standard_B2ls_v2', 'Standard_B2as_v2', 'Standard_D2ls_v5', 'Standard_D2ds_v4', 'Standard_D2ads_v5')) {
+                Assert-Check (@(Get-LabSizingCandidates @((New-SizingSku $name)) $usage 'westus2')[0].Eligible) $name
+            }
+            foreach ($name in @('Standard_B2s', 'Standard_D2_v2', 'Standard_D2s_v3', 'Standard_B2ps_v2', 'Standard_D2ps_v5', 'Standard_D2s_v6', 'Standard_DC2s_v3', 'Standard_B1ms')) {
+                Assert-Check (@(Get-LabSizingCandidates @((New-SizingSku $name)) $usage 'westus2' | Where-Object { $_.Eligible }).Count -eq 0) $name
+            }
+            foreach ($case in @(@('vCPUs', '1'), @('vCPUsAvailable', '1'), @('CpuArchitectureType', 'Arm64'), @('HyperVGenerations', 'V1'), @('MemoryGB', '1'), @('MemoryGB', 'NaN'), @('MemoryGB', '2,5'), @('DiskControllerTypes', 'NVMe'), @('PremiumIO', 'False'))) {
+                $bad = Copy-Fixture $valid; @($bad.Capabilities | Where-Object { $_.Name -ceq $case[0] })[0].Value = $case[1]
+                Assert-Check (-not (@(Get-LabSizingCandidates @($bad) $usage 'westus2')[0].Eligible)) ($case -join '=')
+            }
+            foreach ($cap in @('vCPUs', 'vCPUsAvailable', 'CpuArchitectureType', 'HyperVGenerations', 'MemoryGB', 'DiskControllerTypes', 'PremiumIO')) {
+                $bad = Copy-Fixture $valid; $bad.Capabilities = @($bad.Capabilities | Where-Object { $_.Name -cne $cap })
+                Assert-Check (-not (@(Get-LabSizingCandidates @($bad) $usage 'westus2')[0].Eligible)) ('missing ' + $cap)
+            }
+            $bad = Copy-Fixture $valid; $bad.Capabilities += $bad.Capabilities[0]
+            Assert-Check (-not (@(Get-LabSizingCandidates @($bad) $usage 'westus2')[0].Eligible))
+            Assert-Check (-not (@(Get-LabSizingCandidates @($valid, $valid) $usage 'westus2')[0].Eligible))
+            Assert-Check (-not (@(Get-LabSizingCandidates @($valid) @() 'westus2')[0].Eligible))
+        }
+        $checks['target-sizing/location_zone_and_unknown_restrictions [pure helper]'] = {
+            $usage = New-SizingUsage
+            $cases = @(@{ Type = 'Location'; Values = @('westus2') }, @{ Type = 'Zone'; Values = @('1'); RestrictionInfo = @{ Locations = @('westus2') } }, @{ Type = 'Unknown' }, @{ Type = 'Location' }, @{ Type = 'Zone' }, @{ Type = 'Location'; Values = $null; RestrictionInfo = @{ Locations = $null } }, @{ Type = 'Zone'; Values = @(''); RestrictionInfo = @{ Locations = @('') } })
+            foreach ($case in $cases) {
+                $sku = New-SizingSku; $sku.Restrictions = @([pscustomobject]$case)
+                Assert-Check (-not (@(Get-LabSizingCandidates @($sku) $usage 'westus2')[0].Eligible))
+            }
+            foreach ($type in @('Location', 'Zone')) {
+                $sku = New-SizingSku; $sku.Restrictions = @([pscustomobject]@{ Type = $type; Values = @('eastus'); RestrictionInfo = @{ Locations = @('eastus') } })
+                Assert-Check (@(Get-LabSizingCandidates @($sku) $usage 'westus2')[0].Eligible)
+            }
+            $sku = New-SizingSku; $sku.Locations = @('eastus')
+            Assert-Check (-not (@(Get-LabSizingCandidates @($sku) $usage 'westus2')[0].Eligible))
+            $sku = New-SizingSku; $sku.PSObject.Properties.Remove('Restrictions')
+            Assert-Check (-not (@(Get-LabSizingCandidates @($sku) $usage 'westus2')[0].Eligible))
+        }
+        $checks['target-sizing/retail_OS_filter_latest_ambiguity_and_malformed [pure helper]'] = {
+            $now = [DateTimeOffset]'2026-10-15T00:00:00Z'; $linux = New-RetailRow; $windows = New-RetailRow -Rate 3 -OS Windows
+            Assert-Check ((Get-LabRetailRate @($linux, $windows) 'Standard_B2s_v2' 'westus2' Linux $now).Rate -eq 1)
+            Assert-Check ((Get-LabRetailRate @($linux, $windows) 'Standard_B2s_v2' 'westus2' Windows $now).Rate -eq 3)
+            $discounts = Copy-Fixture $linux; $discounts | Add-Member -NotePropertyName savingsPlan -NotePropertyValue @([pscustomobject]@{ unitPrice = 0.1; term = '3 Years' })
+            Assert-Check ((Get-LabRetailRate @($discounts) 'Standard_B2s_v2' 'westus2' Linux $now).Rate -eq 1) 'Embedded savings-plan metadata must not replace/exclude the parent PAYG retailPrice.'
+            foreach ($case in @(@('meterName', 'Fixture Spot'), @('skuName', 'Fixture Low Priority'), @('skuName', 'Fixture DevTest'), @('productName', 'Virtual Machines RHEL'), @('productName', 'SQL Server'), @('skuName', 'SUSE'), @('type', 'Reservation'), @('currencyCode', 'EUR'), @('unitOfMeasure', '1 Month'), @('isPrimaryMeterRegion', $false), @('armRegionName', 'eastus'))) {
+                $row = Copy-Fixture $linux; $row.($case[0]) = $case[1]
+                Assert-Check ($null -eq (Get-LabRetailRate @($row) 'Standard_B2s_v2' 'westus2' Linux $now)) ($case -join '=')
+                Assert-Check ((Get-LabRetailRate @($row, $linux) 'Standard_B2s_v2' 'westus2' Linux $now).Rate -eq 1)
+            }
+            foreach ($case in @(@('retailPrice', 'NaN'), @('retailPrice', 'Infinity'), @('retailPrice', 0), @('retailPrice', -1), @('retailPrice', $null), @('effectiveStartDate', 'invalid'), @('tierMinimumUnits', 'invalid'))) {
+                $row = Copy-Fixture $linux; $row.($case[0]) = $case[1]
+                Assert-Check ($null -eq (Get-LabRetailRate @($row, $linux) 'Standard_B2s_v2' 'westus2' Linux $now))
+            }
+            Assert-Check ($null -eq (Get-LabRetailRate @($linux, $linux) 'Standard_B2s_v2' 'westus2' Linux $now))
+            $other = Copy-Fixture $linux; $other.retailPrice = 9
+            Assert-Check ($null -eq (Get-LabRetailRate @($linux, $other) 'Standard_B2s_v2' 'westus2' Linux $now))
+            $old = Copy-Fixture $linux; $old.effectiveStartDate = '2025-01-01T00:00:00Z'; $old.retailPrice = 9
+            $future = Copy-Fixture $linux; $future.effectiveStartDate = '2099-01-01T00:00:00Z'
+            Assert-Check ((Get-LabRetailRate @($old, $linux, $future) 'Standard_B2s_v2' 'westus2' Linux $now).Rate -eq 1)
+            Assert-Check ($null -eq (Get-LabRetailRate @() 'Standard_B2s_v2' 'westus2' Linux $now))
+        }
+        $checks['target-sizing/retail_pages_cache_timeout_no_retry_and_untrusted_links [mocked public GET]'] = {
+            $url = 'https://prices.azure.com/api/retail/prices?page=2'
+            foreach ($bad in @('http://prices.azure.com/api/retail/prices', 'https://prices.azure.com.attacker.test/api/retail/prices', 'https://user@prices.azure.com/api/retail/prices', 'https://prices.azure.com:444/api/retail/prices', '/api/retail/prices', 'https://prices.azure.com/elsewhere')) { Assert-Check (-not (Test-LabRetailUri $bad)) }
+            $script:LabRetailCache = @{}; $retailFixture.Calls = 0; $retailFixture.TimeoutOnce = $true; $retailFixture.Fail = $false
+            $retailFixture.Pages = @([pscustomobject]@{ Items = @((New-RetailRow)); NextPageLink = $url }, [pscustomobject]@{ Items = @(); NextPageLink = $null })
+            $result = Get-LabRetailSnapshot westus2
+            Assert-Check ($result.Complete -and $retailFixture.Calls -eq 3)
+            $null = Get-LabRetailSnapshot westus2; Assert-Check ($retailFixture.Calls -eq 3)
+            $script:LabRetailCache = @{}; $retailFixture.Calls = 0; $retailFixture.TimeoutOnce = $false
+            $retailFixture.Pages = @([pscustomobject]@{ Items = @((New-RetailRow)); NextPageLink = 'https://attacker.test/prices' })
+            Assert-Check (-not (Get-LabRetailSnapshot westus2).Complete); Assert-Check ($retailFixture.Calls -eq 1)
+            $script:LabRetailCache = @{}; $retailFixture.Calls = 0; $retailFixture.Fail = $true
+            Assert-Check (-not (Get-LabRetailSnapshot westus2).Complete); Assert-Check ($retailFixture.Calls -eq 1)
+            $retailFixture.Fail = $false
+            foreach ($items in @(@{ Value = @() }, @{ Value = @((New-RetailRow)) })) {
+                $script:LabRetailCache = @{}; $retailFixture.Calls = 0
+                $retailFixture.Pages = @([pscustomobject]@{ Items = $items.Value; NextPageLink = $null })
+                Assert-Check (Get-LabRetailSnapshot westus2).Complete 'Valid empty/singleton JSON arrays must complete.'
+            }
+            foreach ($items in @(@{ Value = $null }, @{ Value = 'invalid' }, @{ Value = (New-RetailRow) }, @{ Value = 1 })) {
+                $script:LabRetailCache = @{}; $retailFixture.Calls = 0
+                $retailFixture.Pages = @([pscustomobject]@{ Items = $items.Value; NextPageLink = $null })
+                Assert-Check (-not (Get-LabRetailSnapshot westus2).Complete) 'Null/scalar/string Items must be rejected.'
+            }
+        }
+        $checks['target-sizing/aggregate_quota_search_OS_costs_ties_infeasible_and_no_fallback [pure helper]'] = {
+            $usage = New-SizingUsage 4 4
+            $skus = @((New-SizingSku 'Standard_B2ls_v2' familyA 4), (New-SizingSku 'Standard_D2s_v5' familyB 8))
+            $candidates = @(Get-LabSizingCandidates $skus $usage westus2)
+            $rows = @((New-RetailRow 'Standard_B2ls_v2' 1 Linux), (New-RetailRow 'Standard_B2ls_v2' 1 Windows),
+                (New-RetailRow 'Standard_D2s_v5' 2 Linux), (New-RetailRow 'Standard_D2s_v5' 2 Windows))
+            $retail = New-RetailFixture $rows
+            $plan = Get-LabCostTargetPlan $candidates $usage $retail westus2
+            Assert-Check ($plan.Complete -and $plan.Selected.Count -eq 4 -and $plan.TotalHourlyUSD -eq 6)
+            Assert-Check (@($plan.Selected | Where-Object { $_.Family -ceq 'familyA' }).Count -eq 2)
+            Assert-Check (@($plan.Selected | Where-Object { $_.DisplayName -ceq 'OnPrem-SQL' })[0].Name -ceq 'Standard_D2s_v5')
+            $low = New-SizingUsage 2 4
+            Assert-Check (-not (Get-LabCostTargetPlan $candidates $low $retail westus2).Complete)
+            Assert-Check (-not (Get-LabCostTargetPlan $candidates @() $retail westus2).Complete)
+            Assert-Check (-not (Get-LabCostTargetPlan $candidates $usage (New-RetailFixture $rows $false) westus2).Complete)
+            Assert-Check (-not (Get-LabCostTargetPlan $candidates $usage (New-RetailFixture $rows[0..2]) westus2).Complete)
+            $tie = @(Get-LabCostOrderedOptions @([pscustomobject]@{ Name = 'Standard_D2s_v5'; Rate = 1 }, [pscustomobject]@{ Name = 'Standard_B2s_v2'; Rate = 1 }))
+            Assert-Check ($tie[0].Name -ceq 'Standard_B2s_v2')
+            Assert-Check (-not (Get-LabCostTargetPlan @() $usage $retail westus2).Complete)
+            $workloads = @(Get-LabSizingWorkloads)
+            Assert-Check (($workloads.MinimumMemoryGB -join ',') -ceq '4,8,2,2')
+        }
+        $checks['target-sizing/standalone_parity_no_profiles_nonbinding_forecast_and_selected_groups [AST + source contract]'] = {
+            $three = Get-StepText 3
+            $threeAst = [System.Management.Automation.Language.Parser]::ParseInput($three, [ref]$null, [ref]$null)
+            foreach ($name in @('Get-LabSizingWorkloads', 'Get-LabSizingCandidates', 'Test-LabRetailUri', 'Invoke-LabRetailPage', 'Get-LabRetailSnapshot', 'Get-LabRetailRate', 'Get-LabCostOrderedOptions', 'Get-LabCostTargetPlan', 'Show-LabCostTargetPlan', 'Get-LabTargetSizeOptions', 'Test-LabTargetSizeMapping', 'Select-LabTargetVmSizes', 'Show-LabTargetSizeSelection')) {
+                $oneDef = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))[0]
+                $threeDef = @($threeAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))[0]
+                Assert-Check ($oneDef.Extent.Text -ceq $threeDef.Extent.Text) ('Standalone sizing helper drift: ' + $name)
+            }
+            Assert-Absent ($step1 + $three) @('TargetVmProfile', 'BSeries', 'D2asV5', 'Standard_B1ms', 'Resolve-LabTargetVmForecast')
+            Assert-Contains $step1 @('[string[]]$ForecastVmSizes', 'Custom ForecastVmSizes: nonbinding quota-only', 'separate from explicit target choices', '-PlannedSizes $ForecastVmSizes', 'NETWORK-ONLY')
+            Assert-Contains $three @('$targetSnapshot = Get-LabRegionQuotaSnapshot -Location $Location', '$targetSizing = Get-LabCostTargetPlan', '$configuration.TargetVMSize = $choice[0].Name', 'target-sizing/selection-quota-unresolved')
+            $mapping = '$vmConfigurations = @(' + (Get-Section $three '$vmConfigurations = @(' 'foreach ($configuration in $vmConfigurations)')
+            $filter = '$LabWorkloadGroups = @{' + (Get-Section $three '$LabWorkloadGroups = @{' "# ================================================================`nWrite-Section")
+            $mappingAst = [System.Management.Automation.Language.Parser]::ParseInput(($mapping + $filter), [ref]$null, [ref]$null)
+            foreach ($command in $mappingAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                Assert-Check ($command.GetCommandName() -in @('Where-Object', 'Write-Host') -and $command.InvocationOperator -eq 'Unknown')
+            }
+            foreach ($Workload in @('All', 'Agentless', 'AgentBased')) {
+                . ([scriptblock]::Create($mapping + $filter))
+                $expected = switch ($Workload) { All { $required } Agentless { @('OnPrem-Web', 'OnPrem-Linux-Web') } AgentBased { @('OnPrem-SQL', 'OnPrem-Linux-App') } }
+                Assert-Check (($vmConfigurations.DisplayName -join ',') -ceq ($expected -join ','))
+                foreach ($config in $vmConfigurations) { Assert-Check ($null -eq $config.TargetVMSize -and $config.DiskType -ceq 'StandardSSD_LRS') }
+            }
+            Assert-Before $step1 '$quotaPreflight = Show-LabQuotaPreflight' 'Register-AzResourceProvider -ProviderNamespace'
+            Assert-Contains $three @('Replication writes submitted: 0.', 'Existing replication was not overwritten or resized.', 'No verified Azure Migrate Hyper-V PowerShell replication backend')
+        }
+        function New-SelectionSnapshot {
+            param([object[]]$Skus = @((New-SizingSku)), [object[]]$Usage = (New-SizingUsage))
+            return [pscustomobject]@{ Skus = $Skus; Usage = $Usage; Issues = @() }
+        }
+        function New-SelectionMapping {
+            param([string]$Size = 'Standard_B2s_v2')
+            return @{ 'OnPrem-Web' = $Size; 'OnPrem-SQL' = $Size; 'OnPrem-Linux-Web' = $Size; 'OnPrem-Linux-App' = $Size }
+        }
+        $checks['target-selection/numbered_invalid_reprompt_all_four_explicit [mocked helper]'] = {
+            $selectionFixture.Answers = @('bad', '0', '99', '1.0', '1', '1', '1', '1'); $selectionFixture.Reads = 0
+            $selectedPlan = Select-LabTargetVmSizes (New-SelectionSnapshot) (New-RetailFixture @() $false) westus2
+            Assert-Check ($selectedPlan.SelectionComplete -and $selectedPlan.Selected.Count -eq 4 -and $selectionFixture.Reads -eq 8)
+            Assert-Check ($selectionFixture.Answers.Count -eq 0)
+            Assert-Check (@($selectedPlan.Selected | Where-Object { $null -eq $_.Rate }).Count -eq 4)
+        }
+        $checks['target-selection/blank_at_any_workload_cancels_entire_plan [mocked helper]'] = {
+            foreach ($position in 0..3) {
+                $selectionFixture.Answers = @(@('1') * $position) + @(''); $selectionFixture.Reads = 0
+                Assert-Throws { Select-LabTargetVmSizes (New-SelectionSnapshot) (New-RetailFixture @()) westus2 }
+                Assert-Check ($selectionFixture.Reads -eq ($position + 1))
+            }
+        }
+        $checks['target-selection/full_mapping_no_prompt_price_gap_and_repricing_no_drift [mocked helper]'] = {
+            $selectionFixture.Answers = @(); $selectionFixture.Reads = 0
+            $snapshot = New-SelectionSnapshot @((New-SizingSku), (New-SizingSku Standard_D2s_v5 familyB))
+            $mapping = New-SelectionMapping
+            $selectedPlan = Select-LabTargetVmSizes $snapshot (New-RetailFixture @() $false) westus2 $mapping -MappingSupplied
+            Assert-Check ($selectedPlan.SelectionComplete -and $selectionFixture.Reads -eq 0)
+            Show-LabTargetSizeSelection $selectedPlan
+            Assert-Contains ($assessmentFixture.Logs -join "`n") @('$targetVmSizes = @{', "'OnPrem-SQL' = 'Standard_B2s_v2'", 'Price unavailable', 'No local state file')
+            $rows = @((New-RetailRow Standard_B2s_v2 99 Linux), (New-RetailRow Standard_B2s_v2 99 Windows), (New-RetailRow Standard_D2s_v5 1 Linux), (New-RetailRow Standard_D2s_v5 1 Windows))
+            $again = Select-LabTargetVmSizes $snapshot (New-RetailFixture $rows) westus2 $mapping -MappingSupplied
+            Assert-Check ($again.SelectionComplete -and @($again.Selected | Where-Object { $_.Name -cne 'Standard_B2s_v2' }).Count -eq 0 -and $selectionFixture.Reads -eq 0)
+        }
+        $checks['target-selection/mapping_exact_keys_types_SKU_and_RAM [mocked helper]'] = {
+            $snapshot = New-SelectionSnapshot; $retail = New-RetailFixture @()
+            $invalidMaps = @($null, @{}, @{ 'OnPrem-Web' = 'Standard_B2s_v2' })
+            foreach ($kind in @('missing', 'extra', 'case', 'duplicate-case', 'array', 'number', 'blank', 'unknown-key', 'unknown-sku')) {
+                $mapping = New-SelectionMapping
+                switch ($kind) {
+                    missing { $mapping.Remove('OnPrem-SQL') }
+                    extra { $mapping['Extra'] = 'Standard_B2s_v2' }
+                    case { $mapping.Remove('OnPrem-Web'); $mapping['onprem-web'] = 'Standard_B2s_v2' }
+                    'duplicate-case' { $mapping = [hashtable]::new([StringComparer]::Ordinal); $mapping['OnPrem-Web'] = 'Standard_B2s_v2'; $mapping['onprem-web'] = 'Standard_B2s_v2'; $mapping['OnPrem-SQL'] = 'Standard_B2s_v2'; $mapping['OnPrem-Linux-Web'] = 'Standard_B2s_v2'; $mapping['OnPrem-Linux-App'] = 'Standard_B2s_v2' }
+                    array { $mapping['OnPrem-Web'] = @('Standard_B2s_v2') }
+                    number { $mapping['OnPrem-Web'] = 1 }
+                    blank { $mapping['OnPrem-Web'] = '' }
+                    'unknown-key' { $mapping.Remove('OnPrem-Web'); $mapping['OtherVM'] = 'Standard_B2s_v2' }
+                    'unknown-sku' { $mapping['OnPrem-Web'] = 'Standard_NotARealSku' }
+                }
+                $invalidMaps += ,$mapping
+            }
+            foreach ($mapping in $invalidMaps) { Assert-Throws { Select-LabTargetVmSizes $snapshot $retail westus2 $mapping -MappingSupplied } }
+            foreach ($memory in @(2, 4)) {
+                $small = New-SelectionSnapshot @((New-SizingSku Standard_B2ls_v2 familyA $memory), (New-SizingSku Standard_D2s_v5 familyB 8))
+                $mapping = New-SelectionMapping Standard_D2s_v5; $mapping['OnPrem-SQL'] = 'Standard_B2ls_v2'
+                Assert-Throws { Select-LabTargetVmSizes $small $retail westus2 $mapping -MappingSupplied }
+                if ($memory -eq 2) { $mapping = New-SelectionMapping Standard_D2s_v5; $mapping['OnPrem-Web'] = 'Standard_B2ls_v2'; Assert-Throws { Select-LabTargetVmSizes $small $retail westus2 $mapping -MappingSupplied } }
+            }
+        }
+        $checks['target-selection/metadata_quota_stale_eligibility_fail_closed_despite_price_gap [mocked helper]'] = {
+            $mapping = New-SelectionMapping; $retail = New-RetailFixture @() $false
+            foreach ($kind in @('skus', 'usage', 'family', 'regional', 'vmcount', 'capability', 'restriction', 'read-failed')) {
+                $snapshot = New-SelectionSnapshot
+                switch ($kind) {
+                    skus { $snapshot.Skus = @() }
+                    usage { $snapshot.Usage = @() }
+                    family { $snapshot.Usage = @($snapshot.Usage | Where-Object { $_.Name.Value -ne 'familyA' }) }
+                    regional { @($snapshot.Usage | Where-Object { $_.Name.Value -eq 'cores' })[0].Limit = 7 }
+                    vmcount { @($snapshot.Usage | Where-Object { $_.Name.Value -eq 'virtualMachines' })[0].Limit = 3 }
+                    capability { $snapshot.Skus[0].Capabilities = @($snapshot.Skus[0].Capabilities | Where-Object { $_.Name -ne 'PremiumIO' }) }
+                    restriction { $snapshot.Skus[0].Restrictions = @([pscustomobject]@{ Type = 'Location'; Values = @('westus2') }) }
+                    'read-failed' { $snapshot.Issues = @('Synthetic SKU read refused') }
+                }
+                Assert-Throws { Select-LabTargetVmSizes $snapshot $retail westus2 $mapping -MappingSupplied }
+                Assert-Check (-not (Select-LabTargetVmSizes $snapshot $retail westus2).SelectionComplete)
+            }
+        }
+        $checks['target-selection/combined_family_overcommit_never_autochanges_restart_or_stop [mocked helper]'] = {
+            $snapshot = New-SelectionSnapshot @((New-SizingSku Standard_B2ls_v2 familyA 4), (New-SizingSku Standard_D2s_v5 familyB 8)) (New-SizingUsage 4 4)
+            $retail = New-RetailFixture @((New-RetailRow Standard_B2ls_v2 1 Windows), (New-RetailRow Standard_B2ls_v2 1 Linux), (New-RetailRow Standard_D2s_v5 2 Windows), (New-RetailRow Standard_D2s_v5 2 Linux))
+            $mapping = New-SelectionMapping Standard_B2ls_v2; $mapping['OnPrem-SQL'] = 'Standard_D2s_v5'
+            Assert-Throws { Select-LabTargetVmSizes $snapshot $retail westus2 $mapping -MappingSupplied }
+            Assert-Check ($mapping['OnPrem-Linux-App'] -ceq 'Standard_B2ls_v2')
+            $selectionFixture.Answers = @('1', '1', '1', '1', '1', '1', '1', '1', '2'); $selectionFixture.Reads = 0
+            $selectedPlan = Select-LabTargetVmSizes $snapshot $retail westus2
+            Assert-Check ($selectedPlan.SelectionComplete -and $selectionFixture.Reads -eq 9)
+            Assert-Check ($selectedPlan.TargetVmSizes['OnPrem-Web'] -ceq 'Standard_B2ls_v2' -and $selectedPlan.TargetVmSizes['OnPrem-Linux-App'] -ceq 'Standard_D2s_v5')
+            Assert-Contains ($assessmentFixture.Logs -join "`n") @('[1] Reselect all four sizes')
+            foreach ($stop in @('2', '')) {
+                $selectionFixture.Answers = @('1', '1', '1', '1', $stop)
+                Assert-Throws { Select-LabTargetVmSizes $snapshot $retail westus2 }
+            }
+        }
+        $checks['target-selection/known_prices_cost_order_ties_unknowns_stable_not_cheapest [pure helper]'] = {
+            $snapshot = New-SelectionSnapshot @((New-SizingSku Standard_B2s_v2), (New-SizingSku Standard_B2ls_v2), (New-SizingSku Standard_D2s_v5 familyB))
+            $candidates = @(Get-LabSizingCandidates $snapshot.Skus $snapshot.Usage westus2)
+            $workload = @(Get-LabSizingWorkloads)[0]
+            $retail = New-RetailFixture @((New-RetailRow Standard_B2s_v2 2 Windows), (New-RetailRow Standard_D2s_v5 1 Windows))
+            $options = @(Get-LabTargetSizeOptions $candidates $snapshot.Usage $retail westus2 $workload)
+            Assert-Check (($options.Name -join ',') -ceq 'Standard_D2s_v5,Standard_B2s_v2,Standard_B2ls_v2' -and $null -eq $options[2].Rate)
+            $retail = New-RetailFixture @((New-RetailRow Standard_B2s_v2 1 Windows), (New-RetailRow Standard_B2ls_v2 1 Windows))
+            $options = @(Get-LabTargetSizeOptions $candidates $snapshot.Usage $retail westus2 $workload)
+            Assert-Check (($options.Name -join ',') -ceq 'Standard_B2ls_v2,Standard_B2s_v2,Standard_D2s_v5')
+            $options = @(Get-LabTargetSizeOptions $candidates $snapshot.Usage (New-RetailFixture @() $false) westus2 $workload)
+            Assert-Check (($options.Name -join ',') -ceq 'Standard_B2ls_v2,Standard_B2s_v2,Standard_D2s_v5' -and @($options | Where-Object { $null -ne $_.Rate }).Count -eq 0)
+        }
+        $checks['target-selection/cross_step_handoff_selection_not_cost_and_before_writes [source contract]'] = {
+            $three = Get-StepText 3
+            Assert-Contains ($step1 + $three) @('[hashtable]$TargetVmSizes', "-MappingSupplied:(`$PSBoundParameters.ContainsKey('TargetVmSizes'))")
+            Assert-Contains $step1 @("' -TargetVmSizes `$targetVmSizes'", 'Show-LabTargetSizeSelection -Selection $quotaPreflight.Selection', '$selection.SelectionComplete')
+            Assert-Contains $three @('$targetSelection.SelectionComplete', '$targetSelection.Selected', '[Blocked] Target VM selection unresolved', '$configuration.TargetVMSize = $choice[0].Name')
+            Assert-Absent $three @('if ($targetSizing.Complete -and', 'if (-not $targetSizing.Complete')
+            Assert-Before $step1 '$quotaPreflight = Show-LabQuotaPreflight' 'Register-AzResourceProvider -ProviderNamespace'
+            Assert-Before $three '$targetSelection = Select-LabTargetVmSizes' '$LabWorkloadGroups = @{'
+        }
+        function New-ReplicationCommandFixture {
+            param([string[]]$Names, [string]$ExtraMandatory = '', [type]$IdentityType = [string])
+            $parameters = @(foreach ($name in $Names) { [pscustomobject]@{ Name = $name; ParameterType = $IdentityType; IsMandatory = $true } })
+            if ($ExtraMandatory) { $parameters += [pscustomobject]@{ Name = $ExtraMandatory; ParameterType = [string]; IsMandatory = $true } }
+            return [pscustomobject]@{ Name = 'FictionalRead'; ParameterSets = @([pscustomobject]@{ Name = 'Default'; Parameters = $parameters }) }
+        }
+        $checks['replication/resource_identity_actual_Id_or_ResourceId [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $id = "/subscriptions/$sub/resourceGroups/fictional-target/providers/Microsoft.Network/virtualNetworks/fictional-vnet"
+            foreach ($object in @([pscustomobject]@{ Id = $id }, [pscustomobject]@{ ResourceId = $id }, @{ Id = $id; ResourceId = $id.ToUpperInvariant() })) {
+                Assert-Check ((Get-LabReplicationObjectId $object 'offline/target-network' 'Microsoft.Network/virtualNetworks' $sub) -ieq $id)
+            }
+            Assert-Check ((ConvertTo-LabReplicationArmId "/subscriptions/$sub/resourceGroups/fictional-target" 'offline/target-group' 'Microsoft.Resources/resourceGroups' $sub) -match '/fictional-target$')
+        }
+        $checks['replication/empty_collection_conflicting_and_malformed_identity_rejected [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $id = "/subscriptions/$sub/resourceGroups/fictional-target/providers/Microsoft.Network/virtualNetworks/fictional-vnet"
+            foreach ($object in @($null, '', [pscustomobject]@{}, [pscustomobject]@{ Id = '' }, [pscustomobject]@{ Id = @($id) }, [pscustomobject]@{ Id = $id; ResourceId = $id + '-other' })) {
+                Assert-Throws { Get-LabReplicationObjectId -InputObject $object -Stage 'offline/target-network' -ResourceType 'Microsoft.Network/virtualNetworks' -SubscriptionId $sub }
+            }
+            Assert-Throws { Get-LabReplicationObjectId -InputObject @() -Stage 'offline/target-network' -ResourceType 'Microsoft.Network/virtualNetworks' -SubscriptionId $sub }
+            Assert-Throws { Get-LabReplicationObjectId -InputObject @([pscustomobject]@{ Id = $id }) -Stage 'offline/target-network' -ResourceType 'Microsoft.Network/virtualNetworks' -SubscriptionId $sub }
+            foreach ($value in @('', ' ', ($id + '/'), ($id + '?api-version=x'), ($id + ';malformed'), ($id + '/..'), $id.Replace('/subscriptions/', '/subscription/'), $id.Replace($sub, '00000000-0000-0000-0000-000000000002'), $id.Replace('virtualNetworks', 'networkInterfaces'))) {
+                Assert-Throws { ConvertTo-LabReplicationArmId $value 'offline/target-network' 'Microsoft.Network/virtualNetworks' $sub }
+            }
+        }
+        $checks['replication/selected_inventory_is_exact_unique_and_hyperv [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $inventory = @(for ($i = 0; $i -lt $required.Count; $i++) { [pscustomobject]@{ DisplayName = $required[$i]; Id = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.OffAzure/hyperVSites/fictional-site/machines/fictional-$i" } })
+            $configs = @([pscustomobject]@{ DisplayName = 'OnPrem-Web' }, [pscustomobject]@{ DisplayName = 'OnPrem-Linux-Web' })
+            $rows = @(Get-LabReplicationSelectedMachines $inventory $configs $sub)
+            Assert-Check ($rows.Count -eq 2 -and $rows[0].VMName -ceq 'OnPrem-Web' -and $rows[1].VMName -ceq 'OnPrem-Linux-Web')
+            foreach ($invalid in @(@($inventory[0]), @($inventory + $inventory[0]))) { Assert-Throws { Get-LabReplicationSelectedMachines $invalid $configs $sub } }
+            $duplicate = Copy-Fixture $inventory; $duplicate[2].Id = $duplicate[0].Id
+            Assert-Throws { Get-LabReplicationSelectedMachines $duplicate $configs $sub }
+            $foreign = Copy-Fixture $inventory; $foreign[0].Id = $foreign[0].Id.Replace('hyperVSites', 'vmwareSites')
+            Assert-Throws { Get-LabReplicationSelectedMachines $foreign $configs $sub }
+            Assert-Throws { Get-LabReplicationSelectedMachines $inventory @() $sub }
+            Assert-Throws { Get-LabReplicationSelectedMachines $inventory @($configs + $configs[0]) $sub }
+        }
+        $checks['replication/group_alias_is_normalized_without_changing_shared_contract [pure helper]'] = {
+            foreach ($value in @('AgentBased', 'Agent-based', 'AGENT-BASED', ' Agent-based ')) { Assert-Check ((Resolve-LabReplicationWorkload $value) -ceq 'AgentBased') }
+            foreach ($value in @('All', 'Agentless')) { Assert-Check ((Resolve-LabReplicationWorkload $value) -ceq $value) }
+            foreach ($value in @('', 'Agent based', 'VMware', 'All,Agentless')) { Assert-Throws { Resolve-LabReplicationWorkload $value } }
+            $text = Get-StepText 3
+            Assert-Before $text '$Workload = Resolve-LabReplicationWorkload $Workload' '$Workload = Select-LabFromList'
+            Assert-Contains $text @('-Workload $Workload', 'Step 4 and Step 5 remain separate')
+        }
+        $checks['replication/current_command_parameter_set_and_required_types [pure helper]'] = {
+            $names = @('ProjectName', 'ResourceGroupName', 'SourceMachineType')
+            $command = New-ReplicationCommandFixture $names
+            Assert-Check (Test-LabReplicationCommandContract $command $names @{ ProjectName = [string]; ResourceGroupName = [string] })
+            Assert-Check (-not (Test-LabReplicationCommandContract $null $names))
+            Assert-Check (-not (Test-LabReplicationCommandContract @($command) $names))
+            Assert-Check (-not (Test-LabReplicationCommandContract (New-ReplicationCommandFixture @('MachineId')) $names))
+            Assert-Check (-not (Test-LabReplicationCommandContract (New-ReplicationCommandFixture $names 'ResourceName') $names))
+            Assert-Check (-not (Test-LabReplicationCommandContract (New-ReplicationCommandFixture $names '' ([int])) $names @{ ProjectName = [string] }))
+            $split = [pscustomobject]@{ ParameterSets = @((New-ReplicationCommandFixture @('ProjectName')).ParameterSets[0], (New-ReplicationCommandFixture @('ResourceGroupName', 'SourceMachineType')).ParameterSets[0]) }
+            Assert-Check (-not (Test-LabReplicationCommandContract $split $names))
+        }
+        $checks['replication/backend_selection_never_reuses_vmware_or_unverified_ASR [pure helper]'] = {
+            $vmwareType = [pscustomobject]@{ FullName = 'Microsoft.Azure.PowerShell.Cmdlets.Migrate.Models.Api20200101.IVMwareMachine' }
+            $vmware = [pscustomobject]@{ ParameterSets = @([pscustomobject]@{ Parameters = @([pscustomobject]@{ Name = 'InputObject'; ParameterType = $vmwareType }) }) }
+            $asr = New-ReplicationCommandFixture @('HyperVToAzure', 'ProtectableItem', 'Name', 'ProtectionContainerMapping', 'RecoveryAzureStorageAccountId', 'OSDiskName', 'OS', 'RecoveryResourceGroupId')
+            $decision = Get-LabReplicationApiDecision $vmware $asr
+            Assert-Check (-not $decision.CanWrite -and $decision.Path -ceq 'Portal' -and $decision.AsrHyperVSurface -and $decision.Blocker.Contains('VMware/VMwareCbt') -and $decision.Blocker.Contains('not verified'))
+            foreach ($command in @($null, (New-ReplicationCommandFixture @('MachineId')), (New-ReplicationCommandFixture @('HyperVToAzure')))) {
+                $decision = Get-LabReplicationApiDecision $command $null
+                Assert-Check (-not $decision.CanWrite -and $decision.Path -ceq 'Portal' -and -not $decision.AsrHyperVSurface)
+            }
+        }
+        $checks['replication/ResourceName_bug_path_removed_and_zero_mutations [AST + source contract]'] = {
+            $text = Get-StepText 3
+            $errors = $null
+            $scriptAst = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+            Assert-Check (@($errors).Count -eq 0)
+            $forbidden = @('Get-AzMigrateServerReplication', 'New-AzMigrateServerReplication', 'New-AzMigrateDiskMapping', 'Install-Module', 'Register-AzResourceProvider', 'New-AzRecoveryServicesAsrReplicationProtectedItem', 'Set-AzRecoveryServicesAsrVaultContext')
+            foreach ($command in $scriptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                Assert-Check ($command.GetCommandName() -notin $forbidden) 'Unsupported backend or mutation command remains executable.'
+                Assert-Check ($command.GetCommandName() -eq 'Set-AzContext' -or $command.GetCommandName() -notmatch '^(?:New|Set|Start|Remove|Stop|Update|Register|Install)-Az')
+            }
+            Assert-Contains $text @('STEP 3 BLOCKED', 'Replication writes submitted: 0.', 'Replication readiness: NOT VERIFIED', 'No module replication/monitoring sections are claimed complete.', 'No replication writes were attempted.', 'No allocation, automatic retry, fallback or capacity guarantee.', "throw '[backend-contract]")
+            Assert-Absent $text @('STEP 3 COMPLETE', '30-90 minutes', '~`$120/month', 'OSDiskID', '$disk.Uuid', 'TargetResourceGroupId  = $targetRg.ResourceId')
+            Assert-Before $text '$discoveryCommand = Get-Command' '$discoveredServers = @(Get-AzMigrateDiscoveredServer'
+            Assert-Before $text 'if (Test-LabReplicationCommandContract' '$discoveredServers = @(Get-AzMigrateDiscoveredServer'
+            Assert-Contains $text @('VM-GUID/host mapping is not verified', 'source-inventory/installed-command-contract', 'A failed read is NOT an absent or unreplicated VM', 'original failing call cannot be proven without its stack')
+        }
+        $checks['replication/portal_only_readiness_gate_and_same_workload_guidance [source contract]'] = {
+            $text = Get-StepText 3
+            Assert-Contains $text @('-Workload $Workload', 'use the SAME -Workload', 'They are NOT run or authorized by this script.', 'only after every selected source is healthy and initial replication is complete', 'previous attempt may have submitted a job', 'live selected-source state before retrying', 'Existing replication was not overwritten or resized', 'not assessment-derived', 'four-workload aggregate quota')
+            Assert-Absent $text @('Start-AzMigrateTestMigration', 'Start-AzMigrateServerMigration', 'Stop-AzVM', 'allReplicating = $true', 'allHealthy = $true')
+        }
+        $checks['target-sizing/portal_compute_guidance_replaces_wrapper_forwarding [source contract]'] = {
+            $text = Get-StepText 3
+            Assert-Contains $text @('Explicit target choices (not assessment-derived', '$vmConfig.TargetVMSize', 'each requested VM size and actual OS disk in the wizard', 'Existing replication was not overwritten or resized', 'not assessment-derived', 'No allocation, automatic retry, fallback or capacity guarantee.')
+            Assert-Contains $text @('Step 4 and Step 5 remain separate', '-Workload $Workload', 'Separate script support must be verified before use.')
+            Assert-Absent $text @('@replicationParams', 'TargetVMSize           = $vmConfig.TargetVMSize')
+            $commands = Get-Section $project '$replicationProfileCommands = @(' '$projectCreationInstructions = @('
+            Assert-Contains $commands @('migrate-step3-replicate.ps1', '-Workload All', '-Location')
+            Assert-Absent $commands @('-TargetVmProfile')
+            Assert-Absent $commands @('migrate-step3a-agentless', 'migrate-step3b-agent-based')
+        }
+        $checks['replication/empty_missing_invalid_and_valid_vault_reference_diagnostics [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $id = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.RecoveryServices/vaults/fictional-vault"
+            foreach ($solution in @($null, [pscustomobject]@{}, [pscustomobject]@{ DetailExtendedDetail = [pscustomobject]@{ AdditionalProperties = @{} } })) {
+                $row = Get-LabReplicationVaultDiagnostic $solution $sub
+                Assert-Check ($row.State -ceq 'FieldUnavailable' -and -not $row.HasValidReference -and $null -eq $row.VaultId)
+            }
+            foreach ($value in @('', ' ', 'not-an-arm-id', $id.Replace('vaults', 'policies'), $id.Replace($sub, '00000000-0000-0000-0000-000000000002'))) {
+                $solution = [pscustomobject]@{ DetailExtendedDetail = [pscustomobject]@{ AdditionalProperties = @{ vaultId = $value } } }
+                $row = Get-LabReplicationVaultDiagnostic $solution $sub
+                $expected = if ([string]::IsNullOrWhiteSpace($value)) { 'Empty' } else { 'Invalid' }
+                Assert-Check ($row.State -ceq $expected -and -not $row.HasValidReference -and $null -eq $row.VaultId)
+            }
+            $arraySolution = [pscustomobject]@{ DetailExtendedDetail = [pscustomobject]@{ AdditionalProperties = @{ vaultId = @($id) } } }
+            Assert-Check ((Get-LabReplicationVaultDiagnostic $arraySolution $sub).State -ceq 'Invalid')
+            $valid = [pscustomobject]@{ DetailExtendedDetail = [pscustomobject]@{ AdditionalProperties = @{ vaultId = $id } } }
+            $row = Get-LabReplicationVaultDiagnostic $valid $sub
+            Assert-Check ($row.State -ceq 'PresentAndWellFormed' -and $row.HasValidReference -and $row.VaultId -ceq $id)
+        }
+        $checks['replication/compact_read_only_solution_version_and_machine_shape_capture [source contract]'] = {
+            $text = Get-StepText 3
+            Assert-Contains $text @('$solutionCommand = Get-Command -Name Get-AzMigrateSolution', 'discoveredNameIsGuid=$isGuidName', 'Get-LabReplicationField $module ''Version''', 'Get-LabProjectVaultAssociation', 'Get-LabMigrateProjectRead', 'Project association:')
+            Assert-Absent $text @('Get-AzMigrateSolution -Name', 'Get-AzResource -', 'Write-Host $machine.DiscoveredId', 'Set-AzRecoveryServicesAsrVaultContext')
+        }
+        $checks['vault/active_raw_association_blank_array_null_conflict_and_partial [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $projectId = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.Migrate/migrateProjects/project"
+            $vault = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.RecoveryServices/vaults/vault"
+            $solution = [pscustomobject]@{ id = ($projectId + '/solutions/legacy'); properties = [pscustomobject]@{ goal = 'Servers'; purpose = 'Migration'; status = 'Active'; details = [pscustomobject]@{ extendedDetails = [pscustomobject]@{ vaultId = '' } } } }
+            $inventory = [pscustomobject]@{ Complete = $true; Items = @($solution) }
+            $association = Get-LabProjectVaultAssociation $inventory $projectId $sub
+            Assert-Check ($association.State -ceq 'Unknown' -and $association.ActiveServerMigrationCount -eq 1 -and $association.Solutions[0].ReferenceState -ceq 'NoReference')
+            foreach ($case in @(@{ Value = $null }, @{ Value = @('') }, @{ Value = @($vault) }, @{ Value = 'not-an-id' }, @{ Value = $vault.Replace($sub, '00000000-0000-0000-0000-000000000002') })) {
+                $solution.properties.details.extendedDetails.vaultId = $case.Value
+                $association = Get-LabProjectVaultAssociation $inventory $projectId $sub
+                Assert-Check ($association.State -ceq 'Unknown' -and $association.Reason -ceq 'ReadOrShapeUnknown')
+            }
+            $solution.properties.details.extendedDetails.vaultId = $vault
+            Assert-Check ((Get-LabProjectVaultAssociation $inventory $projectId $sub).State -ceq 'AzureVerified')
+            $inactive = [pscustomobject]@{ id = ($projectId + '/solutions/inactive'); properties = [pscustomobject]@{ goal = 'Servers'; purpose = 'Migration'; status = 'Inactive'; details = [pscustomobject]@{ extendedDetails = [pscustomobject]@{ vaultId = 'invalid-but-inactive' } } } }
+            $inventory.Items = @($solution, $inactive)
+            Assert-Check ((Get-LabProjectVaultAssociation $inventory $projectId $sub).State -ceq 'AzureVerified')
+            $inactive.properties.status = 'Active'; $inactive.properties.details.extendedDetails.vaultId = $vault + '-other'
+            Assert-Check ((Get-LabProjectVaultAssociation $inventory $projectId $sub).Reason -ceq 'ConflictingActiveReferences')
+            $inventory.Complete = $false
+            Assert-Check ((Get-LabProjectVaultAssociation $inventory $projectId $sub).State -ceq 'Unknown')
+        }
+        $checks['vault/paging_host_collection_version_and_terminal_null [pure helper + source contract]'] = {
+            $endpoint = 'https://management.azure.com'; $path = '/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/fictional-source/resources'
+            Assert-Check (Test-LabArmPageUri ($endpoint + $path + '?api-version=2021-04-01') $path '2021-04-01' $endpoint)
+            Assert-Check (Test-LabArmPageUri ($endpoint + $path + '?api-version=2021-04-01&$skiptoken=cursor%2Bnext') $path '2021-04-01' $endpoint)
+            foreach ($bad in @(('https://other.example' + $path + '?api-version=2021-04-01'), ($endpoint + $path + '?api-version=2026-07-01'), ($endpoint + $path + '/other?api-version=2021-04-01'), ('https://user@management.azure.com' + $path + '?api-version=2021-04-01'), ($path + '?api-version=2021-04-01'))) {
+                Assert-Check (-not (Test-LabArmPageUri $bad $path '2021-04-01' $endpoint))
+            }
+            $text = Get-StepText 3
+            $collection = Get-Section $text 'function Get-LabArmCollection {' 'function Get-LabMigrateProjectRead {'
+            Assert-Contains $collection @('$null -eq $next -or $null -eq $next.Value', '$property.Value -isnot [array]', '$null -eq $row -or $row -is [array]', 'if (-not $complete) { $items = @() }', '$seen.ContainsKey($uri)')
+        }
+        $checks['vault/provider_connection_identity_and_heartbeat_are_not_health [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $vault = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.RecoveryServices/vaults/vault"
+            $provider = [pscustomobject]@{ id = ($vault + '/replicationFabrics/site/replicationRecoveryServicesProviders/00000000-0000-0000-0000-000000000003'); type = 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationRecoveryServicesProviders'; properties = [pscustomobject]@{ friendlyName = 'fictional-host'; connectionStatus = 'Connected'; lastHeartBeat = '2026-10-15T21:48:24Z'; providerVersion = '5.1'; fabricType = 'HyperVSite' } }
+            $row = Get-LabProviderProjection $provider $vault $sub
+            Assert-Check ($row.Connected -and $row.CurrentConnection -ceq 'Connected' -and $null -ne $row.LastHeartBeatUtc)
+            $provider.properties.connectionStatus = 'UnknownState'
+            Assert-Check (-not (Get-LabProviderProjection $provider $vault $sub).Connected)
+            Assert-Throws { Get-LabProviderProjection $provider ($vault + '-other') $sub }
+            Assert-Throws { Get-LabProviderProjection $provider $vault '00000000-0000-0000-0000-000000000002' }
+            $utc = [DateTime]::SpecifyKind([DateTime]::Parse('2026-10-15T21:48:24', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Utc)
+            $unspecified = [DateTime]::SpecifyKind($utc, [DateTimeKind]::Unspecified)
+            $expected = Get-LabVaultInventoryTime '2026-10-15T21:48:24Z'
+            foreach ($value in @($utc, $utc.ToLocalTime(), $unspecified, [DateTimeOffset]::new($utc), '2026-10-15T23:48:24+02:00')) {
+                Assert-Check ((Get-LabVaultInventoryTime $value) -ceq $expected)
+                $provider.properties.lastHeartBeat = $value
+                Assert-Check ((Get-LabProviderProjection $provider $vault $sub).LastHeartBeatUtc -ceq $expected)
+            }
+            foreach ($value in @($null, 'unparseable', @('2026-10-15T21:48:24Z'))) { Assert-Check ($null -eq (Get-LabVaultInventoryTime $value)) }
+        }
+        $checks['vault/top_level_RPI_provider_and_vault_scoped_unattributed_jobs [pure helper]'] = {
+            $sub = '00000000-0000-0000-0000-000000000001'
+            $vault = "/subscriptions/$sub/resourceGroups/fictional-source/providers/Microsoft.RecoveryServices/vaults/vault"
+            $provider = $vault + '/replicationFabrics/site/replicationRecoveryServicesProviders/00000000-0000-0000-0000-000000000003'
+            $item = [pscustomobject]@{ id = ($vault + '/replicationFabrics/site/replicationProtectionContainers/container/replicationProtectedItems/item'); properties = [pscustomobject]@{ friendlyName = 'OnPrem-Web'; recoveryServicesProviderId = $provider; protectionState = 'Protected'; replicationHealth = 'Normal'; providerSpecificDetails = [pscustomobject]@{ instanceType = 'HyperVReplicaAzure'; vmId = '00000000-0000-0000-0000-000000000004'; customDetails = 'SECRETSENTINEL' } } }
+            $inventory = [pscustomobject]@{ Complete = $true; Items = @($item); Reason = 'Complete'; Failure = $null }
+            $row = Get-LabReplicationInventoryProjection $inventory $vault $sub $provider 'Items'
+            Assert-Check ($row.Complete -and $row.ObservedCount -eq 1 -and $row.MatchingProviderCount -eq 1 -and $row.Items.Count -eq 1 -and $row.UnattributedCount -eq 0 -and $row.Readiness -ceq 'NotVerified')
+            Assert-Absent ($row | ConvertTo-Json -Depth 8) @('SECRETSENTINEL', 'customDetails')
+            $job = [pscustomobject]@{ id = ($vault + '/replicationJobs/job'); properties = [pscustomobject]@{ friendlyName = 'Enable replication'; state = 'Succeeded'; startTime = '2026-10-15T21:00:00Z' } }
+            $inventory.Items = @($job)
+            $row = Get-LabReplicationInventoryProjection $inventory $vault $sub $provider 'Jobs'
+            Assert-Check ($row.Complete -and $row.Items.Count -eq 1 -and $row.UnattributedCount -eq 1 -and $row.MatchingProviderCount -eq 0 -and $row.Scope -ceq 'VaultScopedProviderAttributionUnknown' -and $row.Readiness -ceq 'NotVerified')
+            $inventory.Complete = $false
+            Assert-Check (-not (Get-LabReplicationInventoryProjection $inventory $vault $sub $provider 'Jobs').Complete)
+        }
+        $checks['vault/REST_GET_only_student_selection_unique_report_and_sizing_order [AST + source contract]'] = {
+            $text = Get-StepText 3
+            $scriptAst = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+            foreach ($command in $scriptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                Assert-Check ($command.GetCommandName() -cne 'Get-AzResource')
+                if ($command.GetCommandName() -ceq 'Invoke-AzRestMethod') { Assert-Contains $command.Extent.Text @('-Method GET') }
+            }
+            Assert-Contains $text @("'2021-04-01'", "'2018-09-01-preview'", "'2026-07-01'", 'StudentSelected', 'AzureVerified', 'VaultNotObservedInInspectedScope', 'ProviderRegistrationRequired', 'CreateNew', 'AzureWritesSubmitted = 0', 'ReplicationEnabledByScript = $false', 'CanCutOver = $false', 'ReplicationReadinessNotVerified = $true', 'Review + Start replication', 'No alternate vault was selected')
+            Assert-Absent $text @('[IO.Path]::GetTempPath()', 'PresentAndReadVerified')
+            Assert-Contains $text @('BlockedVaultTargetRegionMismatch', 'VaultTargetRegionUnverified', '$regionState -ceq ''Match''', 'if ($script:LabVaultReport.PortalConfigurationGuidanceAllowed)', 'Configuration guidance is withheld')
+            Assert-Before $text 'function Invoke-LabVaultInspection {' '$inspectionProject = Get-LabMigrateProjectRead'
+            Assert-Before $text '$inspectionProject = Get-LabMigrateProjectRead' '$vmConfigurations = @('
+            if ($text.Contains('$targetSelection = Select-LabTargetVmSizes')) { Assert-Before $text 'Invoke-LabVaultInspection -ProjectId $inspectionProjectId' '$targetSelection = Select-LabTargetVmSizes' }
+        }
+        $checks['vault/safe_status_parser_never_echoes_raw_error [pure helper]'] = {
+            foreach ($value in @('SECRETSENTINEL', '403', 404, [System.Net.HttpStatusCode]::Forbidden, $null)) {
+                $record = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = $value }; Message = 'SECRETSENTINEL' } }
+                $row = Get-LabArmFailure $record
+                Assert-Absent ($row | ConvertTo-Json) @('SECRETSENTINEL', 'Message')
+                Assert-Check ($row.HttpStatus -in @(0, 403, 404))
+            }
+        }
+        $checks['hyperv-boundary/manual_selection_all_pairs_and_unknown_never_authorizes [pure helper]'] = {
+            foreach ($stage in @(4, 5)) {
+                foreach ($workload in @('All', 'Agentless', 'AgentBased', 'Agent-based', '', 'Unknown')) {
+                    $row = Get-LabHyperVManualHandoff -Workload $workload -Stage $stage
+                    Assert-Check ($row.Status -ceq 'ManualActionRequired' -and -not $row.CanAutomate)
+                    $expected = switch ($workload) { 'All' { $required } 'Agentless' { @('OnPrem-Web', 'OnPrem-Linux-Web') } 'AgentBased' { @('OnPrem-SQL', 'OnPrem-Linux-App') } 'Agent-based' { @('OnPrem-SQL', 'OnPrem-Linux-App') } default { @() } }
+                    Assert-Check ((@($row.VMNames) -join ',') -ceq (@($expected) -join ','))
+                    if ($workload -in @('', 'Unknown')) { Assert-Check ($row.Workload -ceq 'UnspecifiedOrInvalid') }
+                    if ($workload -in @('All', 'Agentless')) { Assert-Contains $row.ManualCoverage @($(if ($stage -eq 4) { 'Module 2 section 8' } else { 'Module 2 section 9' })) }
+                    if ($workload -in @('All', 'AgentBased', 'Agent-based')) { Assert-Contains $row.ManualCoverage @($(if ($stage -eq 4) { 'Module 3 section 10' } else { 'Module 3 section 11' })) }
+                }
+            }
+            Assert-Throws { Get-LabHyperVManualHandoff -Workload All -Stage 6 }
+            $four = Get-StepText 4; $five = Get-StepText 5
+            Assert-Check ((Get-Section $four 'function Get-LabHyperVManualHandoff {' '# BEGIN HYPERV MANUAL HANDOFF GUARD') -ceq (Get-Section $five 'function Get-LabHyperVManualHandoff {' '# BEGIN HYPERV MANUAL HANDOFF GUARD'))
+        }
+        $checks['hyperv-boundary/step4_5_unconditional_domination_no_Azure_before_guard [AST]'] = {
+            foreach ($stage in @(4, 5)) {
+                $text = Get-StepText $stage
+                $errors = $null
+                $scriptAst = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+                Assert-Check (@($errors).Count -eq 0)
+                $begin = $text.IndexOf('# BEGIN HYPERV MANUAL HANDOFF GUARD'); $end = $text.IndexOf('# END HYPERV MANUAL HANDOFF GUARD')
+                Assert-Check ($begin -gt 0 -and $end -gt $begin)
+                $guardStatements = @($scriptAst.EndBlock.Statements | Where-Object { $_.Extent.StartOffset -gt $begin -and $_.Extent.StartOffset -lt $end })
+                Assert-Check ($guardStatements.Count -gt 0 -and $guardStatements[$guardStatements.Count - 1] -is [System.Management.Automation.Language.ThrowStatementAst]) 'An unconditional top-level throw must terminate every guard path.'
+                foreach ($command in $scriptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                    if ($command.Extent.StartOffset -gt $end) { continue }
+                    $parent = $command.Parent; $inFunction = $false
+                    while ($parent) { if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $inFunction = $true; break }; $parent = $parent.Parent }
+                    if (-not $inFunction) { Assert-Check ($command.GetCommandName() -notmatch '-Az') 'Azure command is reachable before the manual boundary.' }
+                }
+                foreach ($action in @('$context = Get-LabAzContext', 'Get-AzMigrateServerReplication', $(if ($stage -eq 4) { 'Start-AzMigrateTestMigration' } else { 'Start-AzMigrateServerMigration' }))) { Assert-Before $text '# END HYPERV MANUAL HANDOFF GUARD' $action }
+                Assert-Contains $text @('ManualActionRequired', 'No module section is claimed complete.', 'Missing/unknown source, target, project or workload metadata never authorizes automation')
+                Assert-Check (@($scriptAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -match '(?i)bypass|force|allowunsupported|provider' }).Count -eq 0)
+            }
+        }
+        $checks['hyperv-boundary/all_modes_and_shutdown_flags_stop_at_guard [restricted AST fixtures]'] = {
+            foreach ($stage in @(4, 5)) {
+                $guard = Get-Section (Get-StepText $stage) '# BEGIN HYPERV MANUAL HANDOFF GUARD' '# END HYPERV MANUAL HANDOFF GUARD'
+                $guardAst = [System.Management.Automation.Language.Parser]::ParseInput($guard, [ref]$null, [ref]$null)
+                foreach ($command in $guardAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                    Assert-Check ($command.InvocationOperator -eq 'Unknown' -and $command.GetCommandName() -in @('Get-LabHyperVManualHandoff', 'Write-Host')) 'Unapproved manual-guard fixture command.'
+                }
+                foreach ($Workload in @('All', 'Agentless', 'AgentBased', 'Agent-based', '', 'Unknown')) {
+                    foreach ($TurnOffSourceVMs in @('Yes', 'No', $null)) {
+                        $SourceResourceGroup = ''; $TargetResourceGroup = ''; $MigrateProjectName = ''; $Location = ''
+                        $stopped = $false
+                        try { $null = & ([scriptblock]::Create($guard)) } catch { $stopped = $_.Exception.Message.StartsWith('[ManualActionRequired]') }
+                        Assert-Check $stopped 'Guard must stop even when all environment metadata is missing and regardless of source-shutdown flags.'
+                    }
+                }
+            }
+        }
+        $checks['error-boundary/secret_sentinel_absent_from_console_and_report_fields [pure helper]'] = {
+            $sentinel = 'SECRETSENTINEL'
+            $synthetic = [System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new($sentinel), $sentinel, [System.Management.Automation.ErrorCategory]::InvalidOperation, $sentinel)
+            $synthetic.ErrorDetails = [System.Management.Automation.ErrorDetails]::new($sentinel)
+            try { throw 'SECRETSENTINEL' } catch { $invocationFixture = $_ }
+            foreach ($record in @($synthetic, $invocationFixture, [pscustomobject]@{ Exception = @{ Message = $sentinel }; CategoryInfo = @{ Category = $sentinel }; InvocationInfo = @{ Line = $sentinel; ScriptLineNumber = $sentinel } })) {
+                foreach ($stage in @('source-inventory/Get-AzMigrateDiscoveredServer', $sentinel)) {
+                    $consoleText = @(Format-LabSafeErrorDiagnostic -ErrorRecord $record -Stage $stage) -join "`n"
+                    $reportText = @(Format-LabSafeErrorDiagnostic -ErrorRecord $record -Stage $stage) -join "`n"
+                    Assert-Absent ($consoleText + $reportText) @($sentinel)
+                    Assert-Check ($consoleText -ceq $reportText)
+                    Assert-Contains $reportText @('Step 3 stopped.', 'Category:', 'Exception type:', 'Script line:', 'intentionally omitted.')
+                    if ($stage -ceq $sentinel) { Assert-Contains $reportText @('Stage: unclassified') }
+                }
+            }
+            $valid = @(Format-LabSafeErrorDiagnostic -ErrorRecord $synthetic -Stage 'backend-contract') -join "`n"
+            Assert-Contains $valid @('Stage: backend-contract', 'Category: InvalidOperation', 'Exception type: System.InvalidOperationException', 'Script line: 0')
+        }
+        $checks['error-boundary/central_sinks_only_safe_formatter_and_fixed_auth_failure [source contract]'] = {
+            $text = Get-StepText 3
+            $formatter = Get-Section $text 'function Format-LabSafeErrorDiagnostic {' 'function Write-LabTerminatingError {'
+            $console = Get-Section $text 'function Write-LabTerminatingError {' 'function Read-LabParameter {'
+            $report = Get-Section $text 'function Save-LabErrorReport {' 'function Wait-LabBeforeExit {'
+            foreach ($sink in @($console, $report)) { Assert-Contains $sink @('Format-LabSafeErrorDiagnostic -ErrorRecord $ErrorRecord -Stage $script:LabReplicationStage') }
+            Assert-Contains $report @('Write-LabVaultReport', 'SafeDiagnostic')
+            $writer = Get-Section $text 'function Write-LabVaultReport {' 'function Invoke-LabVaultInspection {'
+            Assert-Contains $writer @('[IO.FileMode]::CreateNew', 'ConvertTo-Json -InputObject $script:LabVaultReport', 'no error body is displayed.')
+            Assert-Absent $writer @('.Message', 'ErrorDetails', 'ScriptStackTrace', 'GetTempPath')
+            foreach ($body in @($formatter, $console, $report)) {
+                Assert-Absent $body @('.Message', 'Out-String', '.ToString(', 'PositionMessage', 'ScriptStackTrace', 'FullyQualifiedErrorId', '$invocation.Line', '$ErrorRecord |', '[string]$ErrorRecord')
+            }
+            Assert-Contains $formatter @('$Stage -in @(', '$ErrorRecord -is [System.Management.Automation.ErrorRecord]', '$candidate -in @(', '[Enum]::GetName', '$invocation.ScriptLineNumber -is [int]', '$invocation.ScriptLineNumber -le 1000000')
+            Assert-Contains $text @("catch { throw '[authentication/Connect-AzAccount] Azure sign-in did not complete. Raw service details are omitted; review the sign-in flow separately.' }")
+            Assert-Absent $text @('Azure sign-in did not complete: $($_.Exception.Message)')
+            Assert-Before $text 'function Format-LabSafeErrorDiagnostic {' 'function Write-LabTerminatingError {'
+            Assert-Before $text 'function Format-LabSafeErrorDiagnostic {' 'function Save-LabErrorReport {'
+        }
         $checks['regional/region_names_display_names_and_source_are_not_defaults [helper + contract]'] = {
             foreach ($value in @('WESTUS2', ' West US 2 ', 'west us2')) { Assert-Check ((Read-LabTargetRegion $value 'eastus') -ceq 'westus2') }
             foreach ($value in @('', 'moonregion', 'eastus', ' East US ')) { Assert-Throws { Read-LabTargetRegion $value 'eastus' } }
@@ -375,14 +987,10 @@ function Invoke-LabOfflineRegression {
             Assert-Contains $step1 @('Microsoft.Compute is not registered; quota/SKU reads were not performed.', 'Get-AzVMUsage', 'Get-AzComputeResourceSku', 'Unknown ($($_.Exception.Message))', 'unresolved SKU metadata is not treated as zero', '$familyAdditional = if ($plan.Known)', '$additional = if ($plan.Known)', 'Target Total Regional vCPU quota Unknown.')
             Assert-Absent (Get-Section $step1 'function Get-LabRegionQuotaSnapshot' 'function Show-LabQuotaPreflight') @('Register-AzResourceProvider')
         }
-        $checks['regional/sku_vcpus_family_aggregation_and_step3_planning_defaults [helper + contract]'] = {
+        $checks['regional/sku_vcpus_actual_family_aggregation [helper + contract]'] = {
             $plan = Get-LabSkuPlan $skus $sizes 'westus2'
             Assert-Check ($plan.Known -and $plan.Total -eq 6 -and $plan.Count -eq 4 -and $plan.Families.Count -eq 1 -and $plan.Families['standardbsfamily'] -eq 6)
             Assert-Check ((Get-LabSkuPlan @((New-Sku 'ActualHost' 8 'sourceFamily' 'eastus')) @('ActualHost') 'eastus').Total -eq 8)
-            $actual = @([regex]::Matches((Get-StepText 3), 'TargetVMSize\s*=\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
-            $declared = Get-Section $step1 '[string[]]$ForecastVmSizes = @(' ')'
-            $defaults = @([regex]::Matches($declared, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
-            Assert-Check (($actual -join ',') -ceq ($sizes -join ',') -and ($defaults -join ',') -ceq ($actual -join ','))
             Assert-Contains $step1 @("-eq 'vCPUs'", '$families[$family] += $cores')
         }
         $checks['regional/one_set_and_overlap_forecasts_do_not_replace_reported_usage [helper + contract]'] = {
@@ -424,7 +1032,7 @@ function Invoke-LabOfflineRegression {
             foreach ($stage in 2..6) { $text = Get-StepText $stage; Assert-Contains $text @('Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup'); Assert-Absent $text @('$Location = Resolve-LabLocation') }
             Assert-Contains $step2 @('$Location = Read-LabTargetRegion -Value $Location', '[string]$TargetResourceGroup')
         }
-        $checks['regional/network_guards_before_writes_and_wrapper_passthrough [contract]'] = {
+        $checks['regional/network_guards_before_writes_and_step3_target_region [contract]'] = {
             foreach ($write in @('Register-AzResourceProvider -ProviderNamespace', 'New-AzResourceGroup -Name', 'New-AzVirtualNetwork `', 'New-AzNetworkSecurityGroup `')) {
                 Assert-Before $step1 '    Assert-LabLandingZoneRegion -ResourceGroupName $TargetResourceGroup -Location $Location' $write
                 Assert-Before $step1 '    $quotaPreflight = Show-LabQuotaPreflight' $write
@@ -432,9 +1040,7 @@ function Invoke-LabOfflineRegression {
             Assert-Contains $step1 @("`$_.ResourceType -eq 'Microsoft.Network/networkSecurityGroups'", 'Target RG metadata region')
             $four = Get-StepText 4; Assert-Before $four '$preflightTestNetworks =' '$testVNet = New-AzVirtualNetwork'; Assert-Contains $four @('ConvertTo-LabRegionKey $existingVNet.Location')
             $six = Get-StepText 6; foreach ($guard in @('$existingBackupVaults =', 'ConvertTo-LabRegionKey $vm.Location')) { Assert-Before $six $guard '$workspace = New-AzOperationalInsightsWorkspace' }
-            foreach ($suffix in @('3a-agentless', '3b-agent-based')) {
-                $text = [IO.File]::ReadAllText((Join-Path $Root "scripts/migrate-step$suffix.ps1")); Assert-Absent $text @('$Location = Resolve-LabLocation'); Assert-Contains $text @('Location            = $Location')
-            }
+            Assert-Contains (Get-StepText 3) @('Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup')
         }
         $checks['regional/inline_definitions_decisions_and_project_geography_contracts [contract]'] = {
             foreach ($stage in 1..6) { $text = Get-StepText $stage; foreach ($name in @('ConvertTo-LabRegionKey', 'Read-LabTargetRegion', 'Resolve-LabTargetNetworkLocation')) { Assert-Before $text ('function ' + $name) '$context = Get-LabAzContext' } }
@@ -443,7 +1049,7 @@ function Invoke-LabOfflineRegression {
             Assert-Absent $step1 @('$migrateLocationMap'); Assert-Check ($step1 -notmatch '(?m)^\s*New-AzMigrateProject\b'); Assert-Absent $project @('Install-Module')
         }
         $checks['regional/reusable_docs_explain_forecast_unknown_and_locked_region [contract]'] = {
-            Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'VersionNotes.md'))) @('-Location $migrationTargetRegion', '-AllowQuotaWarning', '6 vCPUs', '12 vCPUs', 'Unknown')
+            Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'VersionNotes.md'))) @('-Location $migrationTargetRegion', '-AllowQuotaWarning', '8 vCPUs', '16 vCPUs', 'Unknown')
             Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'docs/Module-1-Discovery.md'))) @('migration target region')
             Assert-Contains ([IO.File]::ReadAllText((Join-Path $Root 'docs/Module-2-Agentless-Migration.md'))) @('Create resources', 'different from the actual source Hyper-V host')
             foreach ($file in Get-ChildItem $Root -Filter '*.md' -File -Recurse) { Assert-Check ([IO.File]::ReadAllText($file.FullName) -notmatch '(?i)\b(?:Joseph|azmig1)\b') }
@@ -685,7 +1291,7 @@ function Invoke-LabOfflineRegression {
             Assert-Contains $step2Summary @('OnPrem-Linux-App (192.168.0.13) -- Ubuntu 24.04 + Tomcat 10.1')
             Assert-Absent $step2Summary @('Node.js')
         }
-        $checks['discovery/step3_explicit_hyperv_inventory_and_wrapper_routing [AST + contract]'] = {
+        $checks['discovery/step3_explicit_hyperv_inventory_and_group_selection [AST + contract]'] = {
             $step3Path = Join-Path $Root 'scripts/migrate-step3-replicate.ps1'
             $errors = $null
             $step3Ast = [System.Management.Automation.Language.Parser]::ParseFile($step3Path, [ref]$null, [ref]$errors)
@@ -711,14 +1317,9 @@ function Invoke-LabOfflineRegression {
                 Assert-Check ($argument -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
                     $argument.Value -ceq 'HyperV') 'Step 3 must query literal HyperV inventory, not VMware.'
             }
-            foreach ($route in @(
-                @{ Script = 'migrate-step3a-agentless.ps1'; Workload = 'Agentless' },
-                @{ Script = 'migrate-step3b-agent-based.ps1'; Workload = 'AgentBased' }
-            )) {
-                $wrapper = [IO.File]::ReadAllText((Join-Path $Root ('scripts/' + $route.Script)))
-                Assert-Contains $wrapper @('Invoke-LabStage -ScriptName "migrate-step3-replicate.ps1"',
-                    '-Arguments $common', 'Workload            = $workload', ('$workload = "' + $route.Workload + '"'))
-            }
+            $text = Get-StepText 3
+            Assert-Contains $text @('Module 2, sections 5-7', 'Module 3, sections 8-9', 'Step 4 and Step 5 remain separate', '-Workload $Workload')
+            Assert-Absent $text @('migrate-step3a-agentless', 'migrate-step3b-agent-based')
         }
         function New-KvpItem {
             param([string]$Name, [string]$Data)
@@ -2244,7 +2845,8 @@ function Invoke-LabOfflineRegression {
             try { $null = & $checks[$name]; Microsoft.PowerShell.Utility\Write-Host "  PASS  $name" -ForegroundColor Green }
             catch { $failures++; Microsoft.PowerShell.Utility\Write-Host "  FAIL  $name : $($_.Exception.Message)" -ForegroundColor Red }
         }
-        Microsoft.PowerShell.Utility\Write-Host "Offline regression checks: $($checks.Count - $failures)/$($checks.Count) passed (12 regional, 5 guidance, 25 readiness/traffic, 3 Ubuntu/Jakarta, 2 discovery, 14 communication, 18 retained assessment, 22 backend/correct-contract, 16 provider-metadata/endpoint-plan, 22 Modern-profile, 12 Classic-restoration, 11 Classic-completion, 7 Step6/post-migration NSG/AST). No Azure actions executed."
+        $categoryCounts = @($checks.Keys | ForEach-Object { ($_ -split '/', 2)[0] } | Group-Object | Sort-Object Name | ForEach-Object { "$($_.Count) $($_.Name)" }) -join ', '
+        Microsoft.PowerShell.Utility\Write-Host "Offline regression checks: $($checks.Count - $failures)/$($checks.Count) passed ($categoryCounts). No Azure actions executed."
         return $failures
     } $Root
 }

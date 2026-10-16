@@ -635,7 +635,7 @@ Apply only approved changes; review again later
 
 A representative post-migration baseline is needed before right-sizing. The original 2–4 week review window is a planning example; a short lab session is not enough to establish production sizing.
 
-The planned lab sizes were `Standard_B2s`, `Standard_B2ms`, `Standard_B1ms`, and `Standard_B1ms` for Web, SQL, Linux Web, and Linux App respectively. `Standard_D2as_v5` for all four is an optional fallback when B-series is unavailable in the actual region/quota/capacity. An assessment recommendation such as `Standard_D2als_v6` is not proof that this SKU was selected for the migrated VM.
+The lab plan selects eligible B2 or D2 targets in ascending current regional, OS-specific pay-as-you-go compute cost order, with 2 vCPUs each and minimum RAM of 4 GiB for Web, 8 GiB for SQL, and 2 GiB for each Linux VM. An assessment recommendation is not proof that a size was selected for the migrated VM.
 
 **Student Actions:**
 
@@ -687,7 +687,7 @@ Tags support accountability and cost review. Budgets provide notifications; they
 
 1. Open each approved lab resource → **Tags**. Review existing values, add/update only the agreed lab tags, and **Save**. Preserve unrelated tags. Do not put credentials or secrets in tags.
 2. Open **Cost Management** → select the actual approved **scope** → **Cost analysis**. Filter/group by resource group/resource and review compute, disks, monitoring, networking, and any optional backup/protection resources.
-3. Record the displayed cost period, currency, actual VM SKUs, and data availability. Include all four VMs if they use the `Standard_D2as_v5` fallback; do not apply a B-series estimate or a canned monthly total.
+3. Record the displayed cost period, currency, actual VM SKUs, and data availability. Include all four VMs at their actual selected B2 or D2 sizes; do not apply a fixed-series estimate or a canned monthly total.
 4. If budget creation is approved and your role permits it, open **Budgets** → **+ Add** at the smallest supported approved scope. Confirm the resource-group/subscription scope before creating anything.
 5. Enter a name such as `migrate-workshop-budget`, a monthly reset period, approved amount/currency, and dates. Configure approved recipients with example thresholds of actual cost 50% and 80%, and forecast cost 100%; adjust to the approved budget.
 6. Review and select **Create** only for that approved scope. If you lack budget rights, record the reviewed amount/scope and **creation deferred** rather than changing subscription access.

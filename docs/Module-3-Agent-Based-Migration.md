@@ -250,12 +250,12 @@ curl --fail --silent --show-error http://localhost:3000/api/orders
 
 Target planning is shared across the whole application. The target region must differ from the source HyperVHost VM's actual region in this lab. **East US → West US 2 is only an example**; neither eligibility, quota headroom, nor an assessment recommendation guarantees allocation.
 
-| Role / Exact Final Target Name | Default Size | vCPU / RAM | Alternate All-Four Plan |
+| Role / Exact Final Target Name | Eligible Sizes | vCPU / Minimum RAM | Selection Order |
 |--------------------------------|--------------|------------|-------------------------|
-| IIS — `OnPrem-Web` | `Standard_B2s` | 2 / 4 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| SQL — `OnPrem-SQL` | `Standard_B2ms` | 2 / 8 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| Nginx — `OnPrem-Linux-Web` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| Tomcat — `OnPrem-Linux-App` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
+| IIS — `OnPrem-Web` | B2 or D2 | 2 / 4 GiB | Ascending regional Windows PAYG compute cost |
+| SQL — `OnPrem-SQL` | B2 or D2 | 2 / 8 GiB | Ascending regional Windows PAYG compute cost |
+| Nginx — `OnPrem-Linux-Web` | B2 or D2 | 2 / 2 GiB | Ascending regional Linux PAYG compute cost |
+| Tomcat — `OnPrem-Linux-App` | B2 or D2 | 2 / 2 GiB | Ascending regional Linux PAYG compute cost |
 
 | Network | Address Space | Subnet | Use |
 |---------|---------------|--------|-----|
@@ -269,7 +269,7 @@ Target planning is shared across the whole application. The target region must d
 
 1. Read **Virtual machines → HyperVHost → Location** and confirm the chosen target is a different actual region.
 2. In **Subscriptions → Usage + quotas**, check target-region total vCPU quota, VM-family quota, and VM-count allowance. Confirm eligibility in the VM size selector.
-3. If B-series is unavailable, explicitly choose the **all-four `Standard_D2as_v5` plan** in the portal after quota/eligibility review. Record your choice and apply it consistently. One default set totals 6 vCPUs; one alternate set totals 8. Count test/target overlap and existing allocations appropriately.
+3. In the portal, filter current subscription-eligible B-series v2 and supported D-series v4/v5 B2/D2 candidates using Module 2 Section 4.1's RAM and eligibility checks. Review known OS-specific regional USD/hour pay-as-you-go compute prices in ascending order, then choose and record an eligible size for each role yourself, not an automatic cheapest choice. Missing prices mean incomplete cost ranking: record **Price unavailable** separately and choose explicitly only with verified eligibility and combined quota, without claiming cheapest. Missing SKU/eligibility information or unknown quota is not approval. One complete set totals 8 vCPUs; full test/target overlap totals 16. Check aggregate quota for all four selected sizes by actual family and count existing allocations without double-counting them.
 4. Review assessment recommendations without assuming they override the chosen lab plan. Review current portal pricing for selected VM/disk sizes; no fixed cost or capacity promise applies.
 5. Keep **Azure Hybrid Benefit / existing Windows Server license rights: No** unless eligible rights have been confirmed.
 
@@ -341,9 +341,9 @@ SQL and Tomcat remain on the Hyper-V host-provider path. Select all VM disks nee
 
 ### 8.4 Configure Compute Settings
 
-1. For **SQL**, set target name **`OnPrem-SQL`**, OS **Windows**, and **`Standard_B2ms` (2 vCPU, 8 GB)**.
-2. For **App**, set target name **`OnPrem-Linux-App`**, OS **Linux**, and **`Standard_B1ms` (1 vCPU, 2 GB)**.
-3. If the alternate all-four plan was explicitly selected, choose **`Standard_D2as_v5` (2 vCPU, 8 GB)** for both instead.
+1. For **SQL**, set target name **`OnPrem-SQL`**, OS **Windows**, and your recorded eligible **B2 or D2 size (2 vCPU, at least 8 GiB RAM)**.
+2. For **App**, set target name **`OnPrem-Linux-App`**, OS **Linux**, and your recorded eligible **B2 or D2 size (2 vCPU, at least 2 GiB RAM)**.
+3. Confirm both choices match the recorded plan from Section 6.1 and remain eligible in the portal.
 4. Identify each VM's correct **OS/boot disk**, review supported target settings for its source generation, and keep Windows licensing benefit **No** unless rights are confirmed.
 
 ### 8.5 Configure Disk Settings

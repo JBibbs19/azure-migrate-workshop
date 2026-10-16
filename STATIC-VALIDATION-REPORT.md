@@ -1,3 +1,385 @@
+# Step 3 vault/provider read-only update — release validation — 2026-10-15
+
+## Current revision: explicit-version inventory, not automatic replication
+
+This ubuntu2404 revision changes only the existing Step 3 script, its existing checker,
+README, VersionNotes, and three release-owned integrity/validation files. The retained
+integration test source, all user modules, Steps 1/2/4/5/6, deployment, source topology,
+application/WAR/runtime, and every other file remain byte-identical to this branch's
+latest delivered 60-file baseline. No file is added or removed. Historical report text
+below is preserved and describes earlier revisions, not this revision's validation.
+
+**Behavior boundary:** Step 3 uses explicit API-version REST GETs in the active Az
+subscription, the actual source project, and actual target VNet. Recovery Services vault
+GETs use `2026-07-01`; no generic resource-cache execution is used. A student-selected
+candidate is not proof of project-service association. Vault provisioning `Succeeded`,
+provider `CurrentConnection = Connected`, and per-VM replication are separate facts.
+Existing replication/jobs are inventoried before conditional manual portal guidance;
+unattributed jobs remain vault-scoped. Missing/null/empty pagination terminators are
+accepted, while failed/partial reads are Unknown, not completed-empty scope. Cross-region
+or unknown-region vaults retain inventory but suppress register/start guidance. Heartbeat
+and job timestamps accept typed DateTime/DateTimeOffset or invariant strings, with invalid
+values kept Unknown. Allowlisted JSON evidence is inventory, never readiness/completion.
+Manual Create resources/provider registration instructions appear only when the completed
+inspected-scope evidence supports them; the script does not create resources, resize,
+overwrite existing replication, register providers, or start replication/cutover. The final
+Hyper-V `ManualActionRequired`/backend-contract nonzero guard remains. User verification
+of one actual vault/provider GET is not execution of this new script end to end.
+
+**Actually verified offline:** the author's retained focused log contains **22
+passed tests** (8 source contracts and
+14 independent Python model tests), shared across both branches,
+not native PowerShell tests or a per-branch duplicated count. The full normal unchanged
+integration suite passed **16/16**, zero
+skips/errors/failures, on an exact private copy after current-ledger/checksum refresh.
+The complete suite is required again after this final report and final integrity metadata;
+private final-run evidence controls acceptance and repeat runs are not additional tests.
+The **14-test** unchanged application pass is retained from prior release evidence,
+not rerun or claimed newly executed; every current app file matches the tested hash ledger.
+All 16 integration methods and unrelated native checker groups are retained.
+There are **205 native regression groups DEFINED, NOT EXECUTED**, including
+6 newly defined focused groups.
+Python source/model tests do not execute PowerShell DateTime conversion or CLR/SDK behavior.
+
+**Unverified limits:** no native PowerShell parser/runtime/helper/mock/checker execution,
+installation, Azure/REST/Retail API request, allocation, Hyper-V/appliance operation,
+Java/JSP/Tomcat/SQL execution, replication, test migration, cutover, or live end-to-end
+acceptance occurred. The Hyper-V backend remains unverified; successful inventory or a
+StartReplication job is not a readiness claim. Existing branch-specific sizing behavior
+is unchanged. Independent review and publication are separate parent-controlled gates.
+No user module or inherited history anchor was edited to resolve unrelated warnings.
+The two inherited VersionNotes links with missing heading anchors remain note-only.
+
+**Integrity:** only existing primary-ledger current hashes/statuses are refreshed. All
+original/previous hashes, historical lineage, CHANGES-to-VersionNotes rename, omissions,
+counts/numbers and self-hash exclusions remain preserved. Root SHA256SUMS excludes only
+itself. The final archive gate requires the exact previous 60 root-relative file paths,
+no directory/outer-folder/private entries, sorted fixed-1980 builds, two independent
+byte-identical ZIP builds, CRC checks and every entry's SHA256/byte parity. Public delivery
+is limited to the two complete ZIPs, never private proof or sample inventory JSON.
+
+---
+
+# Ubuntu subscription-driven numbered target VM selection — 2026-10-15
+
+## Current revision — offline evidence; native PowerShell and Azure not executed
+
+This section supersedes every historical report below for this revision's scope,
+commands, counts and status. The delivered cost-ranked edition is the direct source:
+`azure-migrate-workshop-ubuntu2404-cost-ranked-targets.zip`, SHA256
+`84c9887a90e6b798879d8009061fdffafd37a42c47b6be49cf67270962a0aeeb`.
+This is a separate 60-file checkout, not an overlay or modification of that release.
+Exactly **11 existing files change / 49 remain byte-identical / 0 added / 0 deleted**:
+Step 1, Step 3, the existing checker, the existing integration suite, README,
+VersionNotes, Modules 2/3, this report, current provenance and root checksums.
+Modules 0/1/4/5, deployment, source-host configuration, workload topology/images,
+Classic Step 2, Steps 4–6, traffic, app source, WAR/runtime and Tomcat are unchanged.
+The retired Step 3a/3b wrappers remain absent; no public helper/report is added.
+
+**Current behavior and limits:** Steps 1/3 offer explicit numbered B2/D2 selections
+for all four workloads using live subscription/regional SKU eligibility and quota.
+Known OS-specific regional USD/hour PAYG compute prices sort ascending; unpriced
+eligible rows remain selectable, labeled **Price unavailable**, with incomplete
+cost ranking and no cheapest claim. Missing/ambiguous SKU metadata, restrictions or
+unknown quota do not approve a size. Two billable vCPUs and RAM floors of 4/8/2/2 GiB
+remain required. Blank input cancels before writes; Enter never accepts a default.
+Optional `-TargetVmSizes` carries exactly the four workload-name/chosen-SKU entries;
+it bypasses prompts only. Step 1 prints the reusable map and Step 3 handoff. Step 3
+revalidates the full map against the current subscription and actual target VNet
+region, including combined all-four regional/family quota; workload filters do not
+reduce that plan. No persistence, source-host change, implicit replacement, existing
+replication resize, capacity guarantee or third-party/static price fallback is added.
+Step 1 remains landing-zone preparation; Step 3 remains read-only manual portal
+replication guidance. Steps 4/5 keep their unchanged dominating manual-action guards.
+Actual subscription, Retail API and allocation behavior were not exercised here.
+
+**Executed evidence and explicit lineage:** the code author's **16 Python source
+contracts passed** (12 preserved plus four new), over the exact four frozen code/test
+SHA256 values recorded privately. These are source contracts, not native tests.
+The prior cost-ranked release's **14 app tests passed**; that result is retained,
+not rerun for this revision, and final packaging verifies every app byte against
+that tested release. The prior release's 12 source-contract and 16 integration passes
+are historical, not the current revision's execution. The author's initial current
+integration run passed 15/16 solely because current provenance was stale; that result
+is not a final pass. All **16 current integration methods** remain registered, with
+no skips/removals. The final release gate runs the normal complete Python suite on a
+private exact copy after the four approved documents, this report, current provenance
+and root checksums are integrated; its actual outcome is recorded in private proof.
+Repeated runs are never counted as additional distinct tests. No further production,
+documentation or integration-test authoring is performed by release integration.
+
+**Native/runtime gap:** the checker defines **199 source-defined groups** (191 prior
+plus eight selection groups), all **NOT EXECUTED**. PowerShell is unavailable and no
+runtime/dependency was installed. No native parser, checker, PowerShell AST/helper/mock
+behavior, Java/JSP compilation, Azure sign-in, Retail Prices API request, Az SKU/quota
+read, allocation, Hyper-V/guest/appliance operation, SQL/Tomcat execution, migration,
+cutover or end-to-end acceptance was performed. Python AST, Bash `-n` and literal
+source checks do not replace native or live validation.
+
+**Provenance and packaging:** only current hashes and derived statuses are refreshed.
+All original baseline/previous hashes, original 24/prior 60 counts, inventories,
+lineage, reasons, omissions, null self-exclusions and CHANGES-to-VersionNotes rename
+records remain intact. Root checksums cover 59 files; existing app checksums cover
+32 and runtime checksum covers one. Final local packaging verifies the eight frozen
+authored hashes, exact unchanged 60-entry inventory, allowed delta, Markdown
+fences/local links, current provenance and all checksums. Two inherited historical
+VersionNotes-to-Module-1 anchor warnings remain unchanged and nonblocking by instruction.
+One final scan verifies both protected 60-file source projects, the prior delivered
+cost build and its ZIP against captured SHA256 manifests. Two independent sorted,
+fixed-1980 ZIP builds must be byte-identical; CRCs and every entry's source SHA256
+must match. Final digest, byte count, completed checks and prior-app evidence lineage
+are private outside this checkout to avoid checksum self-reference. Code independent
+review and publication are separate parent gates; no cloud call/write, upload, share,
+deploy or output publication is performed by release integration.
+
+---
+
+## Historical reports — preserved verbatim, superseded for this revision
+
+# Ubuntu cost-ranked B2/D2 target-sizing static validation — 2026-10-15
+
+## Current revision — offline evidence only; native and Azure validation not performed
+
+This section supersedes the historical reports below for the current revision's scope,
+commands, counts and validation status. It is not a current PowerShell test-pass claim.
+The complete Ubuntu checkout retains exactly **60 existing entry paths**, with no added
+or deleted file. Frozen production changes are limited to Step 1, Step 3 and the existing
+checker. The six approved sizing-document edits are README, VersionNotes and Modules
+0/2/3/5; Modules 1/4 retain the previously approved student edition without sizing edits.
+Deployment, source host, workload topology, images, Classic Step 2, Steps 4–6, traffic,
+application source, WAR/runtime and the separate Tomcat project are unchanged.
+
+**Current behavior and boundaries:** Step 1/3 use cost-ordered eligible two-vCPU B2/D2
+candidates with role RAM floors of 4/8/2/2 GiB, live OS-specific regional PAYG compute
+prices and whole-four-workload quota checks. Missing or ambiguous eligibility, prices or
+quota prevent a verified cheapest plan; no fixed profile, allocation fallback or capacity
+promise is introduced. Step 1 retains its landing-zone preparation role. Step 3 remains
+read-only with a manual Hyper-V portal handoff and zero replication writes. Steps 4/5
+retain their dominating manual-action guards; no speculative ASR backend is restored.
+Actual price/API behavior and eligibility have not been exercised in this environment.
+
+**Actually executed for this revision:** **14 unchanged app tests + all 16 retained
+integration tests = 30 distinct retained Python/stdlib/static tests passed**; **12 separate
+Python source-contract tests passed** over the frozen sizing code. Repeated runs are not
+additional distinct tests. Full integration suites run with bytecode disabled on private
+copies; no test is skipped or removed. The initial unchanged integration run had two
+failures and one error from obsolete fixed-profile/helper prose, superseded appliance
+instructions and stale current-hash provenance. Three existing methods were narrowly
+adapted, retaining all 16 registrations, the other 13 methods and unrelated safety
+assertions. Replacement assertions cover gated dynamic targets, four role floors,
+aggregate quota, actual VNet region, manual hash-before-extraction/copy-import procedure,
+and the already approved Module 4 bytes. Original baseline/previous hashes, counts,
+rename/omission records, reasons and file inventories remain intact; only current hashes
+and derived statuses are refreshed. Private logs retain the initial failures and
+intermediate assertion-wording corrections; the final complete run passes without skips.
+
+**Native/runtime limits:** the checker has **191 source-defined groups**, including
+**seven focused target-sizing groups**, all **NOT EXECUTED**. PowerShell, .NET and Java
+runtimes are unavailable and were not installed. No native PowerShell parser, checker,
+AST/helper/mock behavior, Java/JSP compilation, package installation, Azure sign-in,
+Retail Prices API request, Az/SKU/quota read, allocation, Hyper-V/guest/appliance operation,
+SQL/Tomcat execution, migration, cutover or end-to-end acceptance was performed. Python
+AST, Bash `-n`, lexical and literal source checks are not substitutes for those tests.
+
+**Release integrity:** final staging verifies frozen production/document SHA256 values,
+exact 60-file scope, allowed changes, local Markdown fences/links, current provenance,
+root/app/runtime checksums, sorted fixed-1980 deterministic ZIP entries, CRCs and every
+entry's SHA256/source parity. The two protected 60-file source projects and both prior
+full ZIPs are checked against their captured baselines once at final packaging. Two
+inherited historical VersionNotes-to-Module-1 heading anchors remain unresolved by parent
+instruction; they are note-only and unchanged, not a claim of zero link warnings. No
+public QC file is added. Final archive digest, byte count and completed readback proof
+are kept privately outside this checkout to avoid checksum self-reference. Publication
+remains the parent's separate action; no cloud write is performed by release integration.
+
+---
+
+## Historical validation evidence — preserved verbatim, not current execution claims
+
+# Module 0 merge and guarded Hyper-V handoff release validation — 2026-10-14
+
+## Current: portal-only Hyper-V path; automatic replication remains unresolved
+
+**Scope against the latest D2 profile package:** **14 existing changed / 0 added /
+2 deleted / 46 byte-identical / 60 current files**. The only removed files are the
+Step 3a/3b orchestration wrappers. Reviewed code changes are Step 1, Step 3, the existing
+checker and the narrowly authorized Step 4/5 help/manual-boundary guards. Reviewed docs
+are README, VersionNotes, Module 0 and necessary current Module 2/3 guidance. Release-owned
+changes are this report, baseline manifest, root checksums and two existing integration
+methods. No new helper or test file is delivered. Deployment/configure-host, source VM size,
+images, four-VM topology, SQL seeds, app/WAR/runtime, Classic Step 2, Step 6, source/target
+traffic and Module 1/4/5 remain byte-identical to this branch's D2 archive.
+
+**Implemented boundary, not an automatic replication fix:** Step 3 performs read-only
+prerequisite/identity/installed-command checks and partial manual portal guidance. It does
+**not** enable or monitor Hyper-V replication; it fails closed and never reports readiness
+or completion from a submitted job. The inspected published Az.Migrate 2.10.0 New/Get
+replication surface uses VMwareCbt; that New implementation explicitly rejects Hyper-V.
+The current 3.x process body was not fully retrieved. This is evidence for this build's
+unverified automation contract, not a universal claim that Hyper-V cannot be automated.
+The SDK's unguarded solution vaultId-to-ResourceName path is a likely explanation for the
+reported blank binding, **not a proven root cause without the original stack**. No guessed
+resource paths, fake automatic replication, or unverified ASR disaster-recovery workaround
+are substituted. ASR DR against a Migrate-created vault is not validated.
+
+Step 4 and Step 5 each have an unconditional ManualActionRequired guard **before context,
+wrong-provider queries, network/VM/guest writes and source shutdown**, for every workload
+and shutdown flag. Their legacy parameter blocks and bodies after the context boundary
+are retained byte-for-byte but unreachable. Test/cleanup and separately authorized cutover
+are distinct **manual portal stages**, never chained from Step 3. All/Agentless/AgentBased
+(including Agent-based alias) remain workload filters: Web/Linux-Web or SQL/Linux-App, not
+separate replication technologies. Manual coverage is Module 2 §5–§7 / Module 3 §8–§9 for
+replication/monitoring, §8 / §10 for testing/cleanup, §9 / §11 for cutover. No helper completes
+these sections. Default BSeries and explicit four-target D2asV5 remain on Steps 1/3 only;
+Step 1 plans actual regional SKU/family/quota metadata, and portal sizes must be selected
+manually. No persisted profile, capacity guarantee, source-host change or existing resize.
+
+**Error boundaries:** Step 3 console/report sinks share an allowlisted diagnostic formatter.
+Raw error text, statements, inputs, resource IDs and stack data are omitted, and sign-in
+failure text is fixed. The 20 Python source-only contracts include synthetic return-template
+capture checks; native CLR ErrorRecord/sentinel/helper behavior was **not executed**.
+
+**Actually executed offline:** full normal retained Python suites using `-B` and
+PYTHONDONTWRITEBYTECODE, ordinary private fixture writes and subprocess stdin pipes:
+**14 app + 16 integration = 30 passed on this branch; 60 distinct retained tests across
+both branches**, zero skips/errors/failures in the final successful runs. Full suites are
+repeated after final metadata refresh; repeated runs are not added to the distinct count.
+The first Ubuntu integration attempt passed 15/16: a new guidance assertion assumed
+unwrapped prose. Normalizing blockquote markers/whitespace fixed that assertion while
+retaining every required boundary statement and all frozen code/docs bytes. Its failed
+log is retained privately, not hidden or counted as a pass. The two integration methods
+were narrowly adapted, not removed: topology/appliance/deployment assertions remain, and
+replacement assertions cover exact wrapper absence, Step 3 groups/profile/manual boundary,
+module coverage and separate Step 4/5 guards. Strict omission semantics allow only the
+existing dated text and the two retired wrappers; hashes, absence, reasons, rename and
+inventory checks remain enforced, including Ubuntu's historical previous-revision ledger.
+A further **20 shared Python source-only contract tests passed**, not 20 native cases or
+20 per branch. Private release source/document checks: **193 on this branch**,
+including 36 reviewed local links/anchors. These are literal/lexical/byte checks,
+not PowerShell parsing, helper execution, live HTTP/API acceptance or deployment tests.
+
+**Native limits:** **191 groups DEFINED, SOURCE-INSPECTED, NOT EXECUTED** on this
+branch (baseline 176; 15 net new, with three old registrations renamed/adapted).
+Ten replication, three Hyper-V boundary, two safe-error and seven retained target-profile
+groups are counted from actual source registrations. PowerShell is unavailable; no native
+parser, AST fixture, mock/helper, checker or packager ran, and no runtime was installed.
+No Azure/Az call, allocation, Hyper-V/guest/appliance operation, Java/JSP compilation,
+Tomcat/SQL/systemd, native SDK/backend, test migration, cutover or end-to-end acceptance
+was performed. Offline success does not resolve native Hyper-V automation compatibility.
+
+**Documentation/history:** all 14 frozen documentation hashes match owner proof. The actual
+user Module 0 download remains unchanged; only its three reviewed intents were merged with
+qualifiers, current D2 quota guidance and each branch's OS/runtime retained. No old full
+guide replaced current source. All old dated bodies including D2, all 50 numbered bodies,
+three primary VersionNotes sections, red strong warning and README title/subtitle remain.
+No README/VersionNotes/module edit was made by the release owner. Current docs remove the
+retired choices. Obtain a clean complete checkout; do not overlay this ZIP onto a directory
+that could retain obsolete wrapper files. Historical wrapper mentions below/in dated notes
+are history, not supported current commands.
+
+**Frozen code SHA256 (unchanged before/after integration):**
+- `scripts/migrate-step1-setup-project.ps1`: `88d627ff05ddfd79c84307571e3af5de489985cd3309983d0134a6d7f043d5b2`
+- `scripts/migrate-step3-replicate.ps1`: `8ddba6c29d38998d58d6a601061d57453e689735e93334a100b8124e83fe747f`
+- `scripts/check-lab-scripts.ps1`: `33f2d9b616b5cebff9d585b647f3c22a3b7d1953845ba6478c56f299a1098eb0`
+- `scripts/migrate-step4-test-migrate.ps1`: `145ffddb6b671a973221c69de50d256a550b8de865c6dec254aeb5c13e2077e9`
+- `scripts/migrate-step5-cutover.ps1`: `723c840ed298c838ca2b2c8fa07dd7a0945aff7e8c369ece45d1d4c67f6cf240`
+
+**Integrity/provenance:** latest D2 source ZIP SHA256 is `de7f86830a325ed16c2b4cc8856ffd3a9ad4eba752d0c4e3ec11a3a37fc53e3e`;
+its immutable snapshot and complete entry hashes were captured before this iteration.
+All original 24 baseline hashes, SQL-seed hash, original added inventory of 39, archive/
+previous hashes and lineage fields are preserved. Root CHANGES stays renamed to
+VersionNotes; wrapper records retain original hashes with status omitted, a clear reason
+and null current_sha256. Historical current-hash/status fields are refreshed without
+rewriting their previous hashes/counts. Root checksums cover **59** files; unchanged app
+checksums cover **32**. Final staging requires two independently read/built sorted,
+fixed-1980 ZIPs to match, all **60** CRCs, every entry SHA256/source parity, complete
+inventory and final readback. Final archive digests and completed gates are recorded in
+the private proof outside the checkout, avoiding self-reference.
+
+**Staged only:** working ZIP replacement is authorized; final publication remains the
+parent's separate action. No output write, OneDrive/upload/share, Git, installation or
+Azure operation occurs. Native and authorized live lab validation remain outstanding.
+Earlier report sections below are retained verbatim as historical evidence and are
+superseded for current scope, wrapper choices, counts and automation limits.
+
+---
+
+# D2 target profile release validation — 2026-10-14
+
+## Current: explicit D2asV5 option, BSeries default retained
+
+**Scope:** exactly **10 existing changed / 0 added / 0 deleted / 62 files** against
+this branch's latest 62-file student-introduction source ZIP. Five reviewed code files
+are Step 1, Step 3, Step 3a, Step 3b and the existing checker; the release owner changes
+only README, VersionNotes, this report, baseline manifest and root SHA256SUMS.
+The remaining **52 files are byte-identical**, including deploy/configure-host,
+source Standard_E8s_v7 configuration, Step 2, Steps 4–6, all module/traffic instructions,
+traffic controllers, application code, WAR/runtime assets and nested app CHANGES.
+No new helper or test file is packaged and retained Python test source is unchanged.
+
+**Behavior and directions:** BSeries still maps the same four workloads to
+B2s/B2ms/B1ms/B1ms. Explicit D2asV5 maps them to four Standard_D2as_v5 targets, not a
+fifth VM or a source-host change. Step 1 plans from actual regional SKU vCPUs/family
+metadata: normally 6/8 cores for one full target or test set, 12/16 only for full overlap.
+No hard-coded quota family, persisted selection, reserved cores, target VM creation by
+Step 1, silent fallback or capacity promise is introduced. Repeat the profile explicitly
+in Step 3 or each 3a/3b wrapper. Only the Step 3 invocation receives the wrapper profile;
+test/cutover/source-shutdown actions remain. Existing replication is not resized.
+README examples match the frozen parameter declarations. Student title/subtitle,
+Version Notes' exact three primary sections, red strong warning, all 50 numbered
+troubleshooting bodies and the entire prior dated-log tail are preserved.
+
+**Actually executed offline:** normal retained Python suites with `-B` and bytecode
+disabled, ordinary private fixture writes and subprocess stdin pipes: **14 application
++ 16 integration = 30 passed on this branch; 60 distinct retained tests across both
+branches**, zero skips, assertion failures or unittest errors in the successful runs.
+Final full normal runs are repeated after release metadata refresh; repeated/targeted
+runs and the separate prior app review are not added to the 60 distinct-test total.
+The first Tomcat application invocation reported all 14 assertions OK but its cleanup
+raised FileNotFoundError for its fixture directory; the unmodified normal rerun exited
+successfully. Final successful-run results supersede that process-level cleanup failure.
+No guards, monkeypatches, disabled tests, dependency/runtime installation or test-source
+changes were used. Earlier code-owner proof records 12 source contracts and two targeted
+retained tests per branch; those are prior evidence, not extra distinct retained tests.
+Release-only source guards verify frozen hashes, four-target profile literals and actual
+metadata plumbing, narrow file scope, documentation/history preservation and inventory.
+These literal/lexical checks are not native PowerShell AST or helper execution.
+
+**Native limits:** source enumeration gives **169 retained + 7 new = 176 groups
+DEFINED, SOURCE-INSPECTED, NOT EXECUTED** on Ubuntu; Tomcat has 166 + 7 = 173.
+The previous documentation-release report transposed the two branch totals; the counts
+here come from actual checker registrations. No PowerShell runtime is available, so no
+native parser, AST fixture, helper/mock, checker or native packager was executed.
+No live Az/SKU/quota call, Azure allocation, Hyper-V/guest, Java/JSP compilation,
+Tomcat/SQL/systemd, appliance or migration/cutover acceptance was performed. Offline
+success does not prove complete replication-cmdlet compatibility or live capacity.
+
+**Frozen reviewed code SHA256:**
+- Step 1: `fb4b04d96e43686821422b56dc927696c8248e810cf484bbcebf3276a4ae92f7`
+- Step 3: `3ae3d6c52e16cc3b8e4c9c34e38417bab01a5a8fcbbce2e5a2b08af4976ddd58`
+- Step 3a: `b65035f665b2cc7225a57ea38a326e42cb993c96fbc4106534fe730fa71cf781`
+- Step 3b: `678e0d522bbecff5e5263bbec4b2581002570f1fa928b042a2a97fe382c2a4f5`
+- Checker: `18b111ab4d5c83b51f18c39ef6cba8b14bb4371301bdf0f8f042f97ce67c1bec`
+
+**Integrity/provenance gate:** the prechange source ZIP SHA256 is
+`12478f62f6f64f3aae0504d7ec06e2e78bb112db09bf548bd69ac74f16bc397b`.
+Its immutable ZIP copy, per-entry hashes and original manifest were captured before
+packaging; older output archives are not the baseline. All 24 original baseline hashes,
+SQL-seed hash, original added inventory of 39 and previous/archive provenance are retained.
+Root CHANGES keeps `status: renamed`, `current_path: VersionNotes.md`; only current
+hashes/statuses are refreshed. Root checksums cover 61 files; unchanged app checksums
+cover 32. Final packaging requires two independent sorted fixed-1980 ZIPs to match,
+all 62 CRCs and entry SHA256/source parity, exact inventory, checksum coverage and final
+readback. Completed-gate results and final ZIP/README/VersionNotes hashes are recorded
+in the private release proof outside the checkout, avoiding self-reference.
+
+**Staging only:** working ZIPs are refreshed; no output write, publication, upload,
+OneDrive/send, Git or Azure action. Native and authorized end-to-end lab acceptance remain
+required before partner delivery. Earlier report text below is retained as historical
+evidence; its scopes, counts and hashes describe those earlier revisions.
+
+---
+
 # Documentation release validation — 2026-10-14
 
 ## Current: student introduction and root Version Notes integration

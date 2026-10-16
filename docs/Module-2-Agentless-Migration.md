@@ -175,14 +175,14 @@ Choose the actual target region before preparing the project's migration resourc
 3. In **Subscriptions → Usage + quotas**, filter to the target region and check **Total Regional vCPUs**, the selected **VM-family quota**, and VM-count allowance. Check SKU eligibility in the portal's size selector as well.
 4. Plan the complete application, including any test/target overlap:
 
-| Exact Target VM Name | Default Size | vCPU / RAM | Alternate Plan if B-series Is Unavailable |
+| Exact Target VM Name | Eligible Sizes | vCPU / Minimum RAM | Selection Order |
 |----------------------|--------------|------------|------------------------------------------|
-| `OnPrem-Web` | `Standard_B2s` | 2 / 4 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| `OnPrem-SQL` | `Standard_B2ms` | 2 / 8 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| `OnPrem-Linux-Web` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
-| `OnPrem-Linux-App` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
+| `OnPrem-Web` | B2 or D2 | 2 / 4 GiB | Ascending regional Windows PAYG compute cost |
+| `OnPrem-SQL` | B2 or D2 | 2 / 8 GiB | Ascending regional Windows PAYG compute cost |
+| `OnPrem-Linux-Web` | B2 or D2 | 2 / 2 GiB | Ascending regional Linux PAYG compute cost |
+| `OnPrem-Linux-App` | B2 or D2 | 2 / 2 GiB | Ascending regional Linux PAYG compute cost |
 
-5. If the default B-series plan is unavailable, explicitly select the **all-four `Standard_D2as_v5` plan** in the portal after checking quota and eligibility. Record the choice; do not silently substitute another size. One complete default set needs 6 vCPUs; the alternate set needs 8. Count simultaneous test/target sets and existing allocations without double-counting them.
+5. In the portal, review current subscription-eligible B-series v2 and supported D-series v4/v5 B2/D2 candidates, filtering first for the table's RAM and x64, Generation 2, SCSI and Premium SSD requirements; exclude ARM, 1-GiB, NVMe-only and retired sizes. Review known OS-specific regional USD/hour pay-as-you-go compute prices in ascending order, then choose and record an eligible size for each role yourself; the cheapest is not chosen automatically. Confirm guest/controller and migration-provider support. Missing prices mean incomplete cost ranking: record **Price unavailable** separately and choose explicitly only with verified eligibility and combined quota, without claiming cheapest. Missing SKU/eligibility information or unknown quota is not approval. One complete set needs 8 vCPUs; full test/target overlap needs 16. Check aggregate quota for all four selected sizes by actual family, counting existing allocations without double-counting them.
 6. Keep **Azure Hybrid Benefit / existing Windows Server license rights: No** unless you have confirmed eligible rights. Review current portal VM/disk pricing for the actual region; no fixed lab price is assumed.
 
 ### 4.2 Build the Target Landing Zone
@@ -258,7 +258,7 @@ Replication settings describe a future Azure VM. Starting the job does not mean 
 ### 5.4 Configure Compute Settings
 
 1. Set **Target VM name: `OnPrem-Web`**.
-2. Choose **`Standard_B2s` (2 vCPU, 4 GB)**, or **`Standard_D2as_v5`** if you explicitly selected the alternate all-four plan.
+2. Choose your recorded eligible **B2 or D2 size (2 vCPU, at least 4 GiB RAM)** from Section 4.1.
 3. Set **OS type: Windows** and identify the correct **OS/boot disk**. Review the source's generation and the supported target settings; do not change generation merely to match a size choice.
 4. Leave existing-license/Azure Hybrid Benefit settings **No** unless eligible rights were confirmed.
 
@@ -303,7 +303,7 @@ Nginx has two distinct functions: a **static site on 80** and an **application p
 ### 6.4 Configure Compute Settings
 
 1. Set **Target VM name: `OnPrem-Linux-Web`**.
-2. Choose **`Standard_B1ms` (1 vCPU, 2 GB)**, or **`Standard_D2as_v5`** under the explicitly chosen alternate plan.
+2. Choose your recorded eligible **B2 or D2 size (2 vCPU, at least 2 GiB RAM)** from Section 4.1.
 3. Select **OS type: Linux**, and identify its OS/boot disk. The guest remains **Ubuntu 24.04**.
 
 ### 6.5 Configure Disks and Start Replication

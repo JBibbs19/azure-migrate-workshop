@@ -1,27 +1,21 @@
 ﻿<#
 .SYNOPSIS
-    Step 4: Perform test migration to validate before cutover.
+    Step 4: Manual Hyper-V portal test-migration handoff; no Azure actions run.
 
 .DESCRIPTION
-    Runs a test migration for each VM into an isolated test VNet.
-    This validates that the VMs will work correctly in Azure
-    WITHOUT affecting the source VMs or production network.
+    This lab's four source VMs are Hyper-V. The retained migration implementation uses
+    VMwareCbt methods and is NOT a verified automation contract for these Hyper-V sources.
+    An unconditional safety boundary stops before Azure sign-in, replication lookups,
+    test-network creation, test migration, validation commands or test cleanup.
 
-    TEST MIGRATION IS NON-NEGOTIABLE in real-world migrations.
-    It's your safety net before committing to cutover.
+    The script prints the selected workload and required portal validation, then exits
+    nonzero with ManualActionRequired. It does not claim a test or module section complete.
+    Missing/unknown workload or environment metadata never permits automation. The legacy
+    body is retained below the boundary but is unreachable for every workload selection.
 
-    After validation, the test resources are cleaned up.
-
-    VMs being tested:
-      - OnPrem-Web       (Windows Server + IIS)
-      - OnPrem-SQL       (Windows Server + SQL Server Express)
-      - OnPrem-Linux-Web (Ubuntu + Nginx)
-      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
-
-    Prerequisites:
-      - Steps 1-3 completed (Azure Migrate project exists, VMs discovered, replication enabled)
-      - Replication is in a healthy "Protected" state for all VMs
-      - Az PowerShell modules installed (Az.Migrate, Az.Network, Az.Compute)
+    In Azure Migrate's Hyper-V portal workflow, first verify every selected source VM GUID,
+    registered host, healthy replication and isolated test networking. Perform test migration,
+    validate the applications yourself, and clean up the test migration in the portal.
 
 .PARAMETER SourceResourceGroup
     Resource group containing the Hyper-V host and on-prem VMs.
@@ -33,8 +27,8 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
-    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
-    Azure region for test resources. Prompted when not supplied (example: eastus).
+    Planning value only. Confirm actual target and isolated test-network regions in the portal.
+    The safety boundary does not read, create or move Azure resources.
 
 .PARAMETER TestVNetName
     Name of the isolated test virtual network.
@@ -48,15 +42,12 @@
 .EXAMPLE
     .\migrate-step4-test-migrate.ps1 -TargetResourceGroup "mycloud-rg" -MigrateProjectName "my-migrate"
 MODULE COVERAGE
-    The scripts and the modules are run separately. What this completes depends on -Workload:
-
-      -Workload Agentless   Module 2, section 8 (Test Migration), including the cleanup in 8.6.
-      -Workload AgentBased  Module 3, section 10 (Test Migration), including the cleanup in 10.5.
-      -Workload All         Both, in one pass. The default.
-
-    The in-guest validation in those sections - browsing the IIS site, querying SQL, calling the
-    Tomcat order desk on the test VM - is not performed. The script confirms the test VMs exist and
-    reach a healthy state; whether the application works is yours to check.
+    Manual guidance only, not automated completion:
+      -Workload Agentless: Module 2 section 8, portal test migration and cleanup.
+      -Workload AgentBased: Module 3 section 10, portal test migration and cleanup.
+      -Workload All: both selected groups, four Hyper-V VMs.
+    No module section is completed by this script. Use the SAME workload selection as Step 3.
+    Unknown/missing selection stops safely without choosing source VMs or contacting Azure.
 #>
 
 [CmdletBinding()]
@@ -857,6 +848,49 @@ trap {
     Wait-LabBeforeExit
     exit 1
 }
+
+function Get-LabHyperVManualHandoff {
+    param([AllowNull()][AllowEmptyString()][string]$Workload, [int]$Stage)
+    if ($Stage -notin @(4, 5)) { throw '[ManualActionRequired] Unknown migration stage; no automation is authorized.' }
+    $entry = if ($null -ne $Workload) { $Workload.Trim() } else { '' }
+    $normalized = switch ($entry) {
+        'All' { 'All' }
+        'Agentless' { 'Agentless' }
+        'AgentBased' { 'AgentBased' }
+        'Agent-based' { 'AgentBased' }
+        default { 'UnspecifiedOrInvalid' }
+    }
+    $groups = @{
+        All = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+        Agentless = @('OnPrem-Web', 'OnPrem-Linux-Web')
+        AgentBased = @('OnPrem-SQL', 'OnPrem-Linux-App')
+        UnspecifiedOrInvalid = @()
+    }
+    $module2 = if ($Stage -eq 4) { 'Module 2 section 8 (portal test migration and cleanup)' } else { 'Module 2 section 9 (portal cutover)' }
+    $module3 = if ($Stage -eq 4) { 'Module 3 section 10 (portal test migration and cleanup)' } else { 'Module 3 section 11 (portal cutover)' }
+    $coverage = switch ($normalized) {
+        'All' { "$module2; $module3" }
+        'Agentless' { $module2 }
+        'AgentBased' { $module3 }
+        default { 'None selected: specify All, Agentless or AgentBased before taking portal actions.' }
+    }
+    return [pscustomobject]@{ Status = 'ManualActionRequired'; CanAutomate = $false; Workload = $normalized; VMNames = @($groups[$normalized]); ManualCoverage = $coverage }
+}
+
+# BEGIN HYPERV MANUAL HANDOFF GUARD
+$manualHandoff = Get-LabHyperVManualHandoff -Workload $Workload -Stage 4
+Write-Host '[ManualActionRequired] Hyper-V automation is blocked: no verified contract in this script.' -ForegroundColor Yellow
+Write-Host "  Selected workload: $($manualHandoff.Workload)" -ForegroundColor Cyan
+foreach ($name in $manualHandoff.VMNames) { Write-Host "    $name (Hyper-V source; confirm actual VM GUID and registered host in the portal)" -ForegroundColor Cyan }
+Write-Host "  Manual module coverage only: $($manualHandoff.ManualCoverage)" -ForegroundColor White
+Write-Host '  No Azure calls, migration jobs, network changes, guest commands or source shutdown were performed. No module section is claimed complete.' -ForegroundColor Yellow
+Write-Host '  Missing/unknown source, target, project or workload metadata never authorizes automation; independently validate the exact project and selected source identities in the portal.' -ForegroundColor Yellow
+Write-Host '  Use Azure portal > Azure Migrate > your project > Replicating machines (Hyper-V); never select by display name alone.' -ForegroundColor White
+Write-Host '  Before portal Test migration: verify every selected source has healthy completed initial replication and choose an isolated, non-overlapping test VNet.' -ForegroundColor White
+Write-Host '  Validate the test applications, data and dependencies yourself, then use portal Clean up test migration. This script has not tested or cleaned up anything.' -ForegroundColor White
+Write-Host '  Supported Hyper-V procedure: https://learn.microsoft.com/azure/migrate/tutorial-migrate-hyper-v' -ForegroundColor White
+throw '[ManualActionRequired] Step 4 Hyper-V portal action is required; no automatic stage completion or source shutdown occurred.'
+# END HYPERV MANUAL HANDOFF GUARD
 
 $context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Migrate')
 

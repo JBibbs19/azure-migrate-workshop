@@ -1,37 +1,26 @@
 ﻿<#
 .SYNOPSIS
-    Step 3: Enable replication for all 4 VMs.
+    Step 3: Read-only Hyper-V replication preflight and supported portal handoff.
 
 .DESCRIPTION
-    This script configures and starts replication from Hyper-V to Azure for
-    all 4 on-premises VMs using Azure Migrate's Server Migration tool.
+    Checks the requested workload group, target sizing, discovered Hyper-V identities
+    and installed command contracts without changing Azure resources.
 
-    After running this script, initial replication will begin. The VMs continue
-    running on-premises while data is replicated to Azure. Once replication
-    reaches a healthy state, you can perform a test migration or cutover.
+    The published Az.Migrate replication API uses VMwareCbt inputs, not Hyper-V VMs.
+    Az.RecoveryServices supports Hyper-V disaster recovery, but using that DR API against
+    an Azure Migrate-created vault is not a verified migration contract for this lab.
+    Therefore this iteration fails closed and gives the supported Azure Migrate portal
+    replication and selected-set monitoring path. It never guesses ResourceName, creates
+    a vault, installs a module/provider, or reports replication ready from a submitted job.
 
-    What this script does:
-    1. Retrieves discovered machines from Azure Migrate
-    2. Configures replication for each VM (target RG, VNet, VM size, OS type)
-    3. Starts replication for all 4 VMs
-    4. Monitors replication progress and displays status
-    5. Provides next steps for test migration and cutover
+    A nonzero exit means the automated Step 3 did NOT complete. No replication writes,
+    test migration, test cleanup, cutover or source shutdown are performed. Complete
+    replication and monitoring in the portal; verify support separately before using
+    the Step 4/5 scripts with Hyper-V. Keep the SAME workload group for subsequent stages.
 
-    How replication works:
-    - Azure Migrate installs a replication provider on the Hyper-V host
-    - The provider captures disk changes and sends them to Azure
-    - An initial full replication copies all disk data (can take hours)
-    - After initial sync, delta replication sends only changed blocks
-    - During replication, the source VMs continue running normally
-    - When you're ready to migrate, you perform a "cutover" which:
-      a) Performs a final delta sync
-      b) Shuts down the source VM
-      c) Starts the VM in Azure with the replicated data
-
-    Prerequisites:
-    - Step 1 (setup project) and Step 2 (discovery) must be completed
-    - All 4 VMs must be discovered in Azure Migrate
-    - The target landing zone (VNet, NSG) must exist
+    Prerequisites: complete Steps 1/2, register the Hyper-V provider using the documented
+    portal workflow, and review Step 1's actual SKU/provider/quota guards with the same
+    selected target region. AutoCost guidance is recalculated from live metadata, prices and quota.
 
 .PARAMETER SourceResourceGroup
     The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
@@ -46,23 +35,49 @@
 .PARAMETER MigrateProjectName
     Name of the Azure Migrate project. Prompted when not supplied (example: ces-migrate-01).
 
+.PARAMETER VaultResourceId
+    Optional exact existing Recovery Services vault ARM ID in the selected subscription.
+    Conflicting active project references block selection; no vault is created.
+
+.PARAMETER VaultResourceGroup
+    Resource group inspected for fallback vault candidates (defaults to SourceResourceGroup).
+    Even a single candidate requires student selection; names/tags never prove association.
+
+.PARAMETER RecoveryServicesProviderId
+    Optional exact registered provider ARM ID, including fabric, inside the selected vault.
+    GET-only identity/connection inspection; no provider installation or registration runs.
+
+.PARAMETER ReportPath
+    Optional new JSON report path. Existing files are never overwritten. The default is a
+    unique file in the current directory, including on early failure when the path is writable.
+    Inventory is not replication readiness or cutover authorization.
+
+.PARAMETER Workload
+    All selects four VMs; Agentless selects OnPrem-Web and OnPrem-Linux-Web;
+    AgentBased (also Agent-based) selects OnPrem-SQL and OnPrem-Linux-App.
+    Names are workload groups only. Later steps must use this SAME normalized value.
+
+.PARAMETER TargetVmSizes
+    Optional exact four-key mapping: OnPrem-Web, OnPrem-SQL, OnPrem-Linux-Web and
+    OnPrem-Linux-App to exact eligible SKU strings. Revalidated against live subscription
+    metadata, RAM and combined quotas. Omit to choose a number for each workload;
+    blank cancels the entire selection. Prices may be unavailable, never a quota bypass.
+
 .EXAMPLE
     .\migrate-step3-replicate.ps1
 
 .EXAMPLE
     .\migrate-step3-replicate.ps1 -TargetResourceGroup "mycloud-rg" -Location "westus2"
 MODULE COVERAGE
-    The scripts and the modules are run separately. What this completes depends on -Workload:
+    -Workload Agentless: Module 2, sections 5-7 (replication and monitoring).
+    -Workload AgentBased: Module 3, sections 8-9 (replication and monitoring).
+    -Workload All: both selected groups, four VMs. Agent-based is accepted as AgentBased.
 
-      -Workload Agentless   Module 2, sections 5 and 6 (Configure Replication for OnPrem-Web
-                            and OnPrem-Linux-Web) and section 7 (Monitor Replication).
-      -Workload AgentBased  Module 3, section 8 (Configure Replication) and section 9
-                            (Monitor Replication).
-      -Workload All         Both of the above, in one pass. The default.
-
-    IMPORTANT: replication here is always AGENTLESS. Module 3 sections 5 to 7 - deploy the
-    replication appliance, install Mobility Service on each guest - are NOT performed. The end
-    state matches; the method does not. See VersionNotes.md section 11.
+    These names select workload groups, not different replication technologies. This lab
+    uses Hyper-V host-based replication. It does not deploy a replication appliance or
+    install Mobility Service in the guests for Module 3 sections 5-7.
+    Step 4 and Step 5 remain separate: use the SAME -Workload value after verifying readiness.
+    This script never performs test migration, test cleanup, cutover or source shutdown.
 #>
 
 [CmdletBinding()]
@@ -75,6 +90,16 @@ param(
 
     [string]$MigrateProjectName,
 
+    [string]$VaultResourceId,
+
+    [string]$VaultResourceGroup,
+
+    [string]$RecoveryServicesProviderId,
+
+    [string]$ReportPath,
+
+    [hashtable]$TargetVmSizes,
+
     # Which workload group to act on (prompted when not supplied).
     #   Agentless  = OnPrem-Web, OnPrem-Linux-Web      (the Module 2 pair)
     #   AgentBased = OnPrem-SQL, OnPrem-Linux-App      (the Module 3 pair)
@@ -84,6 +109,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:LabRetailCache = @{}
+$script:LabReplicationStage = 'environment-preflight'
 
 # ================================================================
 # Shared helpers, masked console output and parameter entry
@@ -166,12 +193,47 @@ function Write-Warning {
     process { Microsoft.PowerShell.Utility\Write-Warning -Message (Protect-LabText $Message) }
 }
 
+function Format-LabSafeErrorDiagnostic {
+    param([AllowNull()]$ErrorRecord, [AllowNull()][AllowEmptyString()][string]$Stage)
+    $safeStage = 'unclassified'
+    if ($Stage -in @('environment-preflight', 'authentication/Connect-AzAccount', 'installed-command-contracts',
+        'target-resource-group/Get-AzResourceGroup', 'target-network/Get-AzVirtualNetwork', 'project/REST',
+        'project-inventory/REST', 'project-solutions/REST', 'vault-list/REST', 'vault/REST', 'providers/REST', 'replication-inventory/REST', 'target-sizing/preflight',
+        'source-inventory/Get-AzMigrateDiscoveredServer', 'backend-contract')) { $safeStage = $Stage }
+    $exceptionType = 'OtherOrUnknownException'; $category = 'NotSpecified'; $lineNumber = 0
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        if ($null -ne $ErrorRecord.Exception) {
+            $candidate = $ErrorRecord.Exception.GetType().FullName
+            if ($candidate -in @('System.Exception', 'System.InvalidOperationException', 'System.ArgumentException',
+                'System.ArgumentNullException', 'System.Management.Automation.RuntimeException',
+                'System.Management.Automation.ParameterBindingException', 'System.Management.Automation.CommandNotFoundException')) {
+                $exceptionType = $candidate
+            }
+        }
+        $categoryName = [Enum]::GetName([System.Management.Automation.ErrorCategory], $ErrorRecord.CategoryInfo.Category)
+        if ($null -ne $categoryName) { $category = $categoryName }
+        $invocation = $ErrorRecord.InvocationInfo
+        if ($null -ne $invocation -and $invocation.ScriptLineNumber -is [int] -and
+            $invocation.ScriptLineNumber -ge 0 -and $invocation.ScriptLineNumber -le 1000000) {
+            $lineNumber = $invocation.ScriptLineNumber
+        }
+    }
+    return @(
+        'Step 3 stopped. No replication writes were attempted.'
+        "Stage: $safeStage"
+        "Category: $category"
+        "Exception type: $exceptionType"
+        "Script line: $lineNumber"
+        'Raw error text, statements, inputs, stack and resource IDs are intentionally omitted.'
+    )
+}
+
 function Write-LabTerminatingError {
-    # Used by each script's trap so an unhandled Azure error is shown masked, then the script stops.
     param([Parameter(Mandatory = $true)]$ErrorRecord)
-    $text = ($ErrorRecord | Out-String).Trim()
-    Microsoft.PowerShell.Utility\Write-Host ''
-    Microsoft.PowerShell.Utility\Write-Host (Protect-LabText $text) -ForegroundColor Red
+    foreach ($line in @(Format-LabSafeErrorDiagnostic -ErrorRecord $ErrorRecord -Stage $script:LabReplicationStage)) {
+        Microsoft.PowerShell.Utility\Write-Host $line -ForegroundColor Red
+    }
+    Microsoft.PowerShell.Utility\Write-Host 'Hyper-V manual path: Azure portal > Azure Migrate > your project > Replicate (Hyper-V), then monitor ONLY the selected workload. Step 4/5 are separate; no readiness is assumed.' -ForegroundColor Yellow
 }
 
 function Read-LabParameter {
@@ -316,7 +378,7 @@ function Read-LabChoice {
 function Get-LabResourceGroupNames {
     # Every resource group visible in the signed-in subscription.
     try { return @(Get-AzResourceGroup -ErrorAction Stop | Select-Object -ExpandProperty ResourceGroupName | Sort-Object) }
-    catch { return @() }
+    catch { throw '[resource-group-inventory/Get-AzResourceGroup] Read failed; resource absence was not established. No changes were made.' }
 }
 
 function Get-LabVMNames {
@@ -326,17 +388,19 @@ function Get-LabVMNames {
 }
 
 function Get-LabMigrateProjectNames {
-    # Azure Migrate exposes the project as one of two resource types depending on how it was
-    # created, so both are queried and the results merged.
     param([Parameter(Mandatory = $true)][string]$ResourceGroupName)
+    $script:LabReplicationStage = 'project-inventory/REST'
+    $null = ConvertTo-LabReplicationArmId -Value "/subscriptions/$script:LabSubscriptionId/resourceGroups/$ResourceGroupName" -Stage $script:LabReplicationStage -ResourceType 'Microsoft.Resources/resourceGroups' -SubscriptionId $script:LabSubscriptionId
+    $inventory = Get-LabArmCollection "/subscriptions/$script:LabSubscriptionId/resourceGroups/$ResourceGroupName/resources" '2021-04-01'
+    if (-not $inventory.Complete) { throw '[project-inventory/REST] Inventory Unknown; project absence was not established.' }
     $names = @()
-    foreach ($type in @('Microsoft.Migrate/migrateProjects', 'Microsoft.Migrate/assessmentProjects')) {
-        try {
-            $names += @(Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceType $type -ErrorAction Stop |
-                        Select-Object -ExpandProperty Name)
-        } catch { }
+    foreach ($resource in $inventory.Items) {
+        if ((Get-LabReplicationField $resource 'type') -ine 'Microsoft.Migrate/migrateProjects') { continue }
+        $id = Get-LabReplicationObjectId $resource 'project-inventory/REST' 'Microsoft.Migrate/migrateProjects' $script:LabSubscriptionId
+        if ($id.Split('/')[4] -ine $ResourceGroupName) { throw '[project-inventory/REST] Project inventory scope mismatch.' }
+        $names += $id.Split('/')[-1]
     }
-    return @($names | Select-Object -Unique | Sort-Object)
+    return @($names | Sort-Object -Unique)
 }
 
 function Get-LabSimilarResourceGroupNames {
@@ -418,7 +482,8 @@ function Read-LabResourceGroupName {
         $entry = Read-LabParameter -Name $Name -Prompt $Prompt -Value $entry -Kind ResourceGroup -Example $Example
 
         $group = $null
-        try { $group = Get-AzResourceGroup -Name $entry -ErrorAction Stop } catch { $group = $null }
+        try { $group = Get-AzResourceGroup -Name $entry -ErrorAction Stop }
+        catch { throw '[resource-group/Get-AzResourceGroup] Read failed; resource absence was not established. Verify the group and access in the portal. No changes were made.' }
 
         if ($group) {
             if ($AllowNew) {
@@ -584,69 +649,397 @@ function Test-LabCidrContains {
     return ($i[0] -ge $o[0] -and $i[1] -le $o[1])
 }
 
-function Get-LabErrorLogPath {
-    # Next to the script when that is writable, otherwise the temp folder.
-    param([AllowNull()][AllowEmptyString()][string]$ScriptPath)
-    $name = if ([string]::IsNullOrWhiteSpace($ScriptPath)) { 'migrate-step' }
-            else { [IO.Path]::GetFileNameWithoutExtension($ScriptPath) }
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $folders = @()
-    if (-not [string]::IsNullOrWhiteSpace($ScriptPath)) { $folders += (Split-Path -Parent $ScriptPath) }
-    $folders += [IO.Path]::GetTempPath()
-    foreach ($folder in $folders) {
-        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
-        try {
-            $probe = Join-Path $folder ".lab-write-test-$stamp"
-            Set-Content -Path $probe -Value 'x' -ErrorAction Stop
-            Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
-            return (Join-Path $folder "$name-error-$stamp.log")
-        } catch { }
+# Explicit-version ARM reads only. A learner-selected vault is not proof of project binding.
+function Get-LabArmFailure {
+    param([AllowNull()]$ErrorRecord, [int]$StatusCode = 0, [AllowNull()]$Body)
+    if ($StatusCode -eq 0 -and $null -ne $ErrorRecord) {
+        $response = Get-LabReplicationField (Get-LabReplicationField $ErrorRecord 'Exception') 'Response'
+        $candidate = Get-LabReplicationField $response 'StatusCode'
+        $number = 0
+        if ($candidate -is [Enum]) { try { $number = [int]$candidate } catch { $number = 0 } }
+        elseif ($null -ne $candidate) { $null = [int]::TryParse([string]$candidate, [ref]$number) }
+        if ($number -ge 100 -and $number -le 599) { $StatusCode = $number }
     }
-    return (Join-Path ([IO.Path]::GetTempPath()) "$name-error-$stamp.log")
+    $code = 'Unknown'
+    if ($null -ne $Body) {
+        $candidate = Get-LabReplicationField (Get-LabReplicationField $Body 'error') 'code' -PreserveCollection
+        if ($candidate -is [string] -and $candidate -in @('AuthorizationFailed', 'ResourceNotFound', 'ResourceGroupNotFound', 'InvalidApiVersionParameter', 'NoRegisteredProviderFound', 'MissingSubscriptionRegistration', 'TooManyRequests')) { $code = $candidate }
+    }
+    if ($StatusCode -lt 100 -or $StatusCode -gt 599) { $StatusCode = 0 }
+    return [pscustomobject]@{ HttpStatus = $StatusCode; ServiceCode = $code }
+}
+
+function Get-LabArmEndpoint {
+    $context = Get-AzContext -ErrorAction Stop
+    $endpoint = Get-LabReplicationField (Get-LabReplicationField $context 'Environment') 'ResourceManagerUrl' -PreserveCollection
+    $uri = $null
+    if ($endpoint -isnot [string] -or -not [uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -cne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/' -or -not $uri.IsDefaultPort) {
+        throw '[arm-read] The active Azure ARM endpoint could not be validated. No changes were made.'
+    }
+    return $uri.GetLeftPart([UriPartial]::Authority)
+}
+
+function Test-LabArmPageUri {
+    param([string]$Value, [string]$CollectionPath, [string]$ApiVersion, [string]$Endpoint)
+    $uri = $null; $root = [uri]$Endpoint
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\\\s#%](?![0-9A-Fa-f]{2})' -or
+        -not [uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    if ($uri.Scheme -cne 'https' -or $uri.Authority -ine $root.Authority -or $uri.UserInfo -or $uri.Fragment -or
+        $uri.AbsolutePath -ine $CollectionPath -or $Value.Split('?')[0] -ine ($Endpoint.TrimEnd('/') + $CollectionPath)) { return $false }
+    $versions = 0
+    foreach ($part in $uri.Query.TrimStart('?').Split('&')) {
+        $pair = $part.Split('=', 2)
+        if ($pair.Count -ne 2 -or [string]::IsNullOrEmpty($pair[1])) { return $false }
+        if ($pair[0] -ieq 'api-version') { if ($pair[1] -cne $ApiVersion) { return $false }; $versions++ }
+        elseif ($pair[0] -notmatch '^(?i:\$?skiptoken|continuationtoken|\$skip)$') { return $false }
+    }
+    return ($versions -eq 1)
+}
+
+function Invoke-LabArmGet {
+    param([string]$Uri)
+    try { $response = Invoke-AzRestMethod -Uri $Uri -Method GET -ErrorAction Stop }
+    catch { return [pscustomobject]@{ Success = $false; Body = $null; Failure = (Get-LabArmFailure -ErrorRecord $_); Reason = 'ReadFailed' } }
+    $status = 0
+    $statusValue = Get-LabReplicationField $response 'StatusCode'
+    $null = [int]::TryParse([string]$statusValue, [ref]$status)
+    $body = $null
+    try { $body = ConvertFrom-Json -InputObject (Get-LabReplicationField $response 'Content') -ErrorAction Stop } catch { }
+    if ($status -ne 200 -or $null -eq $body -or $body -is [array] -or $body -is [string] -or $body -is [ValueType]) {
+        return [pscustomobject]@{ Success = $false; Body = $null; Failure = (Get-LabArmFailure -StatusCode $status -Body $body); Reason = 'HttpOrShapeInvalid' }
+    }
+    return [pscustomobject]@{ Success = $true; Body = $body; Failure = $null; Reason = 'Observed' }
+}
+
+function Get-LabArmCollection {
+    param([string]$Path, [string]$ApiVersion)
+    $endpoint = Get-LabArmEndpoint
+    $uri = $endpoint + $Path + '?api-version=' + $ApiVersion
+    $items = @(); $seen = @{}; $complete = $false; $reason = 'PagingIncomplete'; $failure = $null
+    for ($page = 0; $page -lt 200; $page++) {
+        if (-not (Test-LabArmPageUri $uri $Path $ApiVersion $endpoint) -or $seen.ContainsKey($uri)) { $reason = 'PagingUnsafe'; break }
+        $seen[$uri] = $true
+        $read = Invoke-LabArmGet -Uri $uri
+        if (-not $read.Success) { $reason = $read.Reason; $failure = $read.Failure; break }
+        $property = $read.Body.PSObject.Properties['value']
+        if ($null -eq $property -or $property.Value -isnot [array]) { $reason = 'CollectionShapeInvalid'; break }
+        $rows = $property.Value
+        $malformed = $false
+        foreach ($row in $rows) {
+            if ($null -eq $row -or $row -is [array] -or $row -is [string] -or $row -is [ValueType]) { $malformed = $true; break }
+        }
+        if ($malformed) { $reason = 'CollectionElementInvalid'; break }
+        $items += $rows
+        $next = $read.Body.PSObject.Properties['nextLink']
+        if ($null -eq $next -or $null -eq $next.Value -or ($next.Value -is [string] -and [string]::IsNullOrWhiteSpace($next.Value))) { $complete = $true; $reason = 'Complete'; break }
+        if ($next.Value -isnot [string]) { $reason = 'PagingShapeInvalid'; break }
+        $uri = $next.Value
+    }
+    # Partial pages never become an empty or authoritative inventory.
+    if (-not $complete) { $items = @() }
+    return [pscustomobject]@{ Complete = $complete; Items = @($items); Reason = $reason; Failure = $failure }
+}
+
+function Get-LabMigrateProjectRead {
+    param([string]$ResourceGroupName, [string]$Name)
+    $id = ConvertTo-LabReplicationArmId -Value "/subscriptions/$script:LabSubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Migrate/migrateProjects/$Name" -Stage 'project/REST' -ResourceType 'Microsoft.Migrate/migrateProjects' -SubscriptionId $script:LabSubscriptionId
+    $read = Invoke-LabArmGet -Uri ((Get-LabArmEndpoint) + $id + '?api-version=2018-09-01-preview')
+    if (-not $read.Success) { throw '[project/REST] Project read failed; absence was not established. No changes were made.' }
+    $actual = Get-LabReplicationObjectId $read.Body 'project/REST' 'Microsoft.Migrate/migrateProjects' $script:LabSubscriptionId
+    if ($actual -ine $id -or (Get-LabReplicationField $read.Body 'type') -ine 'Microsoft.Migrate/migrateProjects') { throw '[project/REST] Project identity/type mismatch. No changes were made.' }
+    return $read.Body
+}
+
+function Get-LabProjectVaultAssociation {
+    param($Inventory, [string]$ProjectId, [string]$SubscriptionId)
+    $references = @(); $unsafe = -not $Inventory.Complete; $activeCount = 0; $summaries = @()
+    foreach ($solution in $Inventory.Items) {
+        try {
+            $id = Get-LabReplicationObjectId $solution 'project-solutions/REST' 'Microsoft.Migrate/migrateProjects/solutions' $SubscriptionId
+            if (-not $id.StartsWith(($ProjectId + '/solutions/'), [StringComparison]::OrdinalIgnoreCase)) { throw '[project-solutions/REST] Wrong project.' }
+            $properties = Get-LabReplicationField $solution 'properties' -PreserveCollection
+            $goal = Get-LabReplicationField $properties 'goal' -PreserveCollection
+            $purpose = Get-LabReplicationField $properties 'purpose' -PreserveCollection
+            $status = Get-LabReplicationField $properties 'status' -PreserveCollection
+            if ($goal -isnot [string] -or $purpose -isnot [string] -or $status -isnot [string]) { $unsafe = $true; continue }
+            $active = ($goal -ceq 'Servers' -and $purpose -ceq 'Migration' -and $status -ceq 'Active')
+            $referenceState = 'IgnoredInactiveOrOtherTool'
+            if ($active) {
+                $activeCount++; $referenceState = 'NoReference'
+                $details = Get-LabReplicationField $properties 'details' -PreserveCollection
+                $extended = Get-LabReplicationField $details 'extendedDetails' -PreserveCollection
+                if ($null -ne $extended -and $extended -isnot [array] -and $extended -isnot [string]) {
+                    $property = $extended.PSObject.Properties['vaultId']
+                    if ($null -ne $property) {
+                        # Read directly under the presence guard; do not pipeline-unroll a one-element array.
+                        $link = $extended.PSObject.Properties['vaultId'].Value
+                        if ($link -is [string] -and [string]::IsNullOrWhiteSpace($link)) { $referenceState = 'NoReference' }
+                        else {
+                            $referenceState = 'Malformed'; $valid = $null
+                            try { $valid = ConvertTo-LabReplicationArmId $link 'project-solutions/vault-reference' 'Microsoft.RecoveryServices/vaults' $SubscriptionId } catch { $unsafe = $true }
+                            if ($null -ne $valid) { $references += $valid; $referenceState = 'ValidReference' }
+                        }
+                    }
+                } elseif ($null -ne $extended) { $unsafe = $true; $referenceState = 'Malformed' }
+            }
+            $summaries += [pscustomobject]@{ Id = $id; IsActiveServerMigration = $active; ReferenceState = $referenceState }
+        } catch { $unsafe = $true }
+    }
+    $unique = @($references | Sort-Object -Unique)
+    $state = 'Unknown'; $source = 'None'; $vaultId = $null; $reason = 'NoValidatedActiveReference'
+    if ($unique.Count -gt 1) { $reason = 'ConflictingActiveReferences' }
+    elseif ($unsafe) { $reason = 'ReadOrShapeUnknown' }
+    elseif ($unique.Count -eq 1) { $state = 'AzureVerified'; $source = 'AzureVerified'; $vaultId = $unique[0]; $reason = 'UniqueActiveServiceReference' }
+    return [pscustomobject]@{ State = $state; AssociationSource = $source; VaultId = $vaultId; Reason = $reason; Complete = $Inventory.Complete; ActiveServerMigrationCount = $activeCount; ValidReferences = @($unique); Solutions = @($summaries) }
+}
+
+function Get-LabVaultSafeText {
+    param([AllowNull()]$Value)
+    if ($Value -is [string] -and $Value.Length -le 160 -and $Value -match '^[A-Za-z0-9 ._():/+\-]+$') { return $Value }
+    return 'Unknown'
+}
+
+function Get-LabVaultCandidate {
+    param($Object, [string]$SubscriptionId)
+    $id = Get-LabReplicationObjectId $Object 'vault/REST' 'Microsoft.RecoveryServices/vaults' $SubscriptionId
+    if ((Get-LabReplicationField $Object 'type') -ine 'Microsoft.RecoveryServices/vaults') { throw '[vault/REST] Vault type mismatch.' }
+    $properties = Get-LabReplicationField $Object 'properties' -PreserveCollection
+    return [pscustomobject]@{ Id = $id; Name = $id.Split('/')[-1]; Location = (Get-LabVaultSafeText (Get-LabReplicationField $Object 'location' -PreserveCollection)); ProvisioningState = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'provisioningState' -PreserveCollection)) }
+}
+
+function Select-LabVaultInventoryEntry {
+    param([object[]]$Entries, [string]$Label)
+    for ($i = 0; $i -lt $Entries.Count; $i++) {
+        Write-Host "  [$($i + 1)] $($Entries[$i].Name) | $($Entries[$i].Summary) | $($Entries[$i].Id)"
+    }
+    while ($true) {
+        $answer = Read-Host "$Label number (blank cancels; no default or inferred project binding)"
+        if ([string]::IsNullOrWhiteSpace($answer)) { throw '[Cancelled] Read-only inventory selection cancelled. No changes were made.' }
+        $number = 0
+        if ($answer -match '^[0-9]+$' -and [int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $Entries.Count) { return $Entries[$number - 1].Id }
+        Write-Warning "Enter a number from 1 to $($Entries.Count), or blank to cancel."
+    }
+}
+
+function Get-LabProviderProjection {
+    param($Object, [string]$VaultId, [string]$SubscriptionId)
+    $id = Get-LabReplicationObjectId $Object 'providers/REST' 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationRecoveryServicesProviders' $SubscriptionId
+    if (-not $id.StartsWith(($VaultId + '/replicationFabrics/'), [StringComparison]::OrdinalIgnoreCase)) { throw '[providers/REST] Provider belongs to another vault.' }
+    if ((Get-LabReplicationField $Object 'type') -ine 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationRecoveryServicesProviders') { throw '[providers/REST] Provider type mismatch.' }
+    $properties = Get-LabReplicationField $Object 'properties' -PreserveCollection
+    $connection = Get-LabReplicationField $properties 'connectionStatus' -PreserveCollection
+    if ($connection -isnot [string] -or $connection -cnotin @('Connected', 'Disconnected', 'NotConnected')) { $connection = 'Unknown' }
+    $heartbeat = Get-LabReplicationField $properties 'lastHeartBeat' -PreserveCollection
+    $date = ConvertTo-LabVaultUtcTime $heartbeat
+    $timestamp = $null; $age = $null
+    if ($null -ne $date) {
+        $timestamp = $date.ToString('o'); $age = [math]::Round(([DateTimeOffset]::UtcNow - $date).TotalSeconds)
+    }
+    return [pscustomobject]@{ Id = $id; Name = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'friendlyName' -PreserveCollection)); CurrentConnection = $connection; Connected = ($connection -ceq 'Connected'); LastHeartBeatUtc = $timestamp; HeartBeatAgeSeconds = $age; ProviderVersion = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'providerVersion' -PreserveCollection)); FabricType = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'fabricType' -PreserveCollection)) }
+}
+
+function Get-LabReplicationInventoryProjection {
+    param($Inventory, [string]$VaultId, [string]$SubscriptionId, [string]$ProviderId, [ValidateSet('Items', 'Jobs')][string]$Kind)
+    $scope = if ($Kind -eq 'Jobs') { 'VaultScopedProviderAttributionUnknown' } elseif ($ProviderId) { 'ExactProviderFiltered' } else { 'VaultScoped' }
+    $result = [ordered]@{ Complete = $Inventory.Complete; Reason = $Inventory.Reason; Failure = $Inventory.Failure; ObservedCount = $null; ProviderFilterId = $ProviderId; Scope = $scope; MatchingProviderCount = 0; UnattributedCount = 0; Items = @(); SourceIdentityMapping = 'NotVerified'; Readiness = 'NotVerified' }
+    if (-not $Inventory.Complete) { return [pscustomobject]$result }
+    $safe = @(); $unattributed = 0; $matching = 0
+    try {
+        foreach ($item in $Inventory.Items) {
+            $type = if ($Kind -eq 'Items') { 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationProtectionContainers/replicationProtectedItems' } else { 'Microsoft.RecoveryServices/vaults/replicationJobs' }
+            $id = Get-LabReplicationObjectId $item 'replication-inventory/REST' $type $SubscriptionId
+            if (-not $id.StartsWith(($VaultId + '/'), [StringComparison]::OrdinalIgnoreCase)) { throw '[replication-inventory/REST] Wrong vault.' }
+            $properties = Get-LabReplicationField $item 'properties' -PreserveCollection
+            $specific = Get-LabReplicationField $properties 'providerSpecificDetails' -PreserveCollection
+            $provider = Get-LabReplicationField $properties 'recoveryServicesProviderId' -PreserveCollection
+            $providerIdentity = $null
+            if ($null -ne $provider) {
+                $providerIdentity = ConvertTo-LabReplicationArmId $provider 'replication-inventory/provider' 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationRecoveryServicesProviders' $SubscriptionId
+                if (-not $providerIdentity.StartsWith(($VaultId + '/replicationFabrics/'), [StringComparison]::OrdinalIgnoreCase)) { throw '[replication-inventory/provider] Wrong vault.' }
+            }
+            if ($null -eq $providerIdentity) { $unattributed++ }
+            if ($Kind -eq 'Items' -and $ProviderId -and $providerIdentity -ine $ProviderId) { continue }
+            if (-not $ProviderId -or $providerIdentity -ieq $ProviderId) { $matching++ }
+            $guid = [guid]::Empty; $sourceGuid = $null
+            $vmId = Get-LabReplicationField $specific 'vmId' -PreserveCollection
+            if ($vmId -is [string] -and [guid]::TryParse($vmId, [ref]$guid)) { $sourceGuid = $guid.ToString() }
+            $safe += [pscustomobject]@{ Id = $id; FriendlyName = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'friendlyName' -PreserveCollection)); ProviderId = $providerIdentity; SourceVmGuid = $sourceGuid; InstanceType = (Get-LabVaultSafeText (Get-LabReplicationField $specific 'instanceType' -PreserveCollection)); ProtectionState = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'protectionState' -PreserveCollection)); ReplicationHealth = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'replicationHealth' -PreserveCollection)); JobState = (Get-LabVaultSafeText (Get-LabReplicationField $properties 'state' -PreserveCollection)); StartTime = (Get-LabVaultInventoryTime (Get-LabReplicationField $properties 'startTime' -PreserveCollection)); EndTime = (Get-LabVaultInventoryTime (Get-LabReplicationField $properties 'endTime' -PreserveCollection)) }
+        }
+        $result.ObservedCount = $Inventory.Items.Count; $result.MatchingProviderCount = $matching; $result.UnattributedCount = $unattributed; $result.Items = @($safe)
+    } catch { $result.Complete = $false; $result.Reason = 'IdentityOrShapeUnknown'; $result.Items = @(); $result.ObservedCount = $null }
+    return [pscustomobject]$result
+}
+
+function ConvertTo-LabVaultUtcTime {
+    param([AllowNull()]$Value)
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [DateTime]) {
+        # ARM timestamps without an offset (Unspecified) are interpreted as UTC, never local time.
+        $utc = if ($Value.Kind -eq [DateTimeKind]::Unspecified) { [DateTime]::SpecifyKind($Value, [DateTimeKind]::Utc) } else { $Value.ToUniversalTime() }
+        return [DateTimeOffset]::new($utc)
+    }
+    $date = [DateTimeOffset]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    if ($Value -is [string] -and [DateTimeOffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$date)) { return $date.ToUniversalTime() }
+    return $null
+}
+
+function Get-LabVaultInventoryTime {
+    param([AllowNull()]$Value)
+    $date = ConvertTo-LabVaultUtcTime $Value
+    if ($null -ne $date) { return $date.ToString('o') }
+    return $null
+}
+
+function Write-LabVaultReport {
+    try {
+        $script:LabVaultReport.Stage = $script:LabReplicationStage
+        $script:LabVaultReport.FinishedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        $path = $ReportPath
+        if ([string]::IsNullOrWhiteSpace($path)) { $path = Join-Path (Get-Location).Path ('step3-vault-inventory-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [guid]::NewGuid().ToString('N') + '.json') }
+        $path = [IO.Path]::GetFullPath($path)
+        $json = ConvertTo-Json -InputObject $script:LabVaultReport -Depth 16
+        $stream = $null; $writer = $null
+        try {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+            $writer.WriteLine($json); $writer.Flush()
+        } finally { if ($null -ne $writer) { $writer.Dispose() } elseif ($null -ne $stream) { $stream.Dispose() } }
+        Write-Host "Read-only Step 3 JSON report saved: $path" -ForegroundColor Cyan
+    } catch { Write-Warning 'The sanitized JSON report could not be saved (existing paths are never overwritten); no error body is displayed.' }
+}
+
+function Invoke-LabVaultInspection {
+    param([string]$ProjectId, [string]$ScopeResourceGroup, [string]$ExplicitVaultId, [string]$ExplicitProviderId)
+    $report = $script:LabVaultReport
+    $scope = "/subscriptions/$script:LabSubscriptionId/resourceGroups/$ScopeResourceGroup/providers/Microsoft.RecoveryServices/vaults"
+    $null = ConvertTo-LabReplicationArmId -Value "/subscriptions/$script:LabSubscriptionId/resourceGroups/$ScopeResourceGroup" -Stage 'vault-list/REST' -ResourceType 'Microsoft.Resources/resourceGroups' -SubscriptionId $script:LabSubscriptionId
+    $report.VaultDiscoveryScope = [ordered]@{ ResourceGroup = $ScopeResourceGroup; CollectionId = $scope; Complete = $false; State = 'Unknown'; Candidates = @(); Failure = $null }
+    $script:LabReplicationStage = 'project-solutions/REST'
+    $solutions = Get-LabArmCollection ($ProjectId + '/solutions') '2018-09-01-preview'
+    $association = Get-LabProjectVaultAssociation $solutions $ProjectId $script:LabSubscriptionId
+    $report.ProjectAssociation = $association
+    $chosen = $null
+    if ($ExplicitVaultId) { $chosen = ConvertTo-LabReplicationArmId $ExplicitVaultId 'vault/explicit-id' 'Microsoft.RecoveryServices/vaults' $script:LabSubscriptionId }
+    if ($association.ValidReferences.Count -gt 1 -or ($chosen -and @($association.ValidReferences | Where-Object { $_ -ine $chosen }).Count -gt 0)) {
+        $report.Handoff = 'BlockedConflictingVaultIntent'
+        throw '[vault/REST] Explicit intent or active project references conflict. No alternate vault was selected.'
+    }
+    if (-not $chosen -and $association.State -ceq 'AzureVerified') { $chosen = $association.VaultId }
+    if (-not $chosen) {
+        $script:LabReplicationStage = 'vault-list/REST'
+        $inventory = Get-LabArmCollection $scope '2026-07-01'
+        $report.VaultDiscoveryScope.Complete = $inventory.Complete; $report.VaultDiscoveryScope.Failure = $inventory.Failure
+        $candidates = @()
+        if ($inventory.Complete) {
+            try {
+                foreach ($row in $inventory.Items) {
+                    $candidate = Get-LabVaultCandidate $row $script:LabSubscriptionId
+                    if ($candidate.Id.Substring(0, $candidate.Id.LastIndexOf('/')) -ine $scope) { throw '[vault-list/REST] Out-of-scope vault.' }
+                    if (@($candidates | Where-Object { $_.Id -ieq $candidate.Id }).Count -gt 0) { throw '[vault-list/REST] Duplicate vault.' }
+                    $candidates += $candidate
+                }
+            } catch { $report.VaultDiscoveryScope.Complete = $false; $candidates = @() }
+        }
+        $report.VaultDiscoveryScope.Candidates = @($candidates)
+        if (-not $report.VaultDiscoveryScope.Complete) {
+            $report.Handoff = 'ManualInspectUnknownInventory'
+            Write-Warning 'Vault inventory Unknown: a failed/malformed/incomplete read is not absence. Inspect permissions/project resources; do not create a replacement vault.'
+            return
+        }
+        if ($candidates.Count -eq 0) {
+            $report.VaultDiscoveryScope.State = 'VaultNotObservedInInspectedScope'; $report.Handoff = 'ManualInspectProjectPreparation'
+            Write-Warning 'VaultNotObservedInInspectedScope: only this selected resource-group inventory was empty. Inspect the project resources and region lock in Azure Migrate. Use its Create resources action ONLY if the project is genuinely not prepared; never create a separate ASR vault.'
+            return
+        }
+        $report.VaultDiscoveryScope.State = 'CandidatesObserved'
+        Write-Warning 'Existing vault candidates are not project associations. Name/prefix, location, resource group and tags are NOT binding evidence. Choose your own lab vault for read-only inspection.'
+        $entries = @($candidates | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Summary = ($_.Location + ' | provisioning=' + $_.ProvisioningState) } })
+        $chosen = Select-LabVaultInventoryEntry $entries 'Vault'
+    }
+    if (@($association.ValidReferences | Where-Object { $_ -ine $chosen }).Count -gt 0) {
+        $report.Handoff = 'BlockedConflictingVaultIntent'
+        throw '[vault/REST] Selected vault conflicts with an active valid service reference. No alternate vault was selected.'
+    }
+    if ($association.State -cne 'AzureVerified') { $association.AssociationSource = 'StudentSelected' }
+    $script:LabReplicationStage = 'vault/REST'
+    $report.Vault.Id = $chosen
+    $read = Invoke-LabArmGet ((Get-LabArmEndpoint) + $chosen + '?api-version=2026-07-01')
+    if (-not $read.Success) { $report.Vault.Failure = $read.Failure; $report.Handoff = 'ManualInspectUnknownVault'; return }
+    $vault = Get-LabVaultCandidate $read.Body $script:LabSubscriptionId
+    if ($vault.Id -ine $chosen) { throw '[vault/REST] Selected vault identity mismatch. No alternate vault was selected.' }
+    $vaultRegion = ConvertTo-LabRegionKey $vault.Location
+    $targetRegion = ConvertTo-LabRegionKey $report.Inputs.TargetLocation
+    $regionState = 'Unknown'
+    if ($vaultRegion -and $vaultRegion -ne 'unknown' -and $vaultRegion -match '^[a-z0-9]+$' -and $targetRegion) {
+        $regionState = if ($vaultRegion -ceq $targetRegion) { 'Match' } else { 'Mismatch' }
+    }
+    $report.PortalConfigurationGuidanceAllowed = ($regionState -ceq 'Match' -and $vault.ProvisioningState -ceq 'Succeeded')
+    $report.Vault = [ordered]@{ Id = $vault.Id; Name = $vault.Name; Location = $vault.Location; ProvisioningState = $vault.ProvisioningState; TargetRegionValidation = $regionState; ExistenceObserved = $true; VaultCreated = $true; Failure = $null }
+    $report.Handoff = 'ManualActionRequired'
+    Write-Host "VaultCreated observed by HTTP 200: $($vault.Name), $($vault.Location), provisioning=$($vault.ProvisioningState). No vault creation was submitted." -ForegroundColor Cyan
+    if ($association.State -cne 'AzureVerified') { Write-Warning 'ProjectAssociation is Unknown / StudentSelected: confirm this vault binding in your project portal. Selection is not service-verified association.' }
+    $script:LabReplicationStage = 'providers/REST'
+    $providers = Get-LabArmCollection ($chosen + '/replicationRecoveryServicesProviders') '2026-07-01'
+    $projected = @()
+    if ($providers.Complete) {
+        try {
+            foreach ($row in $providers.Items) {
+                $provider = Get-LabProviderProjection $row $chosen $script:LabSubscriptionId
+                if (@($projected | Where-Object { $_.Id -ieq $provider.Id }).Count -gt 0) { throw '[providers/REST] Duplicate provider.' }
+                $projected += $provider
+            }
+        } catch { $providers.Complete = $false; $providers.Reason = 'IdentityOrShapeUnknown'; $projected = @() }
+    }
+    $report.ProviderInventory = [ordered]@{ Complete = $providers.Complete; Reason = $providers.Reason; Failure = $providers.Failure; Items = @($projected); Selected = $null; State = 'Unknown' }
+    $providerId = $null
+    if ($ExplicitProviderId) {
+        $providerId = ConvertTo-LabReplicationArmId $ExplicitProviderId 'providers/explicit-id' 'Microsoft.RecoveryServices/vaults/replicationFabrics/replicationRecoveryServicesProviders' $script:LabSubscriptionId
+        if (-not $providerId.StartsWith(($chosen + '/replicationFabrics/'), [StringComparison]::OrdinalIgnoreCase)) { throw '[providers/REST] Explicit provider is outside the selected vault. No replacement was selected.' }
+    } elseif ($projected.Count -eq 1) { $providerId = $projected[0].Id }
+    elseif ($projected.Count -gt 1) {
+        $entries = @($projected | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Summary = ('connection=' + $_.CurrentConnection + ' | heartbeat=' + $_.LastHeartBeatUtc) } })
+        $providerId = Select-LabVaultInventoryEntry $entries 'Registered provider'
+    }
+    if ($providerId) {
+        $providerRead = Invoke-LabArmGet ((Get-LabArmEndpoint) + $providerId + '?api-version=2026-07-01')
+        if ($providerRead.Success) {
+            $selected = Get-LabProviderProjection $providerRead.Body $chosen $script:LabSubscriptionId
+            if ($selected.Id -ine $providerId) { throw '[providers/REST] Provider GET identity mismatch.' }
+            $report.ProviderInventory.Selected = $selected
+            $report.ProviderInventory.State = if ($selected.Connected) { 'ProviderConnected' } else { 'ProviderConnectionNotVerified' }
+        } else {
+            $report.ProviderInventory.Failure = $providerRead.Failure
+            if ($ExplicitProviderId) { $report.Handoff = 'BlockedSelectedProviderReadUnverified' }
+        }
+    } elseif ($providers.Complete -and $projected.Count -eq 0) { $report.ProviderInventory.State = 'ProviderRegistrationRequired' }
+    $script:LabReplicationStage = 'replication-inventory/REST'
+    $items = Get-LabArmCollection ($chosen + '/replicationProtectedItems') '2026-07-01'
+    $jobs = Get-LabArmCollection ($chosen + '/replicationJobs') '2026-07-01'
+    $report.ReplicationInventory = Get-LabReplicationInventoryProjection $items $chosen $script:LabSubscriptionId $providerId 'Items'
+    $report.JobInventory = Get-LabReplicationInventoryProjection $jobs $chosen $script:LabSubscriptionId $providerId 'Jobs'
+    if ($regionState -cne 'Match') {
+        $report.Handoff = if ($regionState -ceq 'Mismatch') { 'BlockedVaultTargetRegionMismatch' } else { 'VaultTargetRegionUnverified' }
+        Write-Warning 'Vault/actual target VNet region does not match or is unverified. Inventory was retained, but provider registration and replication configuration guidance are suppressed. Inspect the existing project region lock; do not create a replacement vault.'
+    } elseif ($vault.ProvisioningState -cne 'Succeeded') {
+        $report.Handoff = if ($vault.ProvisioningState -ceq 'Failed') { 'BlockedExistingVaultDeployment' } else { 'VaultProvisioningPendingOrUnknown' }
+        Write-Warning 'An existing vault is pending/failed/unknown, not absent. Inspect the existing deployment; do not create another vault.'
+    }
+    if ($report.ProviderInventory.State -ceq 'ProviderConnected') {
+        Write-Host 'ProviderConnected observed for the exact registered provider. Skip Create resources and provider registration; inspect existing selected-source replication. Heartbeat age is reported, not a replication-readiness gate.' -ForegroundColor Green
+    } elseif ($report.ProviderInventory.State -ceq 'ProviderRegistrationRequired' -and $vault.ProvisioningState -ceq 'Succeeded' -and $regionState -ceq 'Match') {
+        Write-Warning 'Complete provider inventory is empty: ProviderRegistrationRequired. In this Azure Migrate project, manually download the provider/project registration key, install on the intended Hyper-V host and finalize registration. Never expose the key in this report.'
+    } else { Write-Warning 'Provider connection/inventory Unknown or not Connected: inspect the existing provider. A failed read does not authorize registering another provider.' }
+    Write-Host "Existing vault replication inventory: itemsComplete=$($report.ReplicationInventory.Complete), observedItems=$($report.ReplicationInventory.ObservedCount); jobsComplete=$($report.JobInventory.Complete), observedJobs=$($report.JobInventory.ObservedCount). Inventory only, not readiness." -ForegroundColor Cyan
+    Write-Warning 'Before any retry inspect and reuse existing replication/jobs for the exact source VM GUID and registered host. Names or a Succeeded job do not prove source mapping or completion. Do not reinitialize, resize or overwrite existing replication.'
+    if ($regionState -ceq 'Match') { Write-Warning 'Only genuinely missing sources may be configured manually after GUID verification and separate operator review.' }
 }
 
 function Save-LabErrorReport {
-    <#
-      Writes the whole failure to a file so it survives a console window that closes on exit.
-      Everything written here goes through the same masking as the screen output.
-    #>
-    param(
-        [Parameter(Mandatory = $true)]$ErrorRecord,
-        [AllowNull()][AllowEmptyString()][string]$ScriptPath
-    )
-    try {
-        $path = Get-LabErrorLogPath -ScriptPath $ScriptPath
-        $invocation = $ErrorRecord.InvocationInfo
-        $report = @(
-            "Time        : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
-            "Script      : $ScriptPath"
-            "PowerShell  : $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
-            "OS          : $([Environment]::OSVersion.VersionString)"
-            ''
-            "Message     : $([string]$ErrorRecord.Exception.Message)"
-            "Type        : $($ErrorRecord.Exception.GetType().FullName)"
-            "Category    : $($ErrorRecord.CategoryInfo.Category)"
-            "FullyQualifiedErrorId : $($ErrorRecord.FullyQualifiedErrorId)"
-            ''
-            "Failed at   : line $($invocation.ScriptLineNumber), column $($invocation.OffsetInLine)"
-            "Statement   : $(([string]$invocation.Line).Trim())"
-            ''
-            'Stack trace :'
-            ([string]$ErrorRecord.ScriptStackTrace)
-            ''
-            'Loaded Az modules :'
-        )
-        $report += @(Get-Module -Name 'Az.*' | ForEach-Object { "  $($_.Name) $($_.Version)" })
-        if (-not (Get-Module -Name 'Az.*')) { $report += '  (none loaded)' }
-
-        Set-Content -Path $path -Value (Protect-LabObject $report) -Encoding UTF8 -ErrorAction Stop
-        Microsoft.PowerShell.Utility\Write-Host ''
-        Microsoft.PowerShell.Utility\Write-Host "A full error report was saved to:" -ForegroundColor Yellow
-        Microsoft.PowerShell.Utility\Write-Host "  $path" -ForegroundColor Yellow
-    } catch {
-        Microsoft.PowerShell.Utility\Write-Host ''
-        Microsoft.PowerShell.Utility\Write-Host "  (the error report could not be saved: $($_.Exception.Message))" -ForegroundColor DarkYellow
-    }
+    param([Parameter(Mandatory = $true)]$ErrorRecord, [AllowNull()][AllowEmptyString()][string]$ScriptPath)
+    $script:LabVaultReport.SafeDiagnostic = @(Format-LabSafeErrorDiagnostic -ErrorRecord $ErrorRecord -Stage $script:LabReplicationStage)
+    Write-LabVaultReport
 }
 
 function Wait-LabBeforeExit {
@@ -699,8 +1092,9 @@ function Get-LabAzContext {
     if (-not $context -or -not $context.Account) {
         Microsoft.PowerShell.Utility\Write-Host ''
         Microsoft.PowerShell.Utility\Write-Host 'This session is not signed in to Azure. Starting sign-in...' -ForegroundColor Cyan
+        $script:LabReplicationStage = 'authentication/Connect-AzAccount'
         try { $null = Connect-AzAccount -ErrorAction Stop }
-        catch { throw "Azure sign-in did not complete: $($_.Exception.Message)" }
+        catch { throw '[authentication/Connect-AzAccount] Azure sign-in did not complete. Raw service details are omitted; review the sign-in flow separately.' }
         $context = Get-AzContext -ErrorAction SilentlyContinue
         if (-not $context -or -not $context.Account) {
             throw 'Azure sign-in did not complete. Run Connect-AzAccount, then rerun this script.'
@@ -750,6 +1144,7 @@ function Get-LabAzContext {
             Write-Host "Subscription  : $script:LabSubscriptionName  $(Format-LabSubscriptionId $script:LabSubscriptionId)" -ForegroundColor Cyan
         }
     }
+    $script:LabReplicationStage = 'environment-preflight'
     return $context
 }
 
@@ -779,10 +1174,9 @@ function Assert-LabResources {
                 $problems += Get-LabNotFoundMessage "Hyper-V host VM '$HyperVHostVMName' in '$SourceResourceGroup'" 'It is created by deploy-lab.ps1.'
             }
             if ($MigrateProjectName) {
-                $project = @(Get-AzResource -ResourceGroupName $SourceResourceGroup -Name $MigrateProjectName -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ResourceType -in @('Microsoft.Migrate/migrateProjects', 'Microsoft.Migrate/assessmentProjects') })
+                $project = @(Get-LabMigrateProjectRead -ResourceGroupName $SourceResourceGroup -Name $MigrateProjectName)
                 if (-not $project.Count) {
-                    $problems += Get-LabNotFoundMessage "Azure Migrate project '$MigrateProjectName' in '$SourceResourceGroup'" 'It is created by migrate-step1-setup-project.ps1 (or in the portal, Module 1 section 1).'
+                    $problems += Get-LabNotFoundMessage "Azure Migrate project '$MigrateProjectName' in '$SourceResourceGroup'" "Create it in the portal (Module 1 section 1), then rerun migrate-step1-setup-project.ps1 with the same environment settings."
                 }
             }
         }
@@ -796,6 +1190,471 @@ function Assert-LabResources {
         throw "$($problems.Count) required resource(s) not found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId). No changes were made."
     }
     Write-Host "Required resources found in subscription $(Format-LabSubscriptionId $script:LabSubscriptionId)." -ForegroundColor Green
+}
+
+function Get-LabField {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { return $Object[$Name] }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -ne $property) { return $property.Value }
+    return $null
+}
+
+function Test-LabField {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
+    if ($Object -is [System.Collections.IDictionary]) { return $Object.Contains($Name) }
+    return $null -ne $Object.PSObject.Properties[$Name]
+}
+
+function Get-LabCapability {
+    param($Sku, [string]$Name)
+    $rows = @(Get-LabField $Sku 'Capabilities' | Where-Object { (Get-LabField $_ 'Name') -eq $Name })
+    if ($rows.Count -ne 1) { return $null }
+    return [string](Get-LabField $rows[0] 'Value')
+}
+
+function Get-LabSizingWorkloads {
+    return @(
+        [pscustomobject]@{ DisplayName = 'OnPrem-Web'; OSType = 'Windows'; MinimumMemoryGB = 4 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-SQL'; OSType = 'Windows'; MinimumMemoryGB = 8 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-Linux-Web'; OSType = 'Linux'; MinimumMemoryGB = 2 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-Linux-App'; OSType = 'Linux'; MinimumMemoryGB = 2 }
+    )
+}
+
+function Get-LabSizingCandidates {
+    param([object[]]$Skus, [object[]]$Usage, [string]$Location)
+    foreach ($sku in $Skus) {
+        $name = [string](Get-LabField $sku 'Name')
+        if ($name -notmatch '^Standard_[BD]2') { continue }
+        $reasons = @(); $memory = 0.0
+        if ($name -notmatch '^Standard_(B2(?:a?l?s|a?ts)_v2|D2(?:a|s|as|d|ds|ad|ads|ls|lds)?_v[45])$') {
+            $reasons += 'Outside current x64 Bsv2/Basv2 or stable Dv4/v5 scope; legacy, ARM, special-purpose and newer guest-readiness-unverified versions excluded.'
+        }
+        if ((Get-LabField $sku 'ResourceType') -ne 'virtualMachines' -or @((Get-LabField $sku 'Locations')) -notcontains $Location) {
+            $reasons += 'Actual VM SKU location metadata does not establish eligibility in the selected region.'
+        }
+        foreach ($capability in @('vCPUs', 'vCPUsAvailable')) {
+            $cores = 0L
+            if (-not [long]::TryParse((Get-LabCapability $sku $capability), [ref]$cores) -or $cores -ne 2) {
+                $reasons += "$capability must explicitly establish exactly two visible AND billable vCPUs; missing/constrained values excluded."
+            }
+        }
+        if ((Get-LabCapability $sku 'CpuArchitectureType') -ne 'x64') { $reasons += 'Explicit x64 architecture capability missing or unsupported.' }
+        if (@((Get-LabCapability $sku 'HyperVGenerations') -split ',' | ForEach-Object { $_.Trim() }) -notcontains 'V2') { $reasons += 'Explicit Generation 2 (V2) capability missing.' }
+        if (-not [double]::TryParse((Get-LabCapability $sku 'MemoryGB'), [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture, [ref]$memory) -or [double]::IsNaN($memory) -or [double]::IsInfinity($memory) -or $memory -lt 2) {
+            $reasons += 'MemoryGB is missing/invalid or below the Linux minimum of 2 GiB.'
+        }
+        if (@((Get-LabCapability $sku 'DiskControllerTypes') -split ',' | ForEach-Object { $_.Trim() }) -notcontains 'SCSI') {
+            $reasons += 'Explicit SCSI support missing; NVMe-only guests require separate driver/readiness validation.'
+        }
+        if ((Get-LabCapability $sku 'PremiumIO') -ne 'True') { $reasons += 'Explicit PremiumIO support required for possible original Premium_LRS disks.' }
+        $family = [string](Get-LabField $sku 'Family')
+        $familyQuota = Get-LabQuotaRow -Usage $Usage -Key $family
+        if ([string]::IsNullOrWhiteSpace($family) -or $null -eq $familyQuota -or $familyQuota.Remaining -lt 2) {
+            $reasons += 'Actual SKU Family quota is unknown or has fewer than two vCPUs remaining.'
+        }
+        if (-not (Test-LabField $sku 'Restrictions')) { $reasons += 'Restriction metadata missing; not proof of subscription eligibility.' }
+        foreach ($restriction in @(Get-LabField $sku 'Restrictions')) {
+            if ($null -eq $restriction) { $reasons += 'Unknown restriction entry.'; continue }
+            $type = [string](Get-LabField $restriction 'Type')
+            $values = @(Get-LabField $restriction 'Values' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $info = Get-LabField $restriction 'RestrictionInfo'
+            $regions = @(Get-LabField $info 'Locations' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            if ($type -notin @('Location', 'Zone')) { $reasons += 'Unknown restriction type; excluded conservatively.'; continue }
+            $scopeKnown = ($regions.Count -gt 0 -or ($type -eq 'Location' -and $values.Count -gt 0))
+            if (-not $scopeKnown) { $reasons += 'Restriction location scope missing/null/blank; relevance unknown, excluded conservatively.' }
+            $relevant = if ($type -eq 'Location') { ($values -contains $Location -or $regions -contains $Location -or ($values.Count -eq 0 -and $regions.Count -eq 0)) }
+                        else { ($regions.Count -eq 0 -or $regions -contains $Location) }
+            if ($relevant) { $reasons += "$type restriction relevant to selected region; no zone chosen, conservatively excluded (not a claim that all regional capacity is restricted)." }
+        }
+        if (@($Skus | Where-Object { (Get-LabField $_ 'Name') -eq $name -and (Get-LabField $_ 'ResourceType') -eq 'virtualMachines' }).Count -ne 1) { $reasons += 'Duplicate SKU metadata is ambiguous.' }
+        [pscustomobject]@{ Name = $name; Family = $family; MemoryGB = $memory; Eligible = ($reasons.Count -eq 0); Reasons = $reasons }
+    }
+}
+
+function Test-LabRetailUri {
+    param([string]$Value)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return ($uri.Scheme -ceq 'https' -and $uri.Host -ieq 'prices.azure.com' -and $uri.Port -eq 443 -and
+        [string]::IsNullOrEmpty($uri.UserInfo) -and [string]::IsNullOrEmpty($uri.Fragment) -and $uri.AbsolutePath -ceq '/api/retail/prices')
+}
+
+function Invoke-LabRetailPage {
+    param([string]$Uri)
+    if (-not (Test-LabRetailUri $Uri)) { throw 'Retail URL is not the approved public HTTPS endpoint.' }
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            # Public endpoint only: no Azure token, subscription, credentials or custom headers.
+            return Invoke-RestMethod -Uri $Uri -Method Get -TimeoutSec 30 -MaximumRedirection 0 -ErrorAction Stop
+        } catch {
+            $response = Get-LabField $_.Exception 'Response'
+            $status = Get-LabField $response 'StatusCode'
+            $code = 0; if ($null -ne $status) { try { $code = [int]$status } catch { $code = 0 } }
+            $timeout = $_.Exception -is [TimeoutException] -or $_.Exception -is [System.Threading.Tasks.TaskCanceledException] -or
+                (($_.Exception -is [System.Net.WebException]) -and $_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout)
+            if ($attempt -eq 0 -and ($timeout -or ($code -ge 500 -and $code -le 599))) { continue }
+            throw 'Public retail price read failed; no complete price ordering is available. Service error bodies omitted.'
+        }
+    }
+}
+
+function Get-LabRetailSnapshot {
+    param([string]$Location)
+    if ($Location -notmatch '^[a-z0-9]+$') { throw 'Retail region must be a validated Azure location name.' }
+    $cache = Get-Variable -Name LabRetailCache -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $cache) { $cache = @{}; $script:LabRetailCache = $cache }
+    if ($cache.ContainsKey($Location)) { return $cache[$Location] }
+    $filter = "serviceName eq 'Virtual Machines' and armRegionName eq '$Location' and priceType eq 'Consumption' and (startswith(armSkuName, 'Standard_B2') or startswith(armSkuName, 'Standard_D2'))"
+    $uri = 'https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&currencyCode=%27USD%27&$filter=' + [Uri]::EscapeDataString($filter)
+    $items = @(); $seen = @{}; $complete = $false; $issues = @()
+    try {
+        for ($page = 0; $page -lt 500; $page++) {
+            if (-not (Test-LabRetailUri $uri) -or $seen.ContainsKey($uri)) { throw 'Invalid or repeated retail continuation.' }
+            $seen[$uri] = $true
+            $payload = Invoke-LabRetailPage -Uri $uri
+            if (-not (Test-LabField $payload 'Items') -or -not (Test-LabField $payload 'NextPageLink')) { throw 'Malformed retail page.' }
+            if ($payload -is [System.Collections.IDictionary]) { $rawRows = $payload['Items'] }
+            else { $rawRows = $payload.PSObject.Properties['Items'].Value }
+            if ($null -eq $rawRows -or $rawRows -is [string] -or -not ($rawRows -is [System.Collections.IEnumerable])) { throw 'Malformed retail Items.' }
+            $items += @($rawRows)
+            if ($items.Count -gt 100000) { throw 'Retail item safety limit reached.' }
+            $next = Get-LabField $payload 'NextPageLink'
+            if ($null -ne $next -and $next -isnot [string]) { throw 'Malformed retail continuation.' }
+            if ([string]::IsNullOrWhiteSpace([string]$next)) { $complete = $true; break }
+            $uri = [string]$next
+        }
+        if (-not $complete) { throw 'Retail page safety limit reached.' }
+    } catch { $issues += 'Retail snapshot incomplete or unavailable; automatic selection blocked. No static price fallback.' }
+    $result = [pscustomobject]@{ Complete = $complete; Items = $items; RetrievedAt = [DateTimeOffset]::UtcNow; Issues = $issues }
+    $cache[$Location] = $result
+    return $result
+}
+
+function Get-LabRetailRate {
+    param([object[]]$Items, [string]$SkuName, [string]$Location, [ValidateSet('Windows', 'Linux')][string]$OSType, [DateTimeOffset]$Now)
+    $validRates = @(); $invalid = $false
+    foreach ($item in $Items) {
+        if ((Get-LabField $item 'armSkuName') -cne $SkuName -or (Get-LabField $item 'armRegionName') -cne $Location -or
+            (Get-LabField $item 'currencyCode') -cne 'USD' -or (Get-LabField $item 'serviceName') -cne 'Virtual Machines' -or
+            (Get-LabField $item 'type') -cne 'Consumption' -or (Get-LabField $item 'unitOfMeasure') -cne '1 Hour' -or
+            (Get-LabField $item 'isPrimaryMeterRegion') -isnot [bool] -or (Get-LabField $item 'isPrimaryMeterRegion') -ne $true) { continue }
+        $product = [string](Get-LabField $item 'productName')
+        if ($product -cnotmatch '^Virtual Machines [A-Za-z0-9 -]+ Series( Windows)?$') { continue }
+        $rowOS = if ($product.EndsWith(' Windows', [StringComparison]::Ordinal)) { 'Windows' } else { 'Linux' }
+        if ($rowOS -cne $OSType) { continue }
+        $meter = [string](Get-LabField $item 'meterName'); $sku = [string](Get-LabField $item 'skuName')
+        if ($meter -match '(?i)spot|low.?priority|dev.?test|reservation|savings.?plan|rhel|red.?hat|suse|sql|ubuntu.?pro|marketplace|software' -or $sku -match '(?i)spot|low.?priority|dev.?test|reservation|savings.?plan|rhel|red.?hat|suse|sql|ubuntu.?pro|marketplace|software') { continue }
+        if ([string]::IsNullOrWhiteSpace($meter) -or [string]::IsNullOrWhiteSpace($sku)) { $invalid = $true; continue }
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-LabField $item 'reservationTerm'))) { continue }
+        $tier = 0.0; $price = 0.0; $amount = [decimal]0; $effective = [DateTimeOffset]::MinValue
+        if (-not [double]::TryParse([string](Get-LabField $item 'tierMinimumUnits'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$tier)) { $invalid = $true; continue }
+        if ($tier -ne 0) { continue }
+        if (-not [DateTimeOffset]::TryParse([string](Get-LabField $item 'effectiveStartDate'), [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$effective)) { $invalid = $true; continue }
+        if ($effective -gt $Now) { continue }
+        $rawPrice = Get-LabField $item 'retailPrice'
+        $priceText = if ($rawPrice -is [IFormattable]) { $rawPrice.ToString($null, [Globalization.CultureInfo]::InvariantCulture) } else { [string]$rawPrice }
+        if (-not [double]::TryParse($priceText, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$price) -or
+            [double]::IsNaN($price) -or [double]::IsInfinity($price) -or $price -le 0 -or
+            -not [decimal]::TryParse($priceText, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$amount) -or $amount -le 0) { $invalid = $true; continue }
+        $validRates += [pscustomobject]@{ Rate = $amount; Effective = $effective }
+    }
+    if ($invalid -or $validRates.Count -eq 0) { return $null }
+    $ordered = @($validRates | Sort-Object Effective -Descending)
+    $latest = @($ordered | Where-Object { $_.Effective -eq $ordered[0].Effective })
+    if ($latest.Count -ne 1) { return $null }
+    return $latest[0]
+}
+
+function Get-LabCostOrderedOptions {
+    param([object[]]$Options)
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($option in $Options) {
+        $index = 0
+        while ($index -lt $ordered.Count -and ($ordered[$index].Rate -lt $option.Rate -or
+            ($ordered[$index].Rate -eq $option.Rate -and [string]::CompareOrdinal($ordered[$index].Name, $option.Name) -le 0))) { $index++ }
+        $ordered.Insert($index, $option)
+    }
+    return $ordered.ToArray()
+}
+
+function Get-LabCostTargetPlan {
+    param([object[]]$Candidates, [object[]]$Usage, $Retail, [string]$Location)
+    $workloads = @(Get-LabSizingWorkloads); $alternatives = @{}; $issues = @(); $unpriced = @()
+    $eligible = @($Candidates | Where-Object { $_.Eligible })
+    if (-not $Retail.Complete) { $issues += 'Price pagination incomplete: no automated recommendation.' }
+    foreach ($workload in $workloads) {
+        $options = @()
+        foreach ($candidate in @($eligible | Where-Object { $_.MemoryGB -ge $workload.MinimumMemoryGB })) {
+            $rate = Get-LabRetailRate -Items $Retail.Items -SkuName $candidate.Name -Location $Location -OSType $workload.OSType -Now $Retail.RetrievedAt
+            if ($null -eq $rate) { $unpriced += "$($workload.DisplayName): $($candidate.Name) ($($workload.OSType)) Unknown price"; continue }
+            $options += [pscustomobject]@{ Name = $candidate.Name; Family = $candidate.Family; Rate = $rate.Rate; PriceTimestamp = $rate.Effective; MemoryGB = $candidate.MemoryGB }
+        }
+        $alternatives[$workload.DisplayName] = @(Get-LabCostOrderedOptions -Options $options)
+        if ($options.Count -eq 0) { $issues += "No fully priced eligible options for $($workload.DisplayName)." }
+    }
+    if ($unpriced.Count -gt 0) { $issues += 'Eligible candidates have unknown/ambiguous prices: a complete cheapest ordering is not established; automatic selection blocked.' }
+    $regional = Get-LabQuotaRow -Usage $Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for four two-vCPU VMs.' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for four VMs.' }
+    $selected = @(); $total = [decimal]0
+    if ($issues.Count -eq 0) {
+        # Equal core demand means only the cheapest SKU per actual family/workload is needed
+        # in the search. Dynamic programming retains the cheapest prefix for each quota state.
+        $states = @{ '' = [pscustomobject]@{ Choices = @(); Used = @{}; Cost = [decimal]0; Tie = '' } }
+        foreach ($workload in $workloads) {
+            $families = @{}; $nextStates = @{}
+            foreach ($option in $alternatives[$workload.DisplayName]) { if (-not $families.ContainsKey($option.Family)) { $families[$option.Family] = $option } }
+            foreach ($state in $states.Values) { foreach ($option in $families.Values) {
+                $used = @{}; foreach ($key in $state.Used.Keys) { $used[$key] = $state.Used[$key] }
+                if (-not $used.ContainsKey($option.Family)) { $used[$option.Family] = 0 }
+                $used[$option.Family] += 2
+                $quota = Get-LabQuotaRow -Usage $Usage -Key $option.Family
+                if ($null -eq $quota -or $used[$option.Family] -gt $quota.Remaining) { continue }
+                $key = (@($used.Keys | Sort-Object | ForEach-Object { $_ + ':' + $used[$_] }) -join '|')
+                $cost = $state.Cost + $option.Rate; $tie = $state.Tie + '|' + $option.Name
+                if (-not $nextStates.ContainsKey($key) -or $cost -lt $nextStates[$key].Cost -or
+                    ($cost -eq $nextStates[$key].Cost -and [string]::CompareOrdinal($tie, $nextStates[$key].Tie) -lt 0)) {
+                    $choice = [pscustomobject]@{ DisplayName = $workload.DisplayName; Name = $option.Name; Family = $option.Family; Rate = $option.Rate; PriceTimestamp = $option.PriceTimestamp }
+                    $nextStates[$key] = [pscustomobject]@{ Choices = @($state.Choices) + $choice; Used = $used; Cost = $cost; Tie = $tie }
+                }
+            } }
+            if ($nextStates.Count -gt 100000) { $issues += 'Cost-plan state safety limit reached; no recommendation.'; break }
+            $states = $nextStates
+        }
+        if ($issues.Count -eq 0 -and $states.Count -gt 0) {
+            $best = $null
+            foreach ($state in $states.Values) { if ($null -eq $best -or $state.Cost -lt $best.Cost -or ($state.Cost -eq $best.Cost -and [string]::CompareOrdinal($state.Tie, $best.Tie) -lt 0)) { $best = $state } }
+            $selected = @($best.Choices); $total = $best.Cost
+        } elseif ($issues.Count -eq 0) { $issues += 'No feasible aggregate family-quota plan for all four workloads; no fixed fallback.' }
+    }
+    return [pscustomobject]@{ Complete = ($issues.Count -eq 0 -and $selected.Count -eq 4); Selected = $selected; Alternatives = $alternatives; Unpriced = $unpriced; Issues = $issues; TotalHourlyUSD = $total; Candidates = $Candidates; RetrievedAt = $Retail.RetrievedAt }
+}
+
+function Show-LabCostTargetPlan {
+    param($Plan, [string]$Location, [string[]]$Names = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App'))
+    Write-Host "READ-ONLY cost recommendation only (never accepted automatically) | region=$Location | priceRetrievedUTC=$($Plan.RetrievedAt.ToUniversalTime().ToString('o'))" -ForegroundColor Cyan
+    Write-Host 'Scope: subscription SKU metadata, current/stable x64 B2/D2, Gen2, two visible/billable vCPUs, SCSI and PremiumIO; four-workload aggregate quota. Not an assessment or capacity reservation.'
+    Write-Host 'Retail USD/hour, Windows and Linux meters separately. Excludes disks/network, tax, SQL/software licenses, commitments and license benefits. Burstable CPU performance needs assessment review.'
+    Write-Warning 'SCSI metadata alone does NOT prove guest drivers/MANA or Azure Migrate Hyper-V provider eligibility. Confirm original disk type, guest readiness and actual offered sizes in the portal. Dv6/v7 excluded pending guest readiness validation.'
+    foreach ($candidate in @($Plan.Candidates | Where-Object { -not $_.Eligible })) { Write-Host "  Excluded $($candidate.Name): $($candidate.Reasons -join '; ')" }
+    foreach ($name in $Names) {
+        Write-Host "  $name -- ordered priced alternatives (not allocation/retry instructions):"
+        foreach ($option in @($Plan.Alternatives[$name])) {
+            Write-Host "    $($option.Name) | family=$($option.Family) | RAM=$($option.MemoryGB) GiB | USD/hr=$($option.Rate.ToString([Globalization.CultureInfo]::InvariantCulture)) | priceTimestamp=$($option.PriceTimestamp.ToUniversalTime().ToString('o'))"
+        }
+        foreach ($unknown in @($Plan.Unpriced | Where-Object { $_.StartsWith($name + ':', [StringComparison]::Ordinal) })) { Write-Warning $unknown }
+        $choice = @($Plan.Selected | Where-Object { $_.DisplayName -ceq $name })
+        if ($Plan.Complete -and $choice.Count -eq 1) { Write-Host "    Current aggregate-quota recommendation: $($choice[0].Name)" -ForegroundColor Green }
+        else { Write-Warning 'No complete cost recommendation; eligible unpriced sizes may still be chosen explicitly.' }
+    }
+    if ($Plan.Complete) { Write-Host "Least-cost complete eligible four-workload plan: USD/hr=$($Plan.TotalHourlyUSD.ToString([Globalization.CultureInfo]::InvariantCulture)); no resources allocated or resized." }
+    foreach ($issue in $Plan.Issues) { Write-Warning $issue }
+}
+
+function Get-LabTargetSizeOptions {
+    param([object[]]$Candidates, [object[]]$Usage, $Retail, [string]$Location, $Workload)
+    $priced = @(); $unknown = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in @($Candidates | Where-Object { $_.Eligible -and $_.MemoryGB -ge $Workload.MinimumMemoryGB })) {
+        $rate = $null
+        if ($Retail.Complete) { $rate = Get-LabRetailRate -Items $Retail.Items -SkuName $candidate.Name -Location $Location -OSType $Workload.OSType -Now $Retail.RetrievedAt }
+        $amount = $null; $timestamp = $null
+        if ($null -ne $rate) { $amount = $rate.Rate; $timestamp = $rate.Effective }
+        $quota = Get-LabQuotaRow -Usage $Usage -Key $candidate.Family
+        $option = [pscustomobject]@{ Name = $candidate.Name; Family = $candidate.Family; MemoryGB = $candidate.MemoryGB; OSType = $Workload.OSType; Rate = $amount; PriceTimestamp = $timestamp; FamilyRemaining = $quota.Remaining }
+        if ($null -ne $rate) { $priced += $option }
+        else {
+            $index = 0
+            while ($index -lt $unknown.Count -and [string]::CompareOrdinal($unknown[$index].Name, $option.Name) -le 0) { $index++ }
+            $unknown.Insert($index, $option)
+        }
+    }
+    return @(@(Get-LabCostOrderedOptions -Options $priced) + $unknown.ToArray())
+}
+
+function Test-LabTargetSizeMapping {
+    param([AllowNull()][hashtable]$Mapping, [hashtable]$Options, [object[]]$Usage)
+    $workloads = @(Get-LabSizingWorkloads); $issues = @(); $selected = @(); $canonical = @{}; $used = @{}; $seen = @{}
+    if ($null -eq $Mapping -or $Mapping.Count -ne 4) { $issues += 'TargetVmSizes requires exactly four workload-name keys.' }
+    if ($null -ne $Mapping) {
+        foreach ($key in $Mapping.Keys) {
+            if ($key -isnot [string] -or @($workloads | Where-Object { $_.DisplayName -ceq $key }).Count -ne 1) { $issues += 'TargetVmSizes contains an unknown or non-exact workload name.'; continue }
+            if ($seen.ContainsKey($key)) { $issues += 'TargetVmSizes contains duplicate case-insensitive workload keys.' }
+            $seen[$key] = $true
+        }
+    }
+    foreach ($workload in $workloads) {
+        $name = $workload.DisplayName
+        $keys = @()
+        if ($null -ne $Mapping) { $keys = @($Mapping.Keys | Where-Object { $_ -is [string] -and $_ -ceq $name }) }
+        if ($keys.Count -ne 1) { $issues += "TargetVmSizes is missing exact key '$name'."; continue }
+        $value = $Mapping[$keys[0]]
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { $issues += "TargetVmSizes '$name' must be one exact SKU string."; continue }
+        $eligibleOptions = @($Options[$name] | Where-Object { $_.Name -ceq $value })
+        if ($eligibleOptions.Count -ne 1) { $issues += "TargetVmSizes '$name' SKU '$value' is unknown, ineligible or below its RAM minimum in current subscription metadata."; continue }
+        $option = $eligibleOptions[0]
+        $canonical[$name] = $option.Name
+        $selected += [pscustomobject]@{ DisplayName = $name; Name = $option.Name; Family = $option.Family; MemoryGB = $option.MemoryGB; OSType = $option.OSType; Rate = $option.Rate; PriceTimestamp = $option.PriceTimestamp }
+        if (-not $used.ContainsKey($option.Family)) { $used[$option.Family] = 0L }
+        $used[$option.Family] += 2
+    }
+    $regional = Get-LabQuotaRow -Usage $Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for the four-choice plan (+8 vCPUs).' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for the four-choice plan (+4 VMs).' }
+    foreach ($family in $used.Keys) {
+        $quota = Get-LabQuotaRow -Usage $Usage -Key $family
+        if ($null -eq $quota -or $used[$family] -gt $quota.Remaining) { $issues += "Combined choices exceed or cannot establish family '$family' remaining quota (need $($used[$family]) vCPUs). Earlier choices were NOT changed." }
+    }
+    return [pscustomobject]@{ SelectionComplete = ($issues.Count -eq 0 -and $selected.Count -eq 4); Selected = $selected; TargetVmSizes = $canonical; Issues = $issues }
+}
+
+function Select-LabTargetVmSizes {
+    param($Snapshot, $Retail, [string]$Location, [AllowNull()][hashtable]$Mapping, [switch]$MappingSupplied)
+    $workloads = @(Get-LabSizingWorkloads); $options = @{}; $issues = @($Snapshot.Issues)
+    $candidates = @(Get-LabSizingCandidates -Skus $Snapshot.Skus -Usage $Snapshot.Usage -Location $Location)
+    foreach ($workload in $workloads) {
+        $options[$workload.DisplayName] = @(Get-LabTargetSizeOptions -Candidates $candidates -Usage $Snapshot.Usage -Retail $Retail -Location $Location -Workload $workload)
+        if ($options[$workload.DisplayName].Count -eq 0) { $issues += "No authorized eligible subscription choices for $($workload.DisplayName); metadata/quota/RAM cannot be bypassed." }
+    }
+    $regional = Get-LabQuotaRow -Usage $Snapshot.Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Snapshot.Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for four two-vCPU VMs.' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for four VMs.' }
+    if ($issues.Count -gt 0) {
+        if ($MappingSupplied) { throw ('[Blocked] TargetVmSizes live validation failed: ' + ($issues -join '; ')) }
+        return [pscustomobject]@{ SelectionComplete = $false; Selected = @(); TargetVmSizes = @{}; Issues = $issues }
+    }
+    if ($MappingSupplied) {
+        $result = Test-LabTargetSizeMapping -Mapping $Mapping -Options $options -Usage $Snapshot.Usage
+        if (-not $result.SelectionComplete) { throw ('[Blocked] Invalid TargetVmSizes: ' + ($result.Issues -join '; ')) }
+        return $result
+    }
+    Write-Host 'Select ALL FOUR workload target sizes explicitly (even for a Step 3 workload pair); aggregate quota is checked for the combined set. Source host is NOT resized.' -ForegroundColor Cyan
+    Write-Host 'Signed-in subscription metadata and remaining quota only; not current physical capacity, a reservation or an assessment. No resources are allocated.'
+    while ($true) {
+        $chosen = @{}
+        foreach ($workload in $workloads) {
+            $name = $workload.DisplayName; $choices = @($options[$name])
+            Write-Host "$name | $($workload.OSType) | minimum RAM=$($workload.MinimumMemoryGB) GiB | exactly 2 vCPUs"
+            if (@($choices | Where-Object { $null -eq $_.Rate }).Count -gt 0) { Write-Warning 'Price unavailable for eligible choices: not a complete cost ranking. Unknown prices follow known prices in stable SKU order; no cheapest claim.' }
+            $unpricedHeading = $false
+            for ($i = 0; $i -lt $choices.Count; $i++) {
+                $option = $choices[$i]; $price = 'Price unavailable'
+                if ($null -ne $option.Rate) { $price = 'USD/hr=' + $option.Rate.ToString([Globalization.CultureInfo]::InvariantCulture) }
+                elseif (-not $unpricedHeading) { Write-Host '  Eligible choices with unavailable prices:'; $unpricedHeading = $true }
+                Write-Host "  [$($i + 1)] $($option.Name) | RAM=$($option.MemoryGB) GiB | OS=$($option.OSType) | $price | family=$($option.Family) remaining=$($option.FamilyRemaining) vCPUs (before this four-choice plan)"
+            }
+            while ($true) {
+                $answer = Read-Host "Number for $name (blank cancels entire selection; no default)"
+                if ([string]::IsNullOrWhiteSpace($answer)) { throw '[Cancelled] Entire VM selection cancelled before resource/provider writes. No earlier choice was accepted.' }
+                $number = 0
+                if ($answer -match '^[0-9]+$' -and [int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $choices.Count) { $chosen[$name] = $choices[$number - 1].Name; break }
+                Write-Warning "Enter a number from 1 to $($choices.Count), or blank to cancel."
+            }
+        }
+        $result = Test-LabTargetSizeMapping -Mapping $chosen -Options $options -Usage $Snapshot.Usage
+        if ($result.SelectionComplete) { return $result }
+        foreach ($issue in $result.Issues) { Write-Warning $issue }
+        while ($true) {
+            $restart = Read-Host '[1] Reselect all four sizes  [2] Stop (blank also stops)'
+            if ($restart -eq '1') { break }
+            if ([string]::IsNullOrWhiteSpace($restart) -or $restart -eq '2') { throw '[Cancelled] Combined plan is infeasible; stopped without changing choices or allocating resources.' }
+            Write-Warning 'Enter 1 to restart selection or 2 to stop.'
+        }
+    }
+}
+
+function Show-LabTargetSizeSelection {
+    param($Selection)
+    if (-not $Selection.SelectionComplete) { Write-Warning 'VM selection incomplete: NETWORK-ONLY setup is not VM allocation approval.'; return }
+    Write-Host 'Explicit four-workload choices validated against current subscription SKU metadata and aggregate quota (not a capacity guarantee):' -ForegroundColor Cyan
+    foreach ($choice in $Selection.Selected) {
+        $price = 'Price unavailable'
+        if ($null -ne $choice.Rate) { $price = 'USD/hr=' + $choice.Rate.ToString([Globalization.CultureInfo]::InvariantCulture) }
+        Write-Host "  $($choice.DisplayName) -> $($choice.Name) | RAM=$($choice.MemoryGB) GiB | OS=$($choice.OSType) | $price"
+    }
+    $entries = @($Selection.Selected | ForEach-Object { "'$($_.DisplayName)' = '$($_.Name)'" })
+    Write-Host ('$targetVmSizes = @{ ' + ($entries -join '; ') + ' }')
+    Write-Host 'Copy this mapping with the same-environment Step 3 command; Step 3 revalidates live eligibility/quota and never silently reprices into a different SKU. No local state file.'
+}
+
+function Get-LabQuotaRow {
+    param([object[]]$Usage, [string]$Key)
+    $rows = @($Usage | Where-Object { (Get-LabField (Get-LabField $_ 'Name') 'Value') -eq $Key })
+    if ($rows.Count -ne 1) { return $null }
+    $current = Get-LabField $rows[0] 'CurrentValue'
+    $limit = Get-LabField $rows[0] 'Limit'
+    $unit = Get-LabField $rows[0] 'Unit'
+    $currentNumber = 0L; $limitNumber = 0L
+    if ($null -eq $current -or $null -eq $limit -or [string]$unit -ne 'Count' -or
+        -not [long]::TryParse([string]$current, [ref]$currentNumber) -or
+        -not [long]::TryParse([string]$limit, [ref]$limitNumber) -or $currentNumber -lt 0 -or $limitNumber -lt 0) { return $null }
+    return [pscustomobject]@{ Current = $currentNumber; Limit = $limitNumber; Remaining = ($limitNumber - $currentNumber) }
+}
+
+function Write-LabQuotaRow {
+    param([string]$Label, $Row, [Nullable[long]]$Additional)
+    if ($null -eq $Row) {
+        Write-Warning "$Label : Unknown (quota row missing, unreadable or unsupported unit; not zero and not proof of headroom)."
+        return
+    }
+    Write-Host "$Label : current=$($Row.Current) limit=$($Row.Limit) remaining=$($Row.Remaining)"
+    if ($null -ne $Additional) {
+        Write-Host "  Hypothetical new allocations: +$Additional; projected=$($Row.Current + $Additional); remaining-after=$($Row.Remaining - $Additional)"
+    }
+}
+
+function Get-LabSkuPlan {
+    param([object[]]$Skus, [string[]]$Sizes, [string]$Location)
+    $families = @{}; $total = 0L; $issues = @(); $known = $true
+    foreach ($size in $Sizes) {
+        $matches = @($Skus | Where-Object { $_.Name -eq $size -and $_.ResourceType -eq 'virtualMachines' -and @($_.Locations) -contains $Location })
+        if ($matches.Count -ne 1) { $known = $false; $issues += "SKU '$size' metadata unavailable in '$Location'; forecast Unknown."; continue }
+        $sku = $matches[0]
+        # Quota uses the SKU vCPUs capability, not constrained vCPUsAvailable.
+        $capabilities = @(Get-LabField $sku 'Capabilities' | Where-Object { (Get-LabField $_ 'Name') -eq 'vCPUs' })
+        $cores = 0L
+        $family = [string](Get-LabField $sku 'Family')
+        if ($capabilities.Count -ne 1 -or -not [long]::TryParse([string](Get-LabField $capabilities[0] 'Value'), [ref]$cores) -or $cores -le 0 -or -not $family) {
+            $known = $false; $issues += "SKU '$size' vCPUs/family metadata missing; forecast Unknown."; continue
+        }
+        $total += $cores
+        if (-not $families.ContainsKey($family)) { $families[$family] = 0L }
+        $families[$family] += $cores
+        foreach ($restriction in @(Get-LabField $sku 'Restrictions')) {
+            if ($null -eq $restriction) { continue }
+            $type = [string](Get-LabField $restriction 'Type')
+            $values = @(Get-LabField $restriction 'Values' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $info = Get-LabField $restriction 'RestrictionInfo'
+            $restrictedLocations = @(Get-LabField $info 'Locations' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $applies = ($values -contains $Location -or $restrictedLocations -contains $Location)
+            if ($type -eq 'Location' -and $values.Count -eq 0 -and $restrictedLocations.Count -eq 0) { $applies = $true }
+            if ($applies -or ($type -eq 'Zone' -and $restrictedLocations.Count -eq 0)) {
+                $issues += "SKU '$size' has a $type restriction in '$Location' (reason: $(Get-LabField $restriction 'ReasonCode')); review region/zone eligibility."
+            }
+        }
+    }
+    return [pscustomobject]@{ Known = $known; Total = $total; Families = $families; Count = $Sizes.Count; Issues = $issues }
+}
+
+function Get-LabRegionQuotaSnapshot {
+    param([string]$Location)
+    $usage = @(); $skus = @(); $issues = @()
+    try {
+        $providers = @(Get-AzResourceProvider -ProviderNamespace 'Microsoft.Compute' -ErrorAction Stop)
+        if (-not @($providers | Where-Object { $_.RegistrationState -eq 'Registered' }).Count) {
+            throw 'Microsoft.Compute is not registered; quota/SKU reads were not performed.'
+        }
+        try { $usage = @(Get-AzVMUsage -Location $Location -ErrorAction Stop) }
+        catch { $issues += "Get-AzVMUsage '$Location': Unknown (read failed; service details omitted)." }
+        try { $skus = @(Get-AzComputeResourceSku -Location $Location -ErrorAction Stop | Where-Object { $_.ResourceType -eq 'virtualMachines' }) }
+        catch { $issues += "Get-AzComputeResourceSku '$Location': Unknown (read failed; service details omitted)." }
+    } catch { $issues += "Read-only Compute preflight '$Location': Unknown (read failed; service details omitted)." }
+    return [pscustomobject]@{ Usage = $usage; Skus = $skus; Issues = $issues }
 }
 
 function ConvertTo-LabRegionKey {
@@ -831,7 +1690,8 @@ function Read-LabTargetRegion {
 function Resolve-LabTargetNetworkLocation {
     param([string]$Value, [Parameter(Mandatory = $true)][string]$ResourceGroupName)
     $name = "$ResourceGroupName-vnet"
-    $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop
+    try { $network = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroupName -Name $name -ErrorAction Stop }
+    catch { throw '[target-network/Get-AzVirtualNetwork] Target network lookup failed; absence was not established. Check access and the selected environment. No changes were made.' }
     if (-not $network -or [string]::IsNullOrWhiteSpace($network.Location)) {
         throw "Target VNet '$name' is missing or its actual region is unknown. Run step 1. No changes were made."
     }
@@ -846,11 +1706,164 @@ function Resolve-LabTargetNetworkLocation {
     return $actual
 }
 
+function Get-LabReplicationField {
+    param([AllowNull()]$InputObject, [string]$Name, [switch]$PreserveCollection)
+    if ($null -eq $InputObject) { return $null }
+    $value = $null
+    if ($InputObject -is [System.Collections.IDictionary]) { $value = $InputObject[$Name] }
+    else {
+        $property = $InputObject.PSObject.Properties[$Name]
+        if ($null -ne $property) { $value = $property.Value }
+    }
+    if ($PreserveCollection) { return ,$value }
+    return $value
+}
+
+function ConvertTo-LabReplicationArmId {
+    param([AllowNull()]$Value, [string]$Stage, [string]$ResourceType, [string]$SubscriptionId)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or $Value -cne $Value.Trim() -or
+        $Value -match '[?#%\\\s]' -or $Value -match '/\.{1,2}(?:/|$)') {
+        throw "[$Stage] Expected one nonempty, unambiguous ARM resource ID string. No changes were made."
+    }
+    $pattern = '^/subscriptions/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/resourceGroups/([^/]+)(?:/providers/([^/]+)/(.+))?$'
+    $match = [regex]::Match($Value, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success -or ($SubscriptionId -and $match.Groups[1].Value -ine $SubscriptionId) -or
+        $match.Groups[2].Value -notmatch '^[\p{L}\p{M}\p{N}_.()-]{1,90}$' -or $match.Groups[2].Value.EndsWith('.')) {
+        throw "[$Stage] ARM resource ID is malformed or outside the selected subscription. No changes were made."
+    }
+    $actualType = 'Microsoft.Resources/resourceGroups'
+    if ($match.Groups[3].Success) {
+        $segments = $match.Groups[4].Value.Split('/')
+        if ($match.Groups[3].Value -notmatch '^[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+$' -or $segments.Count % 2 -ne 0 -or
+            @($segments | Where-Object { $_ -notmatch '^[\p{L}\p{M}\p{N}_.()-]+$' }).Count -gt 0) {
+            throw "[$Stage] ARM resource ID has incomplete resource-type/name pairs. No changes were made."
+        }
+        $types = @($match.Groups[3].Value)
+        for ($i = 0; $i -lt $segments.Count; $i += 2) { $types += $segments[$i] }
+        $actualType = $types -join '/'
+    }
+    if ($ResourceType -and $actualType -ine $ResourceType) {
+        throw "[$Stage] ARM resource ID has the wrong resource type; expected $ResourceType. No changes were made."
+    }
+    return $Value
+}
+
+function Get-LabReplicationObjectId {
+    param([AllowNull()]$InputObject, [string]$Stage, [string]$ResourceType, [string]$SubscriptionId)
+    if ($null -eq $InputObject -or $InputObject -is [string] -or $InputObject -is [array] -or
+        ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [System.Collections.IDictionary])) {
+        throw "[$Stage] Expected exactly one resource object, not an empty result, string or collection. No changes were made."
+    }
+    $ids = @()
+    foreach ($field in @('Id', 'ResourceId')) {
+        $value = Get-LabReplicationField $InputObject $field -PreserveCollection
+        if ($null -eq $value) { continue }
+        $ids += ConvertTo-LabReplicationArmId -Value $value -Stage "$Stage/$field" -ResourceType $ResourceType -SubscriptionId $SubscriptionId
+    }
+    if ($ids.Count -eq 0 -or ($ids.Count -eq 2 -and $ids[0] -ine $ids[1])) {
+        throw "[$Stage] Resource object has no usable identity or conflicting Id/ResourceId fields. No changes were made."
+    }
+    return $ids[0]
+}
+
+function Resolve-LabReplicationWorkload {
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+    $entry = if ($null -ne $Value) { $Value.Trim() } else { '' }
+    switch ($entry) {
+        'All' { return 'All' }
+        'Agentless' { return 'Agentless' }
+        'AgentBased' { return 'AgentBased' }
+        'Agent-based' { return 'AgentBased' }
+        default { throw 'Workload must be All, Agentless or AgentBased (Agent-based is also accepted). No changes were made.' }
+    }
+}
+
+function Get-LabReplicationSelectedMachines {
+    param([object[]]$Inventory, [object[]]$Configurations, [string]$SubscriptionId)
+    if ($Configurations.Count -eq 0) { throw '[source-inventory] No workloads were selected. No changes were made.' }
+    $seenNames = @{}; $seenIds = @{}
+    foreach ($configuration in $Configurations) {
+        $name = Get-LabReplicationField $configuration 'DisplayName' -PreserveCollection
+        if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name) -or $seenNames.ContainsKey($name)) {
+            throw '[source-inventory] Selected workload names are empty or duplicated. No changes were made.'
+        }
+        $seenNames[$name] = $true
+        $matches = @($Inventory | Where-Object {
+            $displayName = Get-LabReplicationField $_ 'DisplayName' -PreserveCollection
+            $displayName -is [string] -and $displayName -ieq $name
+        })
+        if ($matches.Count -ne 1) {
+            throw "[source-inventory] '$name' must resolve to exactly one discovered Hyper-V machine (found $($matches.Count)). No changes were made."
+        }
+        $id = Get-LabReplicationObjectId $matches[0] "source-inventory/$name" 'Microsoft.OffAzure/HyperVSites/machines' $SubscriptionId
+        if ($seenIds.ContainsKey($id)) { throw '[source-inventory] Selected workloads resolve to duplicate source IDs. No changes were made.' }
+        $seenIds[$id] = $true
+        [pscustomobject]@{ VMName = $name; DiscoveredId = $id; Machine = $matches[0]; Configuration = $configuration }
+    }
+}
+
+function Test-LabReplicationCommandContract {
+    param([AllowNull()]$Command, [string[]]$Parameters, [hashtable]$Types = @{})
+    if ($null -eq $Command -or $Command -is [array]) { return $false }
+    $sets = @(Get-LabReplicationField $Command 'ParameterSets')
+    foreach ($set in $sets) {
+        $members = @(Get-LabReplicationField $set 'Parameters')
+        $valid = $true
+        foreach ($name in $Parameters) {
+            $member = @($members | Where-Object { (Get-LabReplicationField $_ 'Name') -ieq $name })
+            if ($member.Count -ne 1) { $valid = $false; break }
+            if ($Types.ContainsKey($name) -and (Get-LabReplicationField $member[0] 'ParameterType') -ne $Types[$name]) { $valid = $false; break }
+        }
+        foreach ($member in $members) {
+            if ((Get-LabReplicationField $member 'IsMandatory') -eq $true -and
+                (Get-LabReplicationField $member 'Name') -notin $Parameters) { $valid = $false }
+        }
+        if ($valid) { return $true }
+    }
+    return $false
+}
+
+function Get-LabReplicationVaultDiagnostic {
+    param([AllowNull()]$Solution, [string]$SubscriptionId)
+    $state = 'FieldUnavailable'; $vaultId = $null
+    if ($null -ne $Solution -and $Solution -isnot [array] -and $Solution -isnot [string]) {
+        $detail = Get-LabReplicationField $Solution 'DetailExtendedDetail' -PreserveCollection
+        $additional = Get-LabReplicationField $detail 'AdditionalProperties' -PreserveCollection
+        $value = Get-LabReplicationField $additional 'vaultId' -PreserveCollection
+        if ($null -ne $value) {
+            $state = 'Invalid'
+            if ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) { $state = 'Empty' }
+            else {
+                try {
+                    $vaultId = ConvertTo-LabReplicationArmId -Value $value -Stage 'solution/vault-reference' -ResourceType 'Microsoft.RecoveryServices/vaults' -SubscriptionId $SubscriptionId
+                    $state = 'PresentAndWellFormed'
+                } catch { $vaultId = $null }
+            }
+        }
+    }
+    return [pscustomobject]@{ State = $state; HasValidReference = ($state -eq 'PresentAndWellFormed'); VaultId = $vaultId }
+}
+
 # endregion Lab helpers
 # $PSCommandPath is the full path of this script; it is captured so the error report can be
 # written beside it. The trap records the failure and holds the window open, because a console
 # launched by double-click closes the moment the script exits.
 $script:LabScriptPath = $PSCommandPath
+$script:LabVaultReport = [ordered]@{
+    SchemaVersion = '1.0'; StartedUtc = [DateTimeOffset]::UtcNow.ToString('o'); FinishedUtc = $null
+    Stage = 'environment-preflight'; Handoff = 'ManualActionRequired'
+    Inputs = [ordered]@{ Subscription = 'Unknown'; SourceResourceGroup = $null; TargetResourceGroup = $null; ProjectId = $null; TargetLocation = $null; Workload = $null }
+    VaultDiscoveryScope = [ordered]@{ Complete = $false; State = 'Unknown' }
+    ProjectAssociation = [ordered]@{ State = 'Unknown'; AssociationSource = 'None'; Reason = 'NotRead' }
+    Vault = [ordered]@{ Id = $null; ExistenceObserved = $false; VaultCreated = $null; Failure = $null }
+    ProviderInventory = [ordered]@{ Complete = $false; State = 'Unknown'; Items = @(); Selected = $null }
+    ReplicationInventory = [ordered]@{ Complete = $false; ObservedCount = $null; Items = @(); SourceIdentityMapping = 'NotVerified' }
+    JobInventory = [ordered]@{ Complete = $false; ObservedCount = $null; Items = @() }
+    SourceInventory = @(); TargetSizing = 'NotEvaluated'; SafeDiagnostic = @()
+    KnownGaps = @('StudentSelected is not service-verified project binding.', 'Source VM GUID/host to protected-item identity mapping is not verified.', 'Connection and heartbeat inventory do not verify replication readiness.', 'Job success does not prove initial replication complete.', 'No supported automatic Hyper-V replication backend is enabled.')
+    PortalConfigurationGuidanceAllowed = $false
+    AzureWritesSubmitted = 0; ReplicationEnabledByScript = $false; CanCutOver = $false; ReplicationReadinessNotVerified = $true
+}
 trap {
     Write-LabTerminatingError $_
     Save-LabErrorReport -ErrorRecord $_ -ScriptPath $script:LabScriptPath
@@ -858,6 +1871,7 @@ trap {
     exit 1
 }
 
+Write-Host 'Subscription-first size selection is read-only; the actual target VNet region is authoritative.' -ForegroundColor Cyan
 $context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Migrate')
 
 Write-Host ""
@@ -865,12 +1879,26 @@ Write-Host "Enter the values for your lab environment. A value in [brackets] is 
 $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Value $SourceResourceGroup -Prompt 'Source resource group (contains the Hyper-V host)' -Example 'rg-ces-source-01' -MissingHelp 'It is created by deploy-lab.ps1.'
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
 $Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
-$MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp 'Run migrate-step1-setup-project.ps1 first, or create the project in the portal (Module 1 section 1).'
+$MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp "Create the project in the portal (Module 1 section 1), then rerun migrate-step1-setup-project.ps1 with the same environment settings."
+if (-not [string]::IsNullOrWhiteSpace($Workload)) { $Workload = Resolve-LabReplicationWorkload $Workload }
 $Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload group (All = four VMs; Agentless = the Module 2 pair; AgentBased = the Module 3 pair)'
 
+# Vault/provider evidence must remain reachable even when a later sizing guard blocks.
+$script:LabVaultReport.Inputs.Subscription = Format-LabSubscriptionId $script:LabSubscriptionId
+$script:LabVaultReport.Inputs.SourceResourceGroup = $SourceResourceGroup
+$script:LabVaultReport.Inputs.TargetResourceGroup = $TargetResourceGroup
+$script:LabVaultReport.Inputs.TargetLocation = $Location
+$script:LabVaultReport.Inputs.Workload = $Workload
+if ([string]::IsNullOrWhiteSpace($VaultResourceGroup)) { $VaultResourceGroup = $SourceResourceGroup }
+$script:LabReplicationStage = 'project/REST'
+$inspectionProject = Get-LabMigrateProjectRead -ResourceGroupName $SourceResourceGroup -Name $MigrateProjectName
+$inspectionProjectId = Get-LabReplicationObjectId $inspectionProject 'project/REST' 'Microsoft.Migrate/migrateProjects' $script:LabSubscriptionId
+$script:LabVaultReport.Inputs.ProjectId = $inspectionProjectId
+Invoke-LabVaultInspection -ProjectId $inspectionProjectId -ScopeResourceGroup $VaultResourceGroup -ExplicitVaultId $VaultResourceId -ExplicitProviderId $RecoveryServicesProviderId
 
-# Confirm this step's resources exist in the signed-in subscription before changing anything.
-Assert-LabResources -SourceResourceGroup $SourceResourceGroup -TargetResourceGroup $TargetResourceGroup -MigrateProjectName $MigrateProjectName
+
+
+# Resource identity reads below fail closed; failed reads never authorize replication.
 
 # ================================================================
 # Helper Functions
@@ -913,26 +1941,24 @@ function Write-NextSteps {
 # ================================================================
 # VM Configuration Mapping
 # ================================================================
-# This mapping defines the target configuration for each VM.
-# In production, these decisions come from the assessment results
-# (Step 2) and architecture review. For this workshop, we pre-define
-# appropriate Azure VM sizes based on each workload's role.
-#
-# Sizing rationale:
-# - OnPrem-Web (IIS):          Standard_B2s  -- light web server, 2 vCPU/4GB
-# - OnPrem-SQL (SQL Server):   Standard_B2ms -- database needs more memory, 2 vCPU/8GB
-# - OnPrem-Linux-Web (Nginx):  Standard_B1ms -- lightweight reverse proxy, 1 vCPU/2GB
-# - OnPrem-Linux-App (Tomcat): Standard_B1ms -- small API server, 1 vCPU/2GB
-#
-# OS disk type: StandardSSD_LRS balances cost and performance.
-# Premium_LRS would be better for production SQL workloads.
+# Target recommendations are guidance only; original disk/licensing/IP fields are not changed.
+$targetSnapshot = Get-LabRegionQuotaSnapshot -Location $Location
+$targetRetail = Get-LabRetailSnapshot -Location $Location
+$targetCandidates = @(Get-LabSizingCandidates -Skus $targetSnapshot.Skus -Usage $targetSnapshot.Usage -Location $Location)
+$targetSizing = Get-LabCostTargetPlan -Candidates $targetCandidates -Usage $targetSnapshot.Usage -Retail $targetRetail -Location $Location
+$script:LabReplicationStage = 'target-sizing/preflight'
+$script:LabVaultReport.TargetSizing = 'BlockedOrUnresolved'
+$targetSelection = Select-LabTargetVmSizes -Snapshot $targetSnapshot -Retail $targetRetail -Location $Location -Mapping $TargetVmSizes -MappingSupplied:($PSBoundParameters.ContainsKey('TargetVmSizes'))
+if (-not $targetSelection.SelectionComplete) { throw ('[Blocked] Target VM selection unresolved: ' + ($targetSelection.Issues -join '; ')) }
+$script:LabVaultReport.TargetSizing = 'SelectionValidatedNotCapacityGuaranteed'
+Show-LabTargetSizeSelection -Selection $targetSelection
 
 $vmConfigurations = @(
     @{
         # IIS web server -- serves the Contoso sample web application
         # Needs moderate CPU for request handling and some memory for IIS worker processes
         DisplayName    = "OnPrem-Web"
-        TargetVMSize   = "Standard_B2s"
+        TargetVMSize   = $null
         OSType         = "Windows"
         DiskType       = "StandardSSD_LRS"
         LicenseType    = "WindowsServer"  # Azure Hybrid Benefit eligible
@@ -943,7 +1969,7 @@ $vmConfigurations = @(
         # Needs more memory for SQL Server buffer pool and query processing
         # In production, consider Azure SQL Database (PaaS) instead of IaaS
         DisplayName    = "OnPrem-SQL"
-        TargetVMSize   = "Standard_B2ms"
+        TargetVMSize   = $null
         OSType         = "Windows"
         DiskType       = "StandardSSD_LRS"
         LicenseType    = "WindowsServer"
@@ -953,7 +1979,7 @@ $vmConfigurations = @(
         # Nginx web server -- serves a static HTML site
         # Very lightweight -- Nginx is extremely memory-efficient
         DisplayName    = "OnPrem-Linux-Web"
-        TargetVMSize   = "Standard_B1ms"
+        TargetVMSize   = $null
         OSType         = "Linux"
         DiskType       = "StandardSSD_LRS"
         LicenseType    = "NoLicenseType"
@@ -963,13 +1989,18 @@ $vmConfigurations = @(
         # Tomcat JSP order desk -- runs a REST API on port 3000
         # Moderate CPU for request handling, small memory footprint
         DisplayName    = "OnPrem-Linux-App"
-        TargetVMSize   = "Standard_B1ms"
+        TargetVMSize   = $null
         OSType         = "Linux"
         DiskType       = "StandardSSD_LRS"
         LicenseType    = "NoLicenseType"
         IPAddress      = "192.168.0.13"
     }
 )
+
+foreach ($configuration in $vmConfigurations) {
+    $choice = @($targetSelection.Selected | Where-Object { $_.DisplayName -ceq $configuration.DisplayName })
+    if ($targetSelection.SelectionComplete -and $choice.Count -eq 1) { $configuration.TargetVMSize = $choice[0].Name }
+}
 
 # ================================================================
 # WORKLOAD GROUP FILTER
@@ -990,547 +2021,157 @@ if ($Workload -ne "All") {
 }
 
 # ================================================================
-Write-Section "Step 3: Enable Replication for Migration"
+Write-Section "Step 3: Hyper-V Replication Preflight (read-only)"
 # ================================================================
 
 Write-Log "Source Resource Group : $SourceResourceGroup"
 Write-Log "Target Resource Group : $TargetResourceGroup"
 Write-Log "Migrate Project       : $MigrateProjectName"
-Write-Log "VMs to replicate      : $($vmConfigurations.Count)"
+Write-Log "Selected VMs          : $($vmConfigurations.Count)"
+Show-LabCostTargetPlan -Plan $targetSizing -Location $Location -Names @($vmConfigurations | ForEach-Object { $_.DisplayName })
+foreach ($vmConfig in $vmConfigurations) { Write-Host "  $($vmConfig.DisplayName) -> $($vmConfig.TargetVMSize)" -ForegroundColor Cyan }
+Write-Warning 'AutoCost is not assessment-derived and cannot establish Hyper-V provider or guest readiness. No allocation, automatic retry, fallback or capacity guarantee.'
 Write-Host ""
 
-# ================================================================
-# PRE-FLIGHT: Verify Prerequisites
-# ================================================================
+function Get-LabReplicationApiDecision {
+    param([AllowNull()]$MigrateCommand, [AllowNull()]$AsrCommand)
+    $blocker = 'Az.Migrate replication command is unavailable.'
+    if ($null -ne $MigrateCommand) {
+        $blocker = 'Installed replication schema is not a verified Azure Migrate Hyper-V-to-Azure contract.'
+        foreach ($set in @(Get-LabReplicationField $MigrateCommand 'ParameterSets')) {
+            foreach ($parameter in @(Get-LabReplicationField $set 'Parameters')) {
+                $type = Get-LabReplicationField $parameter 'ParameterType'
+                if ($null -ne $type -and (Get-LabReplicationField $type 'FullName') -match '(?i)VMware|VMwareCbt') {
+                    $blocker = 'Az.Migrate replication uses VMware/VMwareCbt inputs, not Hyper-V machine identities.'
+                }
+            }
+        }
+    }
+    $asrHyperV = $false
+    foreach ($set in @(Get-LabReplicationField $AsrCommand 'ParameterSets')) {
+        foreach ($parameter in @(Get-LabReplicationField $set 'Parameters')) {
+            if ((Get-LabReplicationField $parameter 'Name') -eq 'HyperVToAzure') { $asrHyperV = $true }
+        }
+    }
+    if ($asrHyperV) {
+        $blocker += ' ASR HyperVToAzure is a DR API; support against this Migrate project vault and exact VM-GUID/host mapping is not verified.'
+    }
+    return [pscustomobject]@{ Path = 'Portal'; CanWrite = $false; AsrHyperVSurface = $asrHyperV; Blocker = $blocker }
+}
 
-Write-StepHeader -Step 0 -Title "Pre-flight: Verify Prerequisites"
+# ================================================================
+# REPLICATION BACKEND PREFLIGHT
+# ================================================================
+# Az.Migrate's published replication commands use VMwareCbt. Azure Migrate's documented
+# Hyper-V path is the portal. ASR HyperVToAzure is DR, not a verified replacement against
+# a Migrate-created vault; never create a separate vault/policy or guess a resource name.
+Write-StepHeader -Step 0 -Title 'Read-only Hyper-V replication capability and identity preflight'
+Write-Host 'Module coverage requested: Module 2, sections 5-7; Module 3, sections 8-9, according to the selected workload.' -ForegroundColor Cyan
+Write-Host 'Step 4 and Step 5 remain separate; use the SAME -Workload value. No test, cleanup, cutover or source shutdown runs here.' -ForegroundColor Yellow
 
-# Check Azure authentication
+$script:LabReplicationStage = 'installed-command-contracts'
+$discoveryCommand = Get-Command -Name Get-AzMigrateDiscoveredServer -ErrorAction SilentlyContinue
+$solutionCommand = Get-Command -Name Get-AzMigrateSolution -ErrorAction SilentlyContinue
+$migrateCommand = Get-Command -Name New-AzMigrateServerReplication -ErrorAction SilentlyContinue
+$asrCommand = Get-Command -Name New-AzRecoveryServicesAsrReplicationProtectedItem -ErrorAction SilentlyContinue
+foreach ($entry in @(
+    @{ Label = 'discovery'; Command = $discoveryCommand },
+    @{ Label = 'Migrate solution read'; Command = $solutionCommand },
+    @{ Label = 'Migrate replication'; Command = $migrateCommand },
+    @{ Label = 'ASR replication'; Command = $asrCommand }
+)) {
+    $module = Get-LabReplicationField $entry.Command 'Module'
+    $moduleName = [string](Get-LabReplicationField $module 'Name')
+    if ([string]::IsNullOrWhiteSpace($moduleName)) { $moduleName = 'module unknown' }
+    $version = if ($null -ne $entry.Command) { [string](Get-LabReplicationField $module 'Version') } else { 'not available' }
+    if ([string]::IsNullOrWhiteSpace($version)) { $version = 'version unknown' }
+    Write-Host "  Installed $($entry.Label) command: $moduleName $version" -ForegroundColor Gray
+}
+$apiDecision = Get-LabReplicationApiDecision -MigrateCommand $migrateCommand -AsrCommand $asrCommand
+Write-Warning "[backend-contract] $($apiDecision.Blocker)"
+
+$diagnosticProblems = @()
+if (-not $targetSelection.SelectionComplete -or $targetSnapshot.Issues.Count -gt 0) { $diagnosticProblems += 'target-sizing/selection-quota-unresolved' }
+$selectedMachines = @()
+$projectId = $null
 try {
-    $context = Get-AzContext
-    if (-not $context) { throw "Not logged in." }
-    Write-Log "Authenticated as: $($context.Account.Id)"
-    $subscriptionId = $context.Subscription.Id
+    $script:LabReplicationStage = 'target-resource-group/Get-AzResourceGroup'
+    $targetRg = Get-AzResourceGroup -Name $TargetResourceGroup -ErrorAction Stop
+    $targetRgId = Get-LabReplicationObjectId $targetRg $script:LabReplicationStage 'Microsoft.Resources/resourceGroups' $script:LabSubscriptionId
+    $script:LabReplicationStage = 'target-network/Get-AzVirtualNetwork'
+    $targetVNetName = "$TargetResourceGroup-vnet"
+    $targetVNet = Get-AzVirtualNetwork -Name $targetVNetName -ResourceGroupName $TargetResourceGroup -ErrorAction Stop
+    $targetVNetId = Get-LabReplicationObjectId $targetVNet $script:LabReplicationStage 'Microsoft.Network/virtualNetworks' $script:LabSubscriptionId
+    if (-not $targetVNetId.StartsWith(($targetRgId + '/providers/'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw '[target-network] Target network is outside the selected target resource group. No changes were made.'
+    }
+    $subnets = @(Get-LabReplicationField $targetVNet 'Subnets' | Where-Object { (Get-LabReplicationField $_ 'Name') -eq 'default' })
+    if ($subnets.Count -ne 1) { throw '[target-subnet] Exactly one default subnet must exist. No changes were made.' }
+    $null = Get-LabReplicationObjectId $subnets[0] 'target-subnet' 'Microsoft.Network/virtualNetworks/subnets' $script:LabSubscriptionId
+    $script:LabReplicationStage = 'project/REST'
+    $project = Get-LabMigrateProjectRead -ResourceGroupName $SourceResourceGroup -Name $MigrateProjectName
+    $projectId = Get-LabReplicationObjectId $project 'project/REST' 'Microsoft.Migrate/migrateProjects' $script:LabSubscriptionId
+    Write-Host '  Target group, network, subnet and project resource identities validated (read-only).' -ForegroundColor Green
 } catch {
-    throw "Azure authentication required. Run Connect-AzAccount first."
+    $diagnosticProblems += $script:LabReplicationStage
+    Write-Warning "[$script:LabReplicationStage] Read-only target/project validation failed (requires one object with valid, consistent Id/ResourceId fields, target ownership and one default subnet); no absence or permission assumption was made. Verify access and inspect the named resource in the portal. No replication write was attempted."
 }
 
-# Verify both resource groups exist
-$sourceRg = Get-AzResourceGroup -Name $SourceResourceGroup -ErrorAction SilentlyContinue
-if (-not $sourceRg) {
-    throw "Source resource group '$SourceResourceGroup' not found."
-}
+Write-Host "  Project association: $($script:LabVaultReport.ProjectAssociation.State) / $($script:LabVaultReport.ProjectAssociation.AssociationSource). Independent vault/provider inventory is recorded in the JSON report." -ForegroundColor Cyan
 
-$targetRg = Get-AzResourceGroup -Name $TargetResourceGroup -ErrorAction SilentlyContinue
-if (-not $targetRg) {
-    throw "Target resource group '$TargetResourceGroup' not found. Run Step 1 first."
-}
-
-# Verify target VNet exists
-$targetVNetName = "$TargetResourceGroup-vnet"
-$targetVNet = Get-AzVirtualNetwork -Name $targetVNetName -ResourceGroupName $TargetResourceGroup -ErrorAction SilentlyContinue
-if (-not $targetVNet) {
-    throw "Target VNet '$targetVNetName' not found. Run Step 1 first."
-}
-$targetSubnet = $targetVNet.Subnets | Where-Object { $_.Name -eq "default" }
-if (-not $targetSubnet) {
-    throw "Default subnet not found in VNet '$targetVNetName'."
-}
-
-Write-Log "Target VNet    : $targetVNetName"
-Write-Log "Target Subnet  : $($targetSubnet.Name) `($($targetSubnet.AddressPrefix)`)"
-
-# Ensure Az.Migrate module is loaded
-$migrateModule = Get-Module -ListAvailable -Name Az.Migrate
-if (-not $migrateModule) {
-    Write-Log "Installing Az.Migrate module..."
-    Install-Module -Name Az.Migrate -Force -AllowClobber -Scope CurrentUser
-}
-Import-Module Az.Migrate -ErrorAction SilentlyContinue
-
-Write-Log "All prerequisites verified."
-
-Read-Host "Press Enter to continue..."
-
-# ================================================================
-# STEP 1: Retrieve Discovered Machines from Azure Migrate
-# ================================================================
-# Before we can configure replication, we need to get the list of
-# discovered machines from Azure Migrate. Each discovered machine
-# has a unique ID that we reference when setting up replication.
-#
-# The discovered machines were found by the Azure Migrate appliance
-# in Step 2. We match them by display name to our VM configurations.
-
-Write-StepHeader -Step 1 -Title "Retrieve Discovered Machines"
-
-$discoveredMachines = @()
-
-try {
-    Write-Log "Querying Azure Migrate for discovered servers..."
-
-    # This lab discovers Hyper-V sources; select that inventory explicitly rather than leaving it unspecified.
-    $discoveredServers = Get-AzMigrateDiscoveredServer `
-        -ProjectName $MigrateProjectName `
-        -ResourceGroupName $SourceResourceGroup `
-        -SourceMachineType 'HyperV' `
-        -ErrorAction Stop
-
-    if (-not $discoveredServers -or @($discoveredServers).Count -eq 0) {
-        throw "No discovered servers found. Complete Step 2 (discovery) first."
-    }
-
-    Write-Log "Found $(@($discoveredServers).Count) discovered server`(s`)."
-    Write-Host ""
-    Write-Host "  Discovered Servers:" -ForegroundColor White
-    Write-Host "  ==================" -ForegroundColor White
-
-    foreach ($server in $discoveredServers) {
-        $osType = if ($server.OperatingSystemDetailOSType) { $server.OperatingSystemDetailOSType } else { "Unknown" }
-        Write-Host "  - $($server.DisplayName) `(OS: $osType, ID: $($server.Id)`)" -ForegroundColor Gray
-        $discoveredMachines += $server
-    }
-
-    # Verify we found all expected VMs
-    $missingVMs = @()
-    foreach ($vmConfig in $vmConfigurations) {
-        $found = $discoveredMachines | Where-Object { $_.DisplayName -eq $vmConfig.DisplayName }
-        if (-not $found) {
-            $missingVMs += $vmConfig.DisplayName
-        }
-    }
-
-    if ($missingVMs.Count -gt 0) {
-        Write-Host ""
-        Write-Host "WARNING: The following expected VMs were not found:" -ForegroundColor Yellow
-        foreach ($missing in $missingVMs) {
-            Write-Host "  - $missing" -ForegroundColor Yellow
-        }
-        Write-Host "Discovery may still be in progress. You can continue with available VMs." -ForegroundColor Yellow
-        Read-Host "Press Enter to continue with available VMs, or Ctrl+C to abort"
-    }
-
-} catch {
-    Write-Host ""
-    Write-Host "ERROR: Could not retrieve discovered machines." -ForegroundColor Red
-    Write-Host "Ensure Step 2 (discovery) is complete and all 4 VMs are discovered." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Check in the Azure portal:" -ForegroundColor Yellow
-    Write-Host "  Azure Migrate > $MigrateProjectName > Discovered servers" -ForegroundColor White
-    throw "Cannot proceed without discovered machines: $_"
-}
-
-Read-Host "Press Enter to continue to Step 2..."
-
-# ================================================================
-# STEP 2: Configure and Start Replication for Each VM
-# ================================================================
-# Replication is the process of copying VM disk data from on-premises
-# to Azure. Azure Migrate uses the Hyper-V replication provider to:
-#
-# 1. Take an initial snapshot of all VM disks
-# 2. Copy the full disk contents to Azure managed disks (initial replication)
-# 3. Track ongoing disk changes using Hyper-V change tracking
-# 4. Periodically sync changed blocks (delta replication)
-#
-# For each VM, we specify:
-# - Target resource group: Where the Azure VM will be created
-# - Target VNet/subnet: Network connectivity for the Azure VM
-# - Target VM size: The Azure VM SKU (determined by assessment)
-# - OS type: Windows or Linux (affects boot configuration)
-# - Disk type: Storage tier for managed disks
-# - License type: Azure Hybrid Benefit (for Windows with SA)
-#
-# IMPORTANT: Replication does NOT stop the source VM. The on-premises
-# VM continues running normally throughout the replication process.
-# This is a key advantage -- zero downtime during replication.
-
-Write-StepHeader -Step 2 -Title "Configure and Start Replication"
-
-$replicationResults = @()
-
-foreach ($vmConfig in $vmConfigurations) {
-    Write-Host ""
-    Write-Host ("─" * 50) -ForegroundColor DarkGray
-    Write-Host "  Configuring replication: $($vmConfig.DisplayName)" -ForegroundColor White
-    Write-Host ("─" * 50) -ForegroundColor DarkGray
-
-    # Find the discovered machine matching this VM
-    $machine = $discoveredMachines | Where-Object { $_.DisplayName -eq $vmConfig.DisplayName }
-
-    if (-not $machine) {
-        Write-Host "  SKIPPED: '$($vmConfig.DisplayName)' not found in discovered machines." -ForegroundColor Yellow
-        $replicationResults += @{
-            VMName = $vmConfig.DisplayName
-            Status = "Skipped"
-            Reason = "Not discovered"
-        }
-        continue
-    }
-
-    Write-Host "  Source VM     : $($vmConfig.DisplayName) `($($vmConfig.IPAddress)`)" -ForegroundColor Gray
-    Write-Host "  Target RG     : $TargetResourceGroup" -ForegroundColor Gray
-    Write-Host "  Target VNet   : $targetVNetName / default" -ForegroundColor Gray
-    Write-Host "  Target Size   : $($vmConfig.TargetVMSize)" -ForegroundColor Gray
-    Write-Host "  OS Type       : $($vmConfig.OSType)" -ForegroundColor Gray
-    Write-Host "  Disk Type     : $($vmConfig.DiskType)" -ForegroundColor Gray
-    Write-Host "  License       : $($vmConfig.LicenseType)" -ForegroundColor Gray
-    Write-Host ""
-
+if (Test-LabReplicationCommandContract -Command $discoveryCommand -Parameters @('ProjectName', 'ResourceGroupName', 'SourceMachineType') -Types @{ ProjectName = [string]; ResourceGroupName = [string]; SourceMachineType = [string] }) {
     try {
-        # Check if replication is already configured for this VM
-        $existingReplication = Get-AzMigrateServerReplication `
-            -ProjectName $MigrateProjectName `
-            -ResourceGroupName $SourceResourceGroup `
-            -MachineName $vmConfig.DisplayName `
-            -ErrorAction SilentlyContinue
-
-        if ($existingReplication) {
-            Write-Log "  Replication already configured for '$($vmConfig.DisplayName)' `(Status: $($existingReplication.MigrationState)`)."
-            $replicationResults += @{
-                VMName = $vmConfig.DisplayName
-                Status = "AlreadyConfigured"
-                Reason = $existingReplication.MigrationState
-            }
-            continue
+        $script:LabReplicationStage = 'source-inventory/Get-AzMigrateDiscoveredServer'
+        $discoveredServers = @(Get-AzMigrateDiscoveredServer -ProjectName $MigrateProjectName -ResourceGroupName $SourceResourceGroup -SourceMachineType 'HyperV' -ErrorAction Stop)
+        $selectedMachines = @(Get-LabReplicationSelectedMachines -Inventory $discoveredServers -Configurations $vmConfigurations -SubscriptionId $script:LabSubscriptionId)
+        $script:LabVaultReport.SourceInventory = @($selectedMachines | ForEach-Object { [pscustomobject]@{ VMName = $_.VMName; DiscoveredId = $_.DiscoveredId; ProtectedItemMapping = 'NotVerified' } })
+        Write-Host "  Selected discovered Hyper-V identities validated: $($selectedMachines.Count)/$($vmConfigurations.Count)." -ForegroundColor Green
+        foreach ($machine in $selectedMachines) {
+            $discoveredNameGuid = [guid]::Empty
+            $isGuidName = [guid]::TryParse($machine.DiscoveredId.Split('/')[-1], [ref]$discoveredNameGuid)
+            Write-Host "    $($machine.VMName): ARM type HyperVSites/machines; discoveredNameIsGuid=$isGuidName; replication state NOT VERIFIED" -ForegroundColor Gray
         }
-
-        # Build the disk configuration for replication
-        # Each disk on the VM needs a target disk type specification
-        # We collect disk IDs from the discovered machine data
-        $diskIds = @()
-        if ($machine.Disk) {
-            foreach ($disk in $machine.Disk) {
-                $diskIds += New-AzMigrateDiskMapping `
-                    -DiskId $disk.Uuid `
-                    -DiskType $vmConfig.DiskType `
-                    -IsOSDisk ($disk.IsOSDisk -eq $true) `
-                    -ErrorAction Stop
-            }
-        }
-
-        # If no disks found from discovery data, create a default OS disk mapping
-        # This handles cases where disk details aren't fully populated yet
-        if ($diskIds.Count -eq 0) {
-            Write-Log "  No disk details from discovery -- using default disk configuration."
-        }
-
-        # Start replication using the Azure Migrate Server Migration tool
-        # This initiates the following sequence:
-        # 1. Azure Migrate creates target managed disks in the target RG
-        # 2. The Hyper-V replication provider begins copying disk data
-        # 3. Initial replication syncs all disk blocks (can take hours for large disks)
-        # 4. After initial sync, delta replication begins (every 5-15 minutes)
-        Write-Log "  Starting replication for '$($vmConfig.DisplayName)'..."
-
-        $replicationParams = @{
-            MachineId              = $machine.Id
-            ProjectName            = $MigrateProjectName
-            ResourceGroupName      = $SourceResourceGroup
-            TargetResourceGroupId  = $targetRg.ResourceId
-            TargetNetworkId        = $targetVNet.Id
-            TargetSubnetName       = "default"
-            TargetVMName           = $vmConfig.DisplayName
-            TargetVMSize           = $vmConfig.TargetVMSize
-            LicenseType            = $vmConfig.LicenseType
-            OSDiskID               = if ($diskIds.Count -gt 0) { ($diskIds | Where-Object { $_.IsOSDisk }).DiskId } else { $null }
-            ErrorAction            = "Stop"
-        }
-
-        # Add disk mappings if available
-        if ($diskIds.Count -gt 0) {
-            $replicationParams["DiskToInclude"] = $diskIds
-        }
-
-        $replication = New-AzMigrateServerReplication @replicationParams
-
-        Write-Log "  Replication initiated for '$($vmConfig.DisplayName)'."
-        Write-Host "  Initial replication state: $($replication.MigrationState)" -ForegroundColor Green
-
-        $replicationResults += @{
-            VMName = $vmConfig.DisplayName
-            Status = "Initiated"
-            Reason = $replication.MigrationState
-        }
-
     } catch {
-        Write-Host "  ERROR: Failed to configure replication for '$($vmConfig.DisplayName)'" -ForegroundColor Red
-        Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  MANUAL ALTERNATIVE:" -ForegroundColor Yellow
-        Write-Host "  1. Go to Azure portal > Azure Migrate > $MigrateProjectName" -ForegroundColor White
-        Write-Host "  2. Under 'Migration tools', click 'Replicate'" -ForegroundColor White
-        Write-Host "  3. Virtualization type: Hyper-V" -ForegroundColor White
-        Write-Host "  4. Select '$($vmConfig.DisplayName)'" -ForegroundColor White
-        Write-Host "  5. Target settings:" -ForegroundColor White
-        Write-Host "     - Resource group: $TargetResourceGroup" -ForegroundColor White
-        Write-Host "     - VNet: $targetVNetName" -ForegroundColor White
-        Write-Host "     - VM size: $($vmConfig.TargetVMSize)" -ForegroundColor White
-        Write-Host ""
-
-        $replicationResults += @{
-            VMName = $vmConfig.DisplayName
-            Status = "Failed"
-            Reason = $_.Exception.Message
-        }
-    }
-}
-
-# Display replication configuration summary
-Write-Host ""
-Write-Host "  Replication Configuration Summary:" -ForegroundColor White
-Write-Host "  ===================================" -ForegroundColor White
-Write-Host ""
-Write-Host "  VM Name              Status              Details" -ForegroundColor Gray
-Write-Host "  -------              ------              -------" -ForegroundColor Gray
-foreach ($result in $replicationResults) {
-    $statusColor = switch ($result.Status) {
-        "Initiated"         { "Green" }
-        "AlreadyConfigured" { "Cyan" }
-        "Skipped"           { "Yellow" }
-        "Failed"            { "Red" }
-        default             { "Gray" }
-    }
-    $vmNamePadded = $result.VMName.PadRight(20)
-    $statusPadded = $result.Status.PadRight(18)
-    Write-Host "  $vmNamePadded  $statusPadded  $($result.Reason)" -ForegroundColor $statusColor
-}
-
-Read-Host "Press Enter to continue to Step 3..."
-
-# ================================================================
-# STEP 3: Monitor Replication Progress
-# ================================================================
-# After initiating replication, the initial full-disk copy begins.
-# This is the most time-consuming part of the migration process.
-#
-# Replication goes through these states:
-# 1. InitialSeedingInProgress -- Full disk copy is running
-# 2. Replicating              -- Initial sync done, delta sync active
-# 3. MigrationInProgress      -- Cutover/migration is executing
-# 4. MigrationSucceeded       -- VM is running in Azure
-#
-# The initial seeding time depends on:
-# - Total disk size across all VMs
-# - Available upload bandwidth from Hyper-V host to Azure
-# - Disk I/O activity on the source VMs
-#
-# For our workshop VMs (~30-50GB each), expect 30-90 minutes for initial sync.
-# We poll every 60 seconds and display progress.
-
-Write-StepHeader -Step 3 -Title "Monitor Replication Progress"
-
-Write-Log "Monitoring replication status for all VMs..."
-Write-Log "Initial replication can take 30-90 minutes."
-Write-Log "You can also monitor progress in the Azure portal:"
-Write-Log "  Azure Migrate > $MigrateProjectName > Replicating machines"
-Write-Host ""
-
-$allReplicating = $false
-$monitorAttempts = 0
-$maxMonitorAttempts = 60  # Monitor for up to 60 minutes
-$pollIntervalSeconds = 60
-
-# Allow the user to choose between active monitoring or manual checking
-Write-Host "Choose monitoring mode:" -ForegroundColor White
-Write-Host "  [1] Active monitoring -- poll every 60 seconds (recommended)" -ForegroundColor Gray
-Write-Host "  [2] Skip monitoring -- check status later in the portal" -ForegroundColor Gray
-$monitorChoice = Read-Host "Enter choice (1 or 2)"
-
-if ($monitorChoice -eq "1") {
-    Write-Host ""
-    Write-Log "Starting active monitoring. Press Ctrl+C to stop monitoring at any time."
-    Write-Host ""
-
-    while (-not $allReplicating -and $monitorAttempts -lt $maxMonitorAttempts) {
-        $monitorAttempts++
-        $currentTime = Get-Date -Format "HH:mm:ss"
-
-        try {
-            # Get current replication status for all VMs
-            $replicatingVMs = Get-AzMigrateServerReplication `
-                -ProjectName $MigrateProjectName `
-                -ResourceGroupName $SourceResourceGroup `
-                -ErrorAction Stop
-
-            if ($replicatingVMs) {
-                Write-Host "  [$currentTime] Replication Status `(attempt $monitorAttempts/$maxMonitorAttempts`):" -ForegroundColor White
-
-                $allHealthy = $true
-                foreach ($repVM in $replicatingVMs) {
-                    $state = $repVM.MigrationState
-                    $health = if ($repVM.Health) { $repVM.Health } else { "Unknown" }
-                    $progress = if ($repVM.ProviderSpecificDetailInitialReplicationProgressPercentage) {
-                        "$($repVM.ProviderSpecificDetailInitialReplicationProgressPercentage)%"
-                    } else { "N/A" }
-
-                    $stateColor = switch ($state) {
-                        "Replicating"               { "Green" }
-                        "InitialSeedingInProgress"  { "Yellow" }
-                        "MigrationSucceeded"        { "Cyan" }
-                        default                     { "Gray" }
-                    }
-
-                    Write-Host "    $($repVM.MachineName.PadRight(22)) State: $($state.PadRight(28)) Progress: $($progress.PadRight(6)) Health: $health" -ForegroundColor $stateColor
-
-                    if ($state -ne "Replicating" -and $state -ne "MigrationSucceeded") {
-                        $allHealthy = $false
-                    }
-                }
-
-                if ($allHealthy) {
-                    $allReplicating = $true
-                    Write-Host ""
-                    Write-Log "All VMs have completed initial replication!"
-                }
-            } else {
-                Write-Host "  [$currentTime] No replicating machines found yet..." -ForegroundColor Yellow
-            }
-
-            if (-not $allReplicating) {
-                Write-Host "  Waiting $pollIntervalSeconds seconds before next check..." -ForegroundColor DarkGray
-                Start-Sleep -Seconds $pollIntervalSeconds
-            }
-
-        } catch {
-            Write-Host "  [$currentTime] Error checking status: $($_.Exception.Message)" -ForegroundColor Yellow
-            Start-Sleep -Seconds $pollIntervalSeconds
-        }
+        $diagnosticProblems += $script:LabReplicationStage
+        Write-Warning "[$script:LabReplicationStage] Selected inventory could not be proven complete, unique and correctly typed. A failed read is NOT an absent or unreplicated VM. Verify the selected machines in this project's portal inventory."
     }
 } else {
-    Write-Log "Skipping active monitoring."
+    $diagnosticProblems += 'source-inventory/installed-command-contract'
+    Write-Warning '[source-inventory/installed-command-contract] Discovery parameters, required arguments or input types do not match the installed cmdlet. No discovery call or replication write was attempted.'
 }
 
-Read-Host "Press Enter to continue to Step 4..."
-
-# ================================================================
-# STEP 4: Display Final Status and Migration Readiness
-# ================================================================
-# Once initial replication completes and VMs are in "Replicating" state,
-# they are ready for migration. At this point you have two options:
-#
-# 1. TEST MIGRATION (recommended first):
-#    - Creates a test VM in Azure from the replicated data
-#    - The source VM keeps running -- no production impact
-#    - You can validate the migrated VM works correctly
-#    - Clean up the test VM when done
-#
-# 2. CUTOVER MIGRATION (final step):
-#    - Performs a final delta sync to capture latest changes
-#    - Shuts down the source VM
-#    - Creates the production VM in Azure
-#    - This is the actual migration -- the source VM is no longer used
-#
-# For production migrations, ALWAYS do a test migration first.
-# Validate all applications, network connectivity, and integrations
-# before performing the final cutover.
-
-Write-StepHeader -Step 4 -Title "Final Status and Migration Readiness"
-
-try {
-    $replicatingVMs = Get-AzMigrateServerReplication `
-        -ProjectName $MigrateProjectName `
-        -ResourceGroupName $SourceResourceGroup `
-        -ErrorAction Stop
-
-    if ($replicatingVMs) {
-        Write-Host ""
-        Write-Host "  Current Replication Status:" -ForegroundColor White
-        Write-Host "  ===========================" -ForegroundColor White
-        Write-Host ""
-
-        $readyForMigration = 0
-        $totalVMs = @($replicatingVMs).Count
-
-        foreach ($repVM in $replicatingVMs) {
-            $state = $repVM.MigrationState
-            $isReady = ($state -eq "Replicating")
-
-            if ($isReady) { $readyForMigration++ }
-
-            $statusIcon = if ($isReady) { "[READY]" } else { "[PENDING]" }
-            $statusColor = if ($isReady) { "Green" } else { "Yellow" }
-
-            Write-Host "  $statusIcon $($repVM.MachineName)" -ForegroundColor $statusColor
-            Write-Host "           State    : $state" -ForegroundColor Gray
-            Write-Host "           Target VM: $($repVM.TargetVMName)" -ForegroundColor Gray
-            Write-Host "           Target RG: $TargetResourceGroup" -ForegroundColor Gray
-            Write-Host ""
-        }
-
-        Write-Host "  Summary: $readyForMigration/$totalVMs VMs ready for migration" -ForegroundColor White
-        Write-Host ""
-
-        if ($readyForMigration -eq $totalVMs) {
-            Write-Host "  ALL VMs are ready for migration!" -ForegroundColor Green
-            Write-Host ""
-            Write-Host "  Estimated monthly costs in Azure (approximate):" -ForegroundColor White
-            Write-Host "  -----------------------------------------------" -ForegroundColor Gray
-            Write-Host "  OnPrem-Web       (Standard_B2s)  : ~`$30/month" -ForegroundColor Gray
-            Write-Host "  OnPrem-SQL       (Standard_B2ms) : ~`$60/month" -ForegroundColor Gray
-            Write-Host "  OnPrem-Linux-Web (Standard_B1ms) : ~`$15/month" -ForegroundColor Gray
-            Write-Host "  OnPrem-Linux-App (Standard_B1ms) : ~`$15/month" -ForegroundColor Gray
-            Write-Host "  -----------------------------------------------" -ForegroundColor Gray
-            Write-Host "  Total (Pay-As-You-Go)            : ~`$120/month" -ForegroundColor White
-            Write-Host "  With Azure Hybrid Benefit (Win)   : ~`$75/month" -ForegroundColor Green
-            Write-Host ""
-        }
-    } else {
-        Write-Host "  No replicating machines found." -ForegroundColor Yellow
-        Write-Host "  Check the Azure portal for replication status." -ForegroundColor Yellow
-    }
-
-} catch {
-    Write-Host "  Could not retrieve final replication status." -ForegroundColor Yellow
-    Write-Host "  Check the Azure portal:" -ForegroundColor Yellow
-    Write-Host "  Azure Migrate > $MigrateProjectName > Replicating machines" -ForegroundColor White
-    Write-Warning "Error: $_"
-}
-
-# ================================================================
-# SUMMARY & NEXT STEPS
-# ================================================================
-
-Write-Section "STEP 3 COMPLETE -- Summary"
-
-Write-Host "  What was accomplished:" -ForegroundColor White
-Write-Host "  [+] Discovered machines retrieved from Azure Migrate" -ForegroundColor Green
-Write-Host "  [+] Replication configured for all VMs:" -ForegroundColor Green
-Write-Host "       - OnPrem-Web       -> Standard_B2s  (Windows + IIS)" -ForegroundColor Cyan
-Write-Host "       - OnPrem-SQL       -> Standard_B2ms (Windows + SQL Server)" -ForegroundColor Cyan
-Write-Host "       - OnPrem-Linux-Web -> Standard_B1ms (Ubuntu + Nginx)" -ForegroundColor Cyan
-Write-Host "       - OnPrem-Linux-App -> Standard_B1ms (Ubuntu + Tomcat 10.1)" -ForegroundColor Cyan
-Write-Host "  [+] Replication initiated -- disk data syncing to Azure" -ForegroundColor Green
-Write-Host "  [+] Replication progress monitored" -ForegroundColor Green
-Write-Host ""
-Write-Host "  Target Landing Zone:" -ForegroundColor White
-Write-Host "  Resource Group : $TargetResourceGroup" -ForegroundColor Cyan
-Write-Host "  VNet           : $targetVNetName `(10.1.0.0/16`)" -ForegroundColor Cyan
-Write-Host "  Subnet         : default (10.1.0.0/24)" -ForegroundColor Cyan
-
+Write-Section 'STEP 3 BLOCKED -- Hyper-V portal action required'
+Write-Host "  Selected workload: $Workload ($($vmConfigurations.Count) VMs)" -ForegroundColor White
+Write-Host '  Explicit target choices (not assessment-derived; full four-workload plan validated):' -ForegroundColor White
+foreach ($vmConfig in $vmConfigurations) { Write-Host "    $($vmConfig.DisplayName) -> $($vmConfig.TargetVMSize); OS=$($vmConfig.OSType); disk=$($vmConfig.DiskType)" -ForegroundColor Cyan }
+Write-Host '  Replication writes submitted: 0. Existing replication was not overwritten or resized.' -ForegroundColor Yellow
+Write-Host '  Replication readiness: NOT VERIFIED. No module replication/monitoring sections are claimed complete.' -ForegroundColor Yellow
+Write-Host '  ResourceName binding failure: the original failing call cannot be proven without its stack; it is not evidence of an assessment or target-SKU fault.' -ForegroundColor Gray
+if ($diagnosticProblems.Count -gt 0) { Write-Host "  Read-only diagnostic blockers: $($diagnosticProblems -join ', ')" -ForegroundColor Yellow }
+if ($script:LabVaultReport.PortalConfigurationGuidanceAllowed) {
 Write-NextSteps @(
-    "OPTION A: Test Migration (recommended)"
-    "  In Azure portal > Azure Migrate > Replicating machines"
-    "  Select a VM > click 'Test migration'"
-    "  Choose the target VNet and validate the VM works correctly"
-    "  Clean up test migration when done"
-    ""
-    "OPTION B: Cutover Migration"
-    "  In Azure portal > Azure Migrate > Replicating machines"
-    "  Select a VM > click 'Migrate'"
-    "  Choose 'Yes' to shut down the source VM before migration"
-    "  Wait for migration to complete"
-    ""
-    "POST-MIGRATION CHECKLIST:"
-    "  [ ] Verify each VM is running in the target resource group"
-    "  [ ] Test application connectivity (IIS, SQL, Nginx, Tomcat)"
-    "  [ ] Assign public IPs if external access is needed"
-    "  [ ] Configure Azure Backup for migrated VMs"
-    "  [ ] Enable Microsoft Defender for Cloud"
-    "  [ ] Set up Azure Monitor alerts"
-    "  [ ] Update DNS records to point to new Azure IPs"
-    "  [ ] Clean up: delete replication and decommission source VMs"
+    "Open Azure portal > Azure Migrate > $MigrateProjectName > Migration / Server Migration > Replicate."
+    'Supported Hyper-V portal procedure: https://learn.microsoft.com/azure/migrate/tutorial-migrate-hyper-v'
+    'Inspect existing replication and jobs first. For only genuinely missing sources, select Hyper-V and the workload VMs listed above after exact source GUID/host verification. Do not create a separate ASR vault.'
+    'Confirm each actual source VM GUID and registered Hyper-V host, not just a matching display name, before selecting it.'
+    'Review Windows licensing eligibility explicitly in the portal wizard; no Azure Hybrid Benefit is applied by this script.'
+    'For genuinely missing replication only: Review + Start replication is a separate explicit manual action. It starts initial replication, not cutover or source shutdown.'
+    "Confirm target resource group '$TargetResourceGroup', region '$Location', VNet '$TargetResourceGroup-vnet', subnet 'default', each requested VM size and actual OS disk in the wizard."
+    'Review Step 1 in the SAME target region and the current ranked alternatives above. Confirm Hyper-V provider, original disk and guest driver readiness in the portal. No SKU fallback or capacity guarantee.'
+    'If a selected VM already replicates, inspect and reuse that exact source VM/host entry; do not overwrite it to match a recommendation.'
+    'Monitor ONLY this selected set in the portal. Submission or an in-progress job is not replication readiness; there is no fixed completion-time or cost promise.'
+    'If a previous attempt may have submitted a job, inspect the project replication jobs and live selected-source state before retrying; a failed lookup does not authorize creation.'
+    "Step 4 and Step 5 remain separate; use the SAME -Workload $Workload. They are NOT run or authorized by this script."
+    'The current Step 4/5 PowerShell methods are VMware-specific; Hyper-V script support is NOT verified. Use the portal Hyper-V test, cleanup and cutover workflow instead.'
+    'For Hyper-V, use the documented portal test migration, test cleanup and migrate actions only after every selected source is healthy and initial replication is complete. Separate script support must be verified before use.'
 )
-
-Write-Log "Step 3 finished at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')."
-Write-Log "Congratulations on completing the Azure Migrate Workshop migration steps!"
+} else {
+    Write-NextSteps @(
+        'Read-only inventory only: inspect this existing project/vault, actual target VNet region and any region lock in the portal. No replacement vault is authorized.'
+        'Configuration guidance is withheld until the existing vault region matches the actual target VNet and provisioning is Succeeded. Provider/replication inventory is not readiness.'
+        'Inspect existing replication/jobs using exact source VM GUID and registered Hyper-V host; do not reinitialize, overwrite or resize existing replication.'
+        "Step 4 and Step 5 remain separate; use the SAME -Workload $Workload. They are NOT run or authorized by this script."
+    )
+}
+$script:LabReplicationStage = 'backend-contract'
+throw '[backend-contract] No verified Azure Migrate Hyper-V PowerShell replication backend is available in this script. Portal replication and selected-set monitoring are required; Step 3 did not complete. No replication writes were attempted.'

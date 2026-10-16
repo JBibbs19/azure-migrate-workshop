@@ -8,7 +8,7 @@
 
 ### Ubuntu 24.04 rebuild — fresh separate lab only
 
-This full 62-file revision is staged as **azure-migrate-workshop-ubuntu2404.zip**,
+This full 60-file revision is staged as **azure-migrate-workshop-ubuntu2404.zip**,
 separate from the earlier Tomcat update. Both Linux guests are Ubuntu **24.04 LTS (Noble)**;
 Linux-App uses the Ubuntu **tomcat10** packages (Tomcat **10.1.x**), explicit **OpenJDK 17**,
 and Jakarta Servlet **6.0** / Pages **3.1** JSP source. Java SE `javax.sql`/`javax.naming`
@@ -149,8 +149,38 @@ credentials, SQL mixed mode/shared restricted login, lab aliases and Nginx desk/
 No manual app install, extra password prompt or traffic command is needed by students.
 SQL-independent health precedes SQL setup; final success requires actual SQL readiness/data,
 named UI and proxy readiness. Discovery credentials still need appliance-side validation.
-The `AgentBased` wrapper/filter remains a Module 3 grouping/instructor agentless shortcut,
-not proof of a Mobility Service migration path or a waiver of guest discovery permissions.
+The `AgentBased` filter remains the historical Module 3 workload-group name, not proof
+of a Mobility Service migration path or a waiver of guest discovery permissions. All four
+VMs use the Hyper-V host provider. Step 3 checks prerequisites and supplies **partial portal
+guidance only** for `-Workload All|Agentless|AgentBased`; it does not enable or monitor
+Hyper-V replication or complete the module. `ManualActionRequired`/`Blocked` is not
+completion. Perform provider registration, replication wizard actions and monitoring in the
+portal, then separately test/clean up and authorize cutover there. Steps 4/5 are also
+retained as guarded prerequisite/group checks and manual portal guidance only; their guards
+prevent the unverified VMwareCbt calls from executing in this implemented Hyper-V path.
+None of Steps 3–5 automatically completes these stages or reports a fake completed state.
+No ASR disaster-recovery write path is substituted.
+
+Existing vault provisioning (`Succeeded`), provider `CurrentConnection = Connected` and healthy
+VM replication are separate checks. Step 3 uses explicit-version REST GETs in the current Az
+subscription, not the local `Get-AzResource` API-version cache; an empty legacy project
+`vaultId` does not prove absence. Selecting an existing vault without a trustworthy service
+link records association source `StudentSelected` with state `Unknown`, not `AzureVerified`;
+name matching is not proof. Optional existing-vault/provider selectors and `-ReportPath` are
+listed by `Get-Help .\scripts\migrate-step3-replicate.ps1 -Full`; reruns only reread status,
+never create resources or restart replication.
+
+Target sizing uses explicit numbered selection of live subscription-eligible B2/D2
+candidates in Steps 1 and 3, known prices ascending and unpriced choices separately marked
+**Price unavailable**. Optional `-TargetVmSizes` supplies the exact four-name SKU map
+instead of size prompts, not instead of live eligibility, RAM or combined quota checks.
+The source `Standard_E8s_v7` host is unchanged. Each target has 2 billable vCPUs; minimum RAM
+is 4 GiB for Web, 8 GiB for SQL and 2 GiB for each Linux VM. The plan is not persisted or
+assessment-derived. Apply your chosen sizes manually in the portal wizard; Step 1 plans
+quota and landing-zone preparation only, and Step 3 remains read-only manual guidance,
+not an automated replication write or an existing-replication resize. No profile flag,
+allocation guarantee or direct-VM fallback retry is provided. See the
+[README directions](README.md#student-portal-path-and-instructor-helpers).
 
 The checkout contains all app source, WAR/runtime binary assets and rebuild/tests under
 [apps/contoso-orderdesk](apps/contoso-orderdesk/README.md). A new checkout has no workspace
@@ -177,8 +207,8 @@ Packaging automatically requires parser/regression success, verifies the existin
 .NET, does not rebuild app assets, and requires an existing destination folder **outside the
 checkout**. Use `-OverwritePackage` explicitly to replace that chosen ZIP; no implicit
 packaging/writes occur by default. `-UpdateChecksums` refreshes only the manifest after checks.
-The **169 defined check groups** include the 11 Classic-completion regressions alongside
-retained AST/helper, communication, assessment/context, backend/provider, Modern, discovery,
+The **176 defined check groups** include seven target-profile source/AST/helper cases,
+the 11 Classic-completion regressions and retained communication, assessment/context, backend/provider, Modern, discovery,
 Step 6/controller and lexical contracts. These are not live Azure/traffic tests. The native
 checker, its PowerShell fixtures and native packager were **not executed in this environment**. Optional older maintainer checks remain
 `python3 -B tests/integration_checks.py` and
@@ -220,7 +250,8 @@ or compressed-WAR/custom-CATALINA_BASE discovery issue; that remains unproven.
 These checks prove host-observed KVP transport and available OS metadata, **not** direct
 post-reboot `systemctl` status, appliance-side OS classification or fresh software/web
 inventory. Appliance credentials, SSH permissions and discovery remain separate checks.
-This completion-field correction adds no delivered files: the complete package contains **62 files**.
+This completion-field correction adds no delivered files; the current checkout contains
+**60 files** after removal of the two sequencing wrappers.
 
 ### Workload power and optional traffic handoff
 
@@ -266,6 +297,10 @@ $projectName = 'ces-migrate-01'
     -TargetResourceGroup $targetRg -Location $migrationTargetRegion -MigrateProjectName $projectName
 .\scripts\migrate-step2-discover-assess.ps1 -SourceResourceGroup $sourceRg `
     -TargetResourceGroup $targetRg -Location $migrationTargetRegion -MigrateProjectName $projectName
+# Only after Step 2 completes; prerequisite checks/manual portal guidance only.
+.\scripts\migrate-step3-replicate.ps1 -SourceResourceGroup $sourceRg `
+    -TargetResourceGroup $targetRg -Location $migrationTargetRegion -MigrateProjectName $projectName `
+    -Workload All
 ```
 
 Step 1 needs `Az.Compute` as well as Accounts/Resources/Network. Its **read-only subscription
@@ -276,18 +311,46 @@ and family vCPU quota must fit. Allocated and deallocated VMs count; deallocatio
 quota-release strategy. The nested four workloads and `MigrateAppl` are not separate Azure
 VMs: only their Azure Hyper-V host consumes source Azure VM quota, already included in usage.
 
-Planning defaults mirror step 3: B2s + B2ms + B1ms + B1ms, normally **6 vCPUs** for one full
-new target **or** test set (four Azure VMs), derived from live SKU `vCPUs`/family metadata.
-**12 vCPUs**/eight new VMs is only the hypothetical full-target-plus-full-test overlap in the
-same target region. Step 4 normally cleans tests before step 5, and replication disks do not
-reserve VM cores. Forecasts are not actual usage or reservations: existing target VMs are
-already reported, so do not add them again. Rerun with `-ForecastVmSizes` listing actual
-planned sizes (repeat a size for each VM) if choices/counts change. This does not change step 3
-or portal migration sizing.
+Steps 1 and 3 filter current subscription-eligible regional B2/D2 candidates before
+showing a numbered menu for each of the four roles. Known OS-specific USD/hour pay-as-you-go
+compute prices from the official Azure Retail Prices API sort ascending with deterministic
+ties; unpriced candidates appear separately as **Price unavailable**, with incomplete cost
+ranking. Rows show SKU, RAM, actual family, regional/family quota headroom and exact
+Windows/Linux USD/hour prices when available. Direct `Get-AzComputeResourceSku` metadata and
+`Get-AzVMUsage` reads must confirm eligibility and quota. Each size requires exactly 2 billable
+vCPUs, x64, Generation 2, SCSI and PremiumIO, plus minimum RAM of 4 GiB for Web, 8 GiB
+for SQL and 2 GiB for each Linux VM. Candidates are current B-series v2 or supported D-series v4/v5,
+subject to controller compatibility; ARM, 1-GiB, NVMe-only and retired sizes are
+excluded. Guest drivers and migration-provider eligibility still require portal review.
+One complete target **or** test set totals **8 vCPUs**; hypothetical full-target-plus-full-test
+overlap totals **16 vCPUs** for eight new Azure VMs. The plan must fit aggregate quota for
+all four workloads in each actual SKU family as well as the regional limit; metadata supplies
+the vCPU totals and family keys, not a hard-coded family or one-workload quota check.
 
-Missing rows/SKU metadata, unregistered Compute or denied/failed reads show **Unknown**, never
-zero or assumed free capacity. Insufficiency, Unknown or applicable SKU restrictions in the
-target planning baseline trigger `[1] Choose another target region` (recommended),
+Step 1's selection is planning only: it is not persisted, does not reserve cores or create
+target VMs. Enter never accepts a cheapest/default size; blank input cancels before writes.
+Both helpers accept optional `-TargetVmSizes`, a hashtable with exactly `OnPrem-Web`,
+`OnPrem-SQL`, `OnPrem-Linux-Web` and `OnPrem-Linux-App` mapped to actual chosen SKUs.
+Omitting it opens all four numbered selections; supplying it bypasses only size prompts,
+not live eligibility, RAM or combined quota checks. Step 1 prints the reusable
+`$targetVmSizes` map and `migrate-step3-replicate.ps1 -Workload All -TargetVmSizes $targetVmSizes`
+handoff. Step 3 revalidates the full map against the current subscription and actual target
+VNet region, never silently changing a prior choice. Its `-Workload` pair filters portal
+workflow only; the planned map still protects all-four aggregate quota. No named target
+profile is required. Step 3 remains read-only and returns `ManualActionRequired` or `Blocked`;
+apply chosen sizes manually in the portal replication wizard. Existing replication is not
+resized and no direct VM-size fallback retry writes occur. Normally clean up portal test
+copies before authorized portal cutover; replication disks do not reserve VM cores.
+Existing target VMs are already in reported usage; do not add them again. Explicit
+`-ForecastVmSizes` remains a separate nonbinding quota-only custom list, not an override
+of selected sizes or a sizing change to Step 3 or the portal.
+
+Missing public prices alone allow an explicit choice only with verified eligibility, RAM
+and combined quota; label **Price unavailable**, report incomplete cost ranking and make no
+cheapest claim. No third-party price fallback or static rates are used. Missing rows/SKU
+metadata, unregistered Compute or denied/failed quota reads remain **Unknown** or **Blocked**,
+not approved, never zero or assumed free capacity. Insufficiency, Unknown or applicable SKU
+restrictions in the target planning baseline trigger `[1] Choose another target region` (recommended),
 `[2] Continue NETWORK-ONLY despite warnings`,
 or `[3] Cancel`. With supplied `-Location`, warnings stop before writes unless explicitly
 acknowledged by `-AllowQuotaWarning`; that switch permits only step 1 networking and is **not**
@@ -303,7 +366,8 @@ portal. It neither creates nor remaps the Azure Migrate project or its data geog
 Step 2's assessment uses the chosen target, not source metadata; without optional
 `-TargetResourceGroup` it explicitly asks for the assessment target region. Steps 3–6 derive
 location from the actual target VNet and reject an explicitly conflicting `-Location` before
-writes; step 4 also checks an existing test VNet. The 3a/3b wrappers pass location through.
+writes; step 4 also checks an existing test VNet. Keep the same verified region across
+replication, test migration and cutover.
 See [VM quotas](https://learn.microsoft.com/en-us/azure/virtual-machines/quotas).
 
 ### A note from the author
@@ -338,6 +402,142 @@ overrides to mask subscription IDs, and a leftover one used to make `deploy-lab.
 ## Log of Changes
 
 <strong style="color: red;">Not to be included in final distribution.</strong>
+
+### Existing vault and provider checks; manual Hyper-V handoff retained (2026-10-15)
+
+Step 3 now reads existing vault provisioning and provider `CurrentConnection` through typed,
+explicit-version REST GETs in the current Az subscription, avoiding the local
+`GetAzResourceApiVersionCache` lookup issue. An empty legacy `Servers-Migration-ServerMigration`
+`vaultId` is not `NoVault`; vault provisioning `Succeeded`, provider `Connected` and healthy
+replication remain separate observations.
+
+Without a trustworthy project-service vault reference, the student may select an existing
+candidate in the `-SourceResourceGroup` scope by default or optional `-VaultResourceGroup`;
+`-VaultResourceId` and `-RecoveryServicesProviderId` identify existing resources explicitly.
+Association source `StudentSelected` leaves project-association state `Unknown`; only service
+evidence supports `AzureVerified`, never a similar name. Inventory existing jobs/replication
+before manual actions to avoid duplicate writes. First-time portal Create resources requires
+actual need and complete inspected-scope inventory, not a global absence claim or
+authorization; review the migration-region lock first and register the host provider only
+when needed.
+
+Reruns only reread status: no resource creation/recreation, replication restart or migration
+writes. Runtime JSON uses a unique default path or optional `-ReportPath` and allowlisted
+inventory/status fields, not raw API bodies/errors or readiness/completion claims; starting a
+job does not prove replication health. Native PowerShell and live end-to-end validation were not run for this
+update. Observed vault and provider GETs verified one environment only, not general
+acceptance.
+
+### Numbered VM-size menu and direct subscription choice (2026-10-15)
+
+Steps 1 and 3 now require an explicit choice from numbered, live subscription-filtered
+B2/D2 candidates for all four roles, rather than automatically choosing the cheapest.
+Known official OS-specific USD/hour PAYG prices sort ascending with deterministic ties;
+unpriced choices are separate **Price unavailable** entries with incomplete cost ranking.
+Missing public prices alone do not block a choice with verified eligibility, RAM and
+combined regional/family quota; unknown eligibility or quota is never approval. No static
+rates, third-party price fallback or allocation/capacity guarantee is introduced.
+
+Optional `-TargetVmSizes` maps exactly `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web` and
+`OnPrem-Linux-App` to chosen SKUs on both helpers; it skips size prompts, not validation.
+Blank menu input cancels before writes. Step 1 prints `$targetVmSizes` and the Step 3
+`-Workload All -TargetVmSizes $targetVmSizes` handoff without a state file or new helper.
+Step 3 revalidates the full plan in the actual target VNet region and current subscription;
+workload-pair filters affect portal workflow, not combined application quota. No previous
+choice is silently changed, existing replication is not resized and the source host is
+unchanged. `-ForecastVmSizes` remains a separate nonbinding quota forecast. Student changes
+are limited to choosing and recording eligible portal sizes; Module 0 formatting remains
+unchanged. The preceding active directions supersede the earlier price-availability barrier;
+prior dated entries below are retained unchanged.
+
+### Cost-ordered regional B2/D2 target sizing (2026-10-15)
+
+Replaced fixed target defaults and the named all-four fallback with live OS-specific
+USD/hour PAYG cost ordering of subscription-eligible regional B2/D2 candidates. All four
+targets require 2 vCPUs; minimum RAM is 4 GiB for Web, 8 GiB for SQL and 2 GiB per Linux VM.
+Actual SKU metadata and aggregate family/regional quota constrain the plan; missing prices,
+metadata or quota do not establish a cheapest eligible size. Portal guest/controller and
+migration-provider review remains required, with no capacity guarantee.
+
+Step 1 plans quota and landing-zone preparation only; Step 3 remains read-only manual
+portal guidance with `ManualActionRequired`/`Blocked`, not replication, allocation or resize.
+Removed the active target-profile flag/examples; earlier dated profile and 6/12-vCPU entries
+below remain historical and are superseded by this entry. The source host, guarded Steps 4/5
+and 60-file checkout are unchanged. Student edits are limited to sizing actions; no Module 0
+formatting revision or outside verification is included.
+
+### Module 0 learner edits and separate replication/test/cutover workflow (2026-10-14)
+
+Merged all three edits from the user-edited OneDrive Ubuntu Module 0: removed the opening
+revision/runtime/KVP development notes, added the East US → West US 2 regional example,
+and allowed a qualified replacement source host. East US is an example, not a deployment
+default; the instructor selects the source region, and the target remains subject to access,
+policy, SKU restrictions, quota and capacity. Alternative hosts need at least 8 enabled
+vCPUs, 64 GiB RAM, documented nested virtualization and compatible x64 Generation 2/Premium
+SSD support; Esv7 additionally requires an NVMe-capable image. D2asV5 is not a source-host
+replacement. Applied equivalent regional/host guidance to the Tomcat 9 branch; its learner
+introduction was already clean. Each branch retains its own OS, Tomcat and Java versions;
+Ubuntu fresh-build, runtime and KVP safeguards remain in the current notes and module checks.
+
+Retired Step 3a/3b wrapper commands and options from the live README, current notes and
+module guidance. Step 3 now supplies prerequisite checks, selected-workload/target-profile
+probes and **partial guided portal handoff only**, not automatic Hyper-V replication
+creation or monitoring. `ManualActionRequired`/`Blocked` must not report Step 3 complete.
+`Agentless` selects Web/Linux-Web and guides Module 2 §5–§7; `AgentBased` selects
+SQL/Linux-App and guides Module 3 §8–§9; `All` selects both groups for that same limited
+purpose. Provider registration, Replicate wizard actions and replication monitoring remain
+manual in the portal. Test migration/cleanup is a separate portal stage at Module 2 §8 /
+Module 3 §10; authorized cutover, including source shutdown, is another at Module 2 §9 /
+Module 3 §11. Steps 4/5 remain as prerequisite/group checks and manual portal handoff
+only, with dominating guards preventing the unverified VMwareCbt test/migration calls from
+executing in this Hyper-V path. These guards add no automated testing, cleanup, migration or
+source shutdown and report ManualActionRequired/Blocked rather than fake completion. All
+four VMs retain the host-provider architecture; AgentBased is only a historical group name.
+
+The reviewed published Az.Migrate 2.10.0 New/Get server-replication surface uses the
+VMwareCbt object model; that New implementation explicitly rejects Hyper-V sources.
+Its use here was a contract mismatch. The current 3.x process body was not fully retrieved;
+this is the verified contract boundary of our implemented path, not a claim that all
+Hyper-V automation is universally unsupported. No native write contract is verified here. The Get
+precheck's unguarded `vaultId` → `ResourceName` binding is a **likely** mechanism for the
+reported empty-string error, not a confirmed missing property or root cause without the
+actual stack. Record stage, module version and nonempty resource identities diagnostically;
+do not claim a native automatic fix. The [Hyper-V migration tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-hyper-v),
+updated 2026-10-10, documents the portal route. An ASR disaster-recovery enable path against
+a Migrate-created vault is not verified and is not substituted for this migration workflow.
+
+Retained default BSeries and explicit D2asV5 profiles, with `-TargetVmProfile` only on Step 1
+planning and Step 3 prerequisite/wizard guidance, never Steps 4/5. Select reviewed sizes
+manually in the portal; there is no automated replication write, existing-replication resize
+or allocation guarantee. This supersedes wrapper-forwarding/automatic-replication directions
+in the earlier D2as v5 entry below without rewriting it or other historical dated/numbered
+bodies; their wrapper mentions are historical, not active options. The Classic safeguards
+and three-primary-section Version Notes layout are unchanged. No native PowerShell or full
+live Azure/Hyper-V replication, test or cutover acceptance is claimed by this documentation.
+
+### Explicit D2as v5 target profile; B-series default retained (2026-10-14)
+
+Added explicit `-TargetVmProfile BSeries|D2asV5` to Steps 1, 3, 3a and 3b on both
+OS/Tomcat branches. BSeries retains B2s/B2ms/B1ms/B1ms; D2asV5 requests
+`Standard_D2as_v5` for the same four workloads, not an extra VM or a source-host change.
+Step 1 forecasts the selected plan using actual regional SKU vCPU/family metadata and
+reports the full target/test overlap. The choice is not saved, a reservation or target-VM
+creation; repeat it explicitly for new replication in Step 3. Existing replication is not
+resized. Wrappers forward the profile only to Step 3; their Step 4/5 behavior, including
+cutover/source shutdown, is retained. No silent fallback, capacity promise or automatic
+assessment sizing is introduced.
+
+Executable edits are confined to those four existing scripts. The fifth code file is the
+existing checker, with seven new target-profile AST/source/helper cases per branch and all
+prior registrations retained. No new helper/test file or Python test-source edit is added.
+README/current notes document the option; release report, rename-aware manifest current
+hashes and root checksums are refreshed while original/historical provenance is preserved.
+Deployment/configure-host, source Standard_E8s_v7, Step 2, Steps 4–6, modules, traffic,
+application assets/runtime and nested app CHANGES remain unchanged. The package still has
+62 files. Full retained offline test results and frozen-code hashes are recorded in the
+release report; native PowerShell/AST/fixtures and live Azure/Hyper-V allocation or complete
+replication compatibility are not validated here. No runtime is installed or Azure action
+performed for this release.
 
 ### Documentation-only README and Version Notes reorganization (2026-10-13)
 
@@ -945,16 +1145,14 @@ The scripts and the modules are run separately, so this is the map between them.
 in `README.md`, and each script carries its own copy in a `MODULE COVERAGE` block that
 `Get-Help <script> -Full` will show.
 
-| Script | Completes |
+| Script | Coverage and execution boundary |
 |---|---|
 | `deploy-lab.ps1` | Module 0 §4 in full; Module 1 §2 in full; Module 1 §3.3 download and extract, **only when you opt in** |
 | `migrate-step1-setup-project.ps1` | **Optional.** Module 2 §4.1 (target landing zone) as an instructor shortcut. Module 1 §1 is **not** automated — it prints the portal steps |
 | `migrate-step2-discover-assess.ps1` | Module 1 §3.2–3.5, §4 and §5. §3.1 (project key) stops for you |
-| `migrate-step3-replicate.ps1` | Module 2 §5–§7, or Module 3 §8–§9, per `-Workload` |
-| `migrate-step3a-agentless.ps1` | Module 2 §5–§9 in one run |
-| `migrate-step3b-agent-based.ps1` | Module 3 §8–§11 end state — **not** §5–§7 (Mobility Service) |
-| `migrate-step4-test-migrate.ps1` | Module 2 §8, or Module 3 §10, per `-Workload` |
-| `migrate-step5-cutover.ps1` | Module 2 §9, or Module 3 §11, per `-Workload` |
+| `migrate-step3-replicate.ps1` | **Prerequisite checks and partial portal guidance only, not module completion or automated replication/monitoring.** `Agentless`: Module 2 §5–§7 (Web/Linux-Web); `AgentBased`: Module 3 §8–§9 (SQL/Linux-App); `All`: both groups. Complete wizard actions and monitoring manually in the portal |
+| `migrate-step4-test-migrate.ps1` | **Guarded prerequisite/group checks and manual portal guidance only.** Complete separate portal test migration/cleanup at Module 2 §8 / Module 3 §10; the unverified VMwareCbt test call cannot execute in this Hyper-V path. No automated completed-state claim |
+| `migrate-step5-cutover.ps1` | **Guarded prerequisite/group checks and manual portal guidance only.** Complete separately authorized portal cutover, including source shutdown, at Module 2 §9 / Module 3 §11; the unverified VMwareCbt migration call cannot execute in this Hyper-V path. No automated completed-state claim |
 | `migrate-step6-post-migration.ps1` | Module 5 §2–§5 |
 | `enable-lab-traffic.ps1` | Module 0 §6; supplies what Module 1 §6 needs to show anything |
 | `cleanup-lab.ps1` | Teardown. Leaves the Migrate project, key vault, recovery vault and Entra app |
@@ -966,6 +1164,9 @@ scripts exist so an instructor can move a lab to the state a given module expect
 troubleshooting alongside a student, or to recover a session that ran out of time.
 
 Nothing automates Module 4: it is analysis, with no lab state to reach.
+
+The numbered records below are retained history, not current execution options. References
+to retired wrapper entry points describe their former behavior; use the coverage map above.
 
 ---
 

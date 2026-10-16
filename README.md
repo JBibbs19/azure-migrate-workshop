@@ -116,7 +116,7 @@ Use the wider business sequence **strategy and planning → environment readines
 - Use an approved training subscription and new, dedicated lab resource groups. Confirm permissions to create the source/target resources and perform the selected project, replication, monitoring and backup tasks. Resource-provider registration and role assignment require their own permissions.
 - Verify the resource providers listed in [Module 0](docs/Module-0-Setup.md), subscription policy, Windows/guest licensing, package-source access and budget approval.
 - The default source host requires **8 vCPUs**, with sufficient regional and actual SKU-family quota. The four nested VMs and appliance consume host resources, not separate Azure VM allocations.
-- Plan target/test quota separately in the migration region. Step 3's current defaults are B2s, B2ms, B1ms and B1ms: normally 6 vCPUs for a full four-VM target **or** test set. A full overlapping target-plus-test set would require 12 additional vCPUs; normal test cleanup precedes cutover. Verify actual selections rather than treating these defaults as assessment recommendations.
+- Plan target/test quota separately in the migration region. Cost-ordered eligible B2/D2 targets use **2 vCPUs each**: **8 vCPUs** for one full four-VM target **or** test set, or **16 vCPUs** for full target-plus-test overlap; normal test cleanup precedes cutover. Step 1 checks the whole plan against actual regional SKU and family quota metadata, counting existing usage without double-counting it. These workshop sizes are not assessment recommendations.
 - Quota is not capacity. A valid region or an advertised SKU does not guarantee allocation, policy approval or access.
 
 ### Tooling, Network and Knowledge
@@ -191,15 +191,45 @@ Get-AzContext
 
 The `migrate-step` scripts use the active Az subscription; verify `Get-AzContext` before running them. Select the actual host, project, source and target groups. Choose and verify the separate migration target region **before** portal Create resources / Finalize discovery locks it; keep the assessment and target/test networks aligned with that choice.
 
+**Target VM sizing:** Steps 1 and 3 offer numbered B2/D2 menus for all four roles, filtered first by the signed-in Azure subscription's live regional eligibility and quota using `Get-AzComputeResourceSku` and `Get-AzVMUsage`. Known OS-specific USD/hour pay-as-you-go compute prices from the official Azure Retail Prices API sort ascending with deterministic ties; unpriced candidates appear separately as **Price unavailable**, with incomplete cost ranking. Rows show the SKU, RAM, actual family, regional/family quota headroom and exact Windows/Linux USD/hour prices when available. Each target has exactly 2 billable vCPUs, with minimum RAM of 4 GiB for Web, 8 GiB for SQL and 2 GiB for each Linux VM. Current B-series v2 and supported D-series v4/v5 candidates must support x64, Generation 2, SCSI and Premium SSD; ARM, 1-GiB, NVMe-only and retired sizes are excluded. Review guest/controller and migration-provider eligibility in the portal. The source `Standard_E8s_v7` host is unaffected. Choose each size explicitly: Enter has no cheapest/default choice, and blank input cancels before writes. Step 1 plans quota and landing-zone preparation only; it does not persist the choice, reserve cores or create target VMs. It prints the reusable map and Step 3 command below with your actual chosen SKUs. After completing Step 2, use Step 3 for prerequisite checks and manual portal guidance:
+
+```powershell
+.\scripts\migrate-step1-setup-project.ps1
+# Copy Step 1's printed map with your actual chosen SKUs, not these placeholders.
+$targetVmSizes = @{
+    'OnPrem-Web' = '<chosen SKU>'
+    'OnPrem-SQL' = '<chosen SKU>'
+    'OnPrem-Linux-Web' = '<chosen SKU>'
+    'OnPrem-Linux-App' = '<chosen SKU>'
+}
+# Complete Step 2 discovery and assessment before enabling replication.
+.\scripts\migrate-step3-replicate.ps1 -Workload All -TargetVmSizes $targetVmSizes
+```
+
+Both helpers accept optional `-TargetVmSizes`: a hashtable with exactly `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web` and `OnPrem-Linux-App` mapped to actual selected SKUs. Omitting it opens all four numbered selections; supplying it bypasses only the size prompts, not eligibility, RAM or combined regional/family quota checks. Step 3 revalidates the full map against the current live subscription and actual target VNet region; it never silently changes a previous choice or resizes existing replication. `-Workload Agentless|AgentBased` filters portal workflow only, not the all-four planned quota check. `-ForecastVmSizes` remains a separate, nonbinding quota forecast, not an explicit selection override.
+
+The chosen plan supplies target-sizing guidance for the manual replication wizard, not an automated replication write, source-host change or allocation guarantee. Missing SKU metadata, subscription restrictions or unknown quota do not approve a size. Missing public prices alone do not block an explicit choice with verified eligibility and combined quota, but cost ranking is incomplete and no cheapest claim is valid; no third-party price fallback or static rates are used. Apply your recorded choices in the portal; live prices, eligibility and quota can change, and actual allocation can still fail for lack of capacity.
+
+Step 3 uses explicit-version REST GETs in the current Az subscription, avoiding local `Get-AzResource` API-version-cache lookup; an empty legacy `Servers-Migration-ServerMigration` `vaultId` does not mean no vault exists. Vault provisioning `Succeeded`, provider `CurrentConnection = Connected` and healthy VM replication are separate checks. Without a trustworthy project-service vault reference, select an existing candidate from the `-SourceResourceGroup` scope by default (or `-VaultResourceGroup`), with optional `-VaultResourceId` / `-RecoveryServicesProviderId` for explicit identities. A name match proves no link: association source `StudentSelected` leaves project association `Unknown`, not `AzureVerified`. Review existing jobs/replication first; use manual portal Create resources only if genuinely needed after reviewing complete inspected-scope inventory and the migration-region lock, and register the host provider only if needed. Rerunning only rereads status, without resource creation or replication restart; the safe JSON report uses a unique default path or optional `-ReportPath` and is inventory, not readiness or completion.
+
+**Step 3 checks prerequisites and guides portal replication only.** Its `-Workload All|Agentless|AgentBased` selection and cost-ordered target plan drive read-only checks, probes and instructions; the helper does **not** enable or monitor Hyper-V replication or complete these module sections. `ManualActionRequired` or `Blocked` is not Step 3 completion. Follow the [Hyper-V migration tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-hyper-v) and the module guides to register the host provider, perform the Replicate wizard actions and monitor replication in the portal. Test migration/cleanup and authorized cutover remain **separate manual portal stages**, including source shutdown at cutover:
+
+| `-Workload` | Selected workloads | Manual portal replication and monitoring | Manual portal test and cleanup | Manual portal cutover |
+|---|---|---|---|---|
+| `Agentless` | OnPrem-Web, OnPrem-Linux-Web | Module 2 §5–§7; Step 3 supplies partial guidance only | Module 2 §8 | Module 2 §9 |
+| `AgentBased` | OnPrem-SQL, OnPrem-Linux-App | Module 3 §8–§9; Step 3 supplies partial guidance only | Module 3 §10 | Module 3 §11 |
+| `All` | All four workloads | Both groups' replication sections above | Both groups' test sections above | Both groups' cutover sections above |
+
+Keep the same reviewed workloads, target region and sizes through the portal stages. These are teaching-group filters, not different replication architectures: all four use the Hyper-V host provider, and `AgentBased` does not require guest Mobility Service. **Steps 3, 4 and 5 are prerequisite-check/guidance helpers only for this implemented Hyper-V path.** Step 4 guides manual portal testing/cleanup; Step 5 guides separately authorized manual portal cutover. Their guards prevent the unverified VMwareCbt replication/test/migration calls from executing and do not report fake completion; `ManualActionRequired`/`Blocked` means action is still required. No ASR disaster-recovery workaround is substituted. Run `Get-Help .\scripts\migrate-step3-replicate.ps1 -Full` for the helper's partial coverage and parameters.
+
 | Helper | Scope and operator responsibility |
 |---|---|
 | `deploy-lab.ps1` | Creates the billable source host, four guest VMs and sample workloads; prepares host discovery settings and the appliance-store partition. Verify the deployed guests in Module 0. |
 | `migrate-step1-setup-project.ps1` | Optional target/test network preparation with region/quota preflight and portal project guidance. The student can instead follow the portal path in Module 2. |
 | `migrate-step2-discover-assess.ps1` | Assists host/appliance preparation, discovery and four-server assessment. Project-key, appliance and credential actions still require the operator. |
-| `migrate-step3-replicate.ps1` | Replication helper for `-Workload All\|Agentless\|AgentBased`. Its B-series target sizes are script defaults, not automatically applied assessment recommendations. |
-| `migrate-step4-test-migrate.ps1` | Creates/validates isolated test copies and handles test cleanup for the selected workload group. |
-| `migrate-step5-cutover.ps1` | Performs the selected group's final migration, including source shutdown. Review the cutover and rollback plan before running. |
-| `migrate-step3a-agentless.ps1` / `migrate-step3b-agent-based.ps1` | Instructor state-bridging wrappers: sequence Steps 3, 4 and 5 for the web pair or database/application pair. They include **cutover and source shutdown**, not just replication or a rehearsal. Both use the Hyper-V host replication path. |
+| `migrate-step3-replicate.ps1` | Read-only prerequisite checks and partial manual-portal replication guidance for `-Workload All\|Agentless\|AgentBased`, with live cost-ordered eligible B2/D2 sizing guidance. Does not enable/monitor Hyper-V replication or resize existing replication. |
+| `migrate-step4-test-migrate.ps1` | Guarded prerequisite/group checks and manual portal test/cleanup guidance only: Module 2 §8 / Module 3 §10. No automated Hyper-V test migration, cleanup or completed-state claim. |
+| `migrate-step5-cutover.ps1` | Guarded prerequisite/group checks and separately authorized manual portal cutover guidance only: Module 2 §9 / Module 3 §11. No automated migration, source shutdown or completed-state claim. |
 | `enable-lab-traffic.ps1` | Optional source-side sample activity staged on HyperVHost; follow [Lab Traffic](docs/Lab-Traffic.md). Stop with `-Disable` when no longer needed. |
 | `post-migration-labtraffic.ps1` | Optional target-side Check/Prepare/Start/Status/Stop controller; use its [separate guide](docs/post-migration-labtraffic.md) and confirm target identities. |
 | `migrate-step6-post-migration.ps1` | Configures post-migration monitoring, backup/security/cost controls; creates or changes Azure resources. Validate before and after its hardening. |

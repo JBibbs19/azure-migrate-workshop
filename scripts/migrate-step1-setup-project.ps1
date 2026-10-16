@@ -46,8 +46,8 @@
     existing VM or a selection prompt; never takes an arbitrary first VM.
 
 .PARAMETER ForecastVmSizes
-    Planning list with duplicates representing VM counts. Defaults match step 3:
-    Standard_B2s, Standard_B2ms, Standard_B1ms, Standard_B1ms. Not binding migration sizes.
+    Optional nonbinding quota-only planning list; duplicates represent VM counts.
+    Separate from explicit B2/D2 target choices and cost recommendations; never changes replication.
 
 .PARAMETER AllowQuotaWarning
     Explicitly acknowledge unknown/insufficient quota or SKU restrictions and create only
@@ -63,6 +63,12 @@
 
 .PARAMETER MigrateProjectName
     Name for the Azure Migrate project. Prompted when not supplied (example: ces-migrate-01).
+
+.PARAMETER TargetVmSizes
+    Optional exact four-key mapping: OnPrem-Web, OnPrem-SQL, OnPrem-Linux-Web and
+    OnPrem-Linux-App to exact eligible SKU strings. Revalidated against live subscription
+    metadata, RAM and combined quotas. Omit to choose a number for each workload;
+    blank cancels the entire selection. Prices may be unavailable, never a quota bypass.
 
 .EXAMPLE
     .\migrate-step1-setup-project.ps1
@@ -101,7 +107,9 @@ param(
 
     [string]$HyperVHostVMName,
 
-    [ValidateNotNullOrEmpty()][string[]]$ForecastVmSizes = @('Standard_B2s', 'Standard_B2ms', 'Standard_B1ms', 'Standard_B1ms'),
+    [hashtable]$TargetVmSizes,
+
+    [ValidateNotNullOrEmpty()][string[]]$ForecastVmSizes,
 
     [switch]$AllowQuotaWarning,
 
@@ -112,6 +120,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:LabRetailCache = @{}
 
 # ================================================================
 # Shared helpers, masked console output and parameter entry
@@ -878,9 +887,391 @@ function Resolve-LabTargetNetworkLocation {
 function Get-LabField {
     param($Object, [string]$Name)
     if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { return $Object[$Name] }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -ne $property) { return $property.Value }
     return $null
+}
+
+function Test-LabField {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
+    if ($Object -is [System.Collections.IDictionary]) { return $Object.Contains($Name) }
+    return $null -ne $Object.PSObject.Properties[$Name]
+}
+
+function Get-LabCapability {
+    param($Sku, [string]$Name)
+    $rows = @(Get-LabField $Sku 'Capabilities' | Where-Object { (Get-LabField $_ 'Name') -eq $Name })
+    if ($rows.Count -ne 1) { return $null }
+    return [string](Get-LabField $rows[0] 'Value')
+}
+
+function Get-LabSizingWorkloads {
+    return @(
+        [pscustomobject]@{ DisplayName = 'OnPrem-Web'; OSType = 'Windows'; MinimumMemoryGB = 4 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-SQL'; OSType = 'Windows'; MinimumMemoryGB = 8 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-Linux-Web'; OSType = 'Linux'; MinimumMemoryGB = 2 },
+        [pscustomobject]@{ DisplayName = 'OnPrem-Linux-App'; OSType = 'Linux'; MinimumMemoryGB = 2 }
+    )
+}
+
+function Get-LabSizingCandidates {
+    param([object[]]$Skus, [object[]]$Usage, [string]$Location)
+    foreach ($sku in $Skus) {
+        $name = [string](Get-LabField $sku 'Name')
+        if ($name -notmatch '^Standard_[BD]2') { continue }
+        $reasons = @(); $memory = 0.0
+        if ($name -notmatch '^Standard_(B2(?:a?l?s|a?ts)_v2|D2(?:a|s|as|d|ds|ad|ads|ls|lds)?_v[45])$') {
+            $reasons += 'Outside current x64 Bsv2/Basv2 or stable Dv4/v5 scope; legacy, ARM, special-purpose and newer guest-readiness-unverified versions excluded.'
+        }
+        if ((Get-LabField $sku 'ResourceType') -ne 'virtualMachines' -or @((Get-LabField $sku 'Locations')) -notcontains $Location) {
+            $reasons += 'Actual VM SKU location metadata does not establish eligibility in the selected region.'
+        }
+        foreach ($capability in @('vCPUs', 'vCPUsAvailable')) {
+            $cores = 0L
+            if (-not [long]::TryParse((Get-LabCapability $sku $capability), [ref]$cores) -or $cores -ne 2) {
+                $reasons += "$capability must explicitly establish exactly two visible AND billable vCPUs; missing/constrained values excluded."
+            }
+        }
+        if ((Get-LabCapability $sku 'CpuArchitectureType') -ne 'x64') { $reasons += 'Explicit x64 architecture capability missing or unsupported.' }
+        if (@((Get-LabCapability $sku 'HyperVGenerations') -split ',' | ForEach-Object { $_.Trim() }) -notcontains 'V2') { $reasons += 'Explicit Generation 2 (V2) capability missing.' }
+        if (-not [double]::TryParse((Get-LabCapability $sku 'MemoryGB'), [Globalization.NumberStyles]::Float,
+                [Globalization.CultureInfo]::InvariantCulture, [ref]$memory) -or [double]::IsNaN($memory) -or [double]::IsInfinity($memory) -or $memory -lt 2) {
+            $reasons += 'MemoryGB is missing/invalid or below the Linux minimum of 2 GiB.'
+        }
+        if (@((Get-LabCapability $sku 'DiskControllerTypes') -split ',' | ForEach-Object { $_.Trim() }) -notcontains 'SCSI') {
+            $reasons += 'Explicit SCSI support missing; NVMe-only guests require separate driver/readiness validation.'
+        }
+        if ((Get-LabCapability $sku 'PremiumIO') -ne 'True') { $reasons += 'Explicit PremiumIO support required for possible original Premium_LRS disks.' }
+        $family = [string](Get-LabField $sku 'Family')
+        $familyQuota = Get-LabQuotaRow -Usage $Usage -Key $family
+        if ([string]::IsNullOrWhiteSpace($family) -or $null -eq $familyQuota -or $familyQuota.Remaining -lt 2) {
+            $reasons += 'Actual SKU Family quota is unknown or has fewer than two vCPUs remaining.'
+        }
+        if (-not (Test-LabField $sku 'Restrictions')) { $reasons += 'Restriction metadata missing; not proof of subscription eligibility.' }
+        foreach ($restriction in @(Get-LabField $sku 'Restrictions')) {
+            if ($null -eq $restriction) { $reasons += 'Unknown restriction entry.'; continue }
+            $type = [string](Get-LabField $restriction 'Type')
+            $values = @(Get-LabField $restriction 'Values' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $info = Get-LabField $restriction 'RestrictionInfo'
+            $regions = @(Get-LabField $info 'Locations' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            if ($type -notin @('Location', 'Zone')) { $reasons += 'Unknown restriction type; excluded conservatively.'; continue }
+            $scopeKnown = ($regions.Count -gt 0 -or ($type -eq 'Location' -and $values.Count -gt 0))
+            if (-not $scopeKnown) { $reasons += 'Restriction location scope missing/null/blank; relevance unknown, excluded conservatively.' }
+            $relevant = if ($type -eq 'Location') { ($values -contains $Location -or $regions -contains $Location -or ($values.Count -eq 0 -and $regions.Count -eq 0)) }
+                        else { ($regions.Count -eq 0 -or $regions -contains $Location) }
+            if ($relevant) { $reasons += "$type restriction relevant to selected region; no zone chosen, conservatively excluded (not a claim that all regional capacity is restricted)." }
+        }
+        if (@($Skus | Where-Object { (Get-LabField $_ 'Name') -eq $name -and (Get-LabField $_ 'ResourceType') -eq 'virtualMachines' }).Count -ne 1) { $reasons += 'Duplicate SKU metadata is ambiguous.' }
+        [pscustomobject]@{ Name = $name; Family = $family; MemoryGB = $memory; Eligible = ($reasons.Count -eq 0); Reasons = $reasons }
+    }
+}
+
+function Test-LabRetailUri {
+    param([string]$Value)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return ($uri.Scheme -ceq 'https' -and $uri.Host -ieq 'prices.azure.com' -and $uri.Port -eq 443 -and
+        [string]::IsNullOrEmpty($uri.UserInfo) -and [string]::IsNullOrEmpty($uri.Fragment) -and $uri.AbsolutePath -ceq '/api/retail/prices')
+}
+
+function Invoke-LabRetailPage {
+    param([string]$Uri)
+    if (-not (Test-LabRetailUri $Uri)) { throw 'Retail URL is not the approved public HTTPS endpoint.' }
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        try {
+            # Public endpoint only: no Azure token, subscription, credentials or custom headers.
+            return Invoke-RestMethod -Uri $Uri -Method Get -TimeoutSec 30 -MaximumRedirection 0 -ErrorAction Stop
+        } catch {
+            $response = Get-LabField $_.Exception 'Response'
+            $status = Get-LabField $response 'StatusCode'
+            $code = 0; if ($null -ne $status) { try { $code = [int]$status } catch { $code = 0 } }
+            $timeout = $_.Exception -is [TimeoutException] -or $_.Exception -is [System.Threading.Tasks.TaskCanceledException] -or
+                (($_.Exception -is [System.Net.WebException]) -and $_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout)
+            if ($attempt -eq 0 -and ($timeout -or ($code -ge 500 -and $code -le 599))) { continue }
+            throw 'Public retail price read failed; no complete price ordering is available. Service error bodies omitted.'
+        }
+    }
+}
+
+function Get-LabRetailSnapshot {
+    param([string]$Location)
+    if ($Location -notmatch '^[a-z0-9]+$') { throw 'Retail region must be a validated Azure location name.' }
+    $cache = Get-Variable -Name LabRetailCache -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $cache) { $cache = @{}; $script:LabRetailCache = $cache }
+    if ($cache.ContainsKey($Location)) { return $cache[$Location] }
+    $filter = "serviceName eq 'Virtual Machines' and armRegionName eq '$Location' and priceType eq 'Consumption' and (startswith(armSkuName, 'Standard_B2') or startswith(armSkuName, 'Standard_D2'))"
+    $uri = 'https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&currencyCode=%27USD%27&$filter=' + [Uri]::EscapeDataString($filter)
+    $items = @(); $seen = @{}; $complete = $false; $issues = @()
+    try {
+        for ($page = 0; $page -lt 500; $page++) {
+            if (-not (Test-LabRetailUri $uri) -or $seen.ContainsKey($uri)) { throw 'Invalid or repeated retail continuation.' }
+            $seen[$uri] = $true
+            $payload = Invoke-LabRetailPage -Uri $uri
+            if (-not (Test-LabField $payload 'Items') -or -not (Test-LabField $payload 'NextPageLink')) { throw 'Malformed retail page.' }
+            if ($payload -is [System.Collections.IDictionary]) { $rawRows = $payload['Items'] }
+            else { $rawRows = $payload.PSObject.Properties['Items'].Value }
+            if ($null -eq $rawRows -or $rawRows -is [string] -or -not ($rawRows -is [System.Collections.IEnumerable])) { throw 'Malformed retail Items.' }
+            $items += @($rawRows)
+            if ($items.Count -gt 100000) { throw 'Retail item safety limit reached.' }
+            $next = Get-LabField $payload 'NextPageLink'
+            if ($null -ne $next -and $next -isnot [string]) { throw 'Malformed retail continuation.' }
+            if ([string]::IsNullOrWhiteSpace([string]$next)) { $complete = $true; break }
+            $uri = [string]$next
+        }
+        if (-not $complete) { throw 'Retail page safety limit reached.' }
+    } catch { $issues += 'Retail snapshot incomplete or unavailable; automatic selection blocked. No static price fallback.' }
+    $result = [pscustomobject]@{ Complete = $complete; Items = $items; RetrievedAt = [DateTimeOffset]::UtcNow; Issues = $issues }
+    $cache[$Location] = $result
+    return $result
+}
+
+function Get-LabRetailRate {
+    param([object[]]$Items, [string]$SkuName, [string]$Location, [ValidateSet('Windows', 'Linux')][string]$OSType, [DateTimeOffset]$Now)
+    $validRates = @(); $invalid = $false
+    foreach ($item in $Items) {
+        if ((Get-LabField $item 'armSkuName') -cne $SkuName -or (Get-LabField $item 'armRegionName') -cne $Location -or
+            (Get-LabField $item 'currencyCode') -cne 'USD' -or (Get-LabField $item 'serviceName') -cne 'Virtual Machines' -or
+            (Get-LabField $item 'type') -cne 'Consumption' -or (Get-LabField $item 'unitOfMeasure') -cne '1 Hour' -or
+            (Get-LabField $item 'isPrimaryMeterRegion') -isnot [bool] -or (Get-LabField $item 'isPrimaryMeterRegion') -ne $true) { continue }
+        $product = [string](Get-LabField $item 'productName')
+        if ($product -cnotmatch '^Virtual Machines [A-Za-z0-9 -]+ Series( Windows)?$') { continue }
+        $rowOS = if ($product.EndsWith(' Windows', [StringComparison]::Ordinal)) { 'Windows' } else { 'Linux' }
+        if ($rowOS -cne $OSType) { continue }
+        $meter = [string](Get-LabField $item 'meterName'); $sku = [string](Get-LabField $item 'skuName')
+        if ($meter -match '(?i)spot|low.?priority|dev.?test|reservation|savings.?plan|rhel|red.?hat|suse|sql|ubuntu.?pro|marketplace|software' -or $sku -match '(?i)spot|low.?priority|dev.?test|reservation|savings.?plan|rhel|red.?hat|suse|sql|ubuntu.?pro|marketplace|software') { continue }
+        if ([string]::IsNullOrWhiteSpace($meter) -or [string]::IsNullOrWhiteSpace($sku)) { $invalid = $true; continue }
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-LabField $item 'reservationTerm'))) { continue }
+        $tier = 0.0; $price = 0.0; $amount = [decimal]0; $effective = [DateTimeOffset]::MinValue
+        if (-not [double]::TryParse([string](Get-LabField $item 'tierMinimumUnits'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$tier)) { $invalid = $true; continue }
+        if ($tier -ne 0) { continue }
+        if (-not [DateTimeOffset]::TryParse([string](Get-LabField $item 'effectiveStartDate'), [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$effective)) { $invalid = $true; continue }
+        if ($effective -gt $Now) { continue }
+        $rawPrice = Get-LabField $item 'retailPrice'
+        $priceText = if ($rawPrice -is [IFormattable]) { $rawPrice.ToString($null, [Globalization.CultureInfo]::InvariantCulture) } else { [string]$rawPrice }
+        if (-not [double]::TryParse($priceText, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$price) -or
+            [double]::IsNaN($price) -or [double]::IsInfinity($price) -or $price -le 0 -or
+            -not [decimal]::TryParse($priceText, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$amount) -or $amount -le 0) { $invalid = $true; continue }
+        $validRates += [pscustomobject]@{ Rate = $amount; Effective = $effective }
+    }
+    if ($invalid -or $validRates.Count -eq 0) { return $null }
+    $ordered = @($validRates | Sort-Object Effective -Descending)
+    $latest = @($ordered | Where-Object { $_.Effective -eq $ordered[0].Effective })
+    if ($latest.Count -ne 1) { return $null }
+    return $latest[0]
+}
+
+function Get-LabCostOrderedOptions {
+    param([object[]]$Options)
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($option in $Options) {
+        $index = 0
+        while ($index -lt $ordered.Count -and ($ordered[$index].Rate -lt $option.Rate -or
+            ($ordered[$index].Rate -eq $option.Rate -and [string]::CompareOrdinal($ordered[$index].Name, $option.Name) -le 0))) { $index++ }
+        $ordered.Insert($index, $option)
+    }
+    return $ordered.ToArray()
+}
+
+function Get-LabCostTargetPlan {
+    param([object[]]$Candidates, [object[]]$Usage, $Retail, [string]$Location)
+    $workloads = @(Get-LabSizingWorkloads); $alternatives = @{}; $issues = @(); $unpriced = @()
+    $eligible = @($Candidates | Where-Object { $_.Eligible })
+    if (-not $Retail.Complete) { $issues += 'Price pagination incomplete: no automated recommendation.' }
+    foreach ($workload in $workloads) {
+        $options = @()
+        foreach ($candidate in @($eligible | Where-Object { $_.MemoryGB -ge $workload.MinimumMemoryGB })) {
+            $rate = Get-LabRetailRate -Items $Retail.Items -SkuName $candidate.Name -Location $Location -OSType $workload.OSType -Now $Retail.RetrievedAt
+            if ($null -eq $rate) { $unpriced += "$($workload.DisplayName): $($candidate.Name) ($($workload.OSType)) Unknown price"; continue }
+            $options += [pscustomobject]@{ Name = $candidate.Name; Family = $candidate.Family; Rate = $rate.Rate; PriceTimestamp = $rate.Effective; MemoryGB = $candidate.MemoryGB }
+        }
+        $alternatives[$workload.DisplayName] = @(Get-LabCostOrderedOptions -Options $options)
+        if ($options.Count -eq 0) { $issues += "No fully priced eligible options for $($workload.DisplayName)." }
+    }
+    if ($unpriced.Count -gt 0) { $issues += 'Eligible candidates have unknown/ambiguous prices: a complete cheapest ordering is not established; automatic selection blocked.' }
+    $regional = Get-LabQuotaRow -Usage $Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for four two-vCPU VMs.' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for four VMs.' }
+    $selected = @(); $total = [decimal]0
+    if ($issues.Count -eq 0) {
+        # Equal core demand means only the cheapest SKU per actual family/workload is needed
+        # in the search. Dynamic programming retains the cheapest prefix for each quota state.
+        $states = @{ '' = [pscustomobject]@{ Choices = @(); Used = @{}; Cost = [decimal]0; Tie = '' } }
+        foreach ($workload in $workloads) {
+            $families = @{}; $nextStates = @{}
+            foreach ($option in $alternatives[$workload.DisplayName]) { if (-not $families.ContainsKey($option.Family)) { $families[$option.Family] = $option } }
+            foreach ($state in $states.Values) { foreach ($option in $families.Values) {
+                $used = @{}; foreach ($key in $state.Used.Keys) { $used[$key] = $state.Used[$key] }
+                if (-not $used.ContainsKey($option.Family)) { $used[$option.Family] = 0 }
+                $used[$option.Family] += 2
+                $quota = Get-LabQuotaRow -Usage $Usage -Key $option.Family
+                if ($null -eq $quota -or $used[$option.Family] -gt $quota.Remaining) { continue }
+                $key = (@($used.Keys | Sort-Object | ForEach-Object { $_ + ':' + $used[$_] }) -join '|')
+                $cost = $state.Cost + $option.Rate; $tie = $state.Tie + '|' + $option.Name
+                if (-not $nextStates.ContainsKey($key) -or $cost -lt $nextStates[$key].Cost -or
+                    ($cost -eq $nextStates[$key].Cost -and [string]::CompareOrdinal($tie, $nextStates[$key].Tie) -lt 0)) {
+                    $choice = [pscustomobject]@{ DisplayName = $workload.DisplayName; Name = $option.Name; Family = $option.Family; Rate = $option.Rate; PriceTimestamp = $option.PriceTimestamp }
+                    $nextStates[$key] = [pscustomobject]@{ Choices = @($state.Choices) + $choice; Used = $used; Cost = $cost; Tie = $tie }
+                }
+            } }
+            if ($nextStates.Count -gt 100000) { $issues += 'Cost-plan state safety limit reached; no recommendation.'; break }
+            $states = $nextStates
+        }
+        if ($issues.Count -eq 0 -and $states.Count -gt 0) {
+            $best = $null
+            foreach ($state in $states.Values) { if ($null -eq $best -or $state.Cost -lt $best.Cost -or ($state.Cost -eq $best.Cost -and [string]::CompareOrdinal($state.Tie, $best.Tie) -lt 0)) { $best = $state } }
+            $selected = @($best.Choices); $total = $best.Cost
+        } elseif ($issues.Count -eq 0) { $issues += 'No feasible aggregate family-quota plan for all four workloads; no fixed fallback.' }
+    }
+    return [pscustomobject]@{ Complete = ($issues.Count -eq 0 -and $selected.Count -eq 4); Selected = $selected; Alternatives = $alternatives; Unpriced = $unpriced; Issues = $issues; TotalHourlyUSD = $total; Candidates = $Candidates; RetrievedAt = $Retail.RetrievedAt }
+}
+
+function Show-LabCostTargetPlan {
+    param($Plan, [string]$Location, [string[]]$Names = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App'))
+    Write-Host "READ-ONLY cost recommendation only (never accepted automatically) | region=$Location | priceRetrievedUTC=$($Plan.RetrievedAt.ToUniversalTime().ToString('o'))" -ForegroundColor Cyan
+    Write-Host 'Scope: subscription SKU metadata, current/stable x64 B2/D2, Gen2, two visible/billable vCPUs, SCSI and PremiumIO; four-workload aggregate quota. Not an assessment or capacity reservation.'
+    Write-Host 'Retail USD/hour, Windows and Linux meters separately. Excludes disks/network, tax, SQL/software licenses, commitments and license benefits. Burstable CPU performance needs assessment review.'
+    Write-Warning 'SCSI metadata alone does NOT prove guest drivers/MANA or Azure Migrate Hyper-V provider eligibility. Confirm original disk type, guest readiness and actual offered sizes in the portal. Dv6/v7 excluded pending guest readiness validation.'
+    foreach ($candidate in @($Plan.Candidates | Where-Object { -not $_.Eligible })) { Write-Host "  Excluded $($candidate.Name): $($candidate.Reasons -join '; ')" }
+    foreach ($name in $Names) {
+        Write-Host "  $name -- ordered priced alternatives (not allocation/retry instructions):"
+        foreach ($option in @($Plan.Alternatives[$name])) {
+            Write-Host "    $($option.Name) | family=$($option.Family) | RAM=$($option.MemoryGB) GiB | USD/hr=$($option.Rate.ToString([Globalization.CultureInfo]::InvariantCulture)) | priceTimestamp=$($option.PriceTimestamp.ToUniversalTime().ToString('o'))"
+        }
+        foreach ($unknown in @($Plan.Unpriced | Where-Object { $_.StartsWith($name + ':', [StringComparison]::Ordinal) })) { Write-Warning $unknown }
+        $choice = @($Plan.Selected | Where-Object { $_.DisplayName -ceq $name })
+        if ($Plan.Complete -and $choice.Count -eq 1) { Write-Host "    Current aggregate-quota recommendation: $($choice[0].Name)" -ForegroundColor Green }
+        else { Write-Warning 'No complete cost recommendation; eligible unpriced sizes may still be chosen explicitly.' }
+    }
+    if ($Plan.Complete) { Write-Host "Least-cost complete eligible four-workload plan: USD/hr=$($Plan.TotalHourlyUSD.ToString([Globalization.CultureInfo]::InvariantCulture)); no resources allocated or resized." }
+    foreach ($issue in $Plan.Issues) { Write-Warning $issue }
+}
+
+function Get-LabTargetSizeOptions {
+    param([object[]]$Candidates, [object[]]$Usage, $Retail, [string]$Location, $Workload)
+    $priced = @(); $unknown = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in @($Candidates | Where-Object { $_.Eligible -and $_.MemoryGB -ge $Workload.MinimumMemoryGB })) {
+        $rate = $null
+        if ($Retail.Complete) { $rate = Get-LabRetailRate -Items $Retail.Items -SkuName $candidate.Name -Location $Location -OSType $Workload.OSType -Now $Retail.RetrievedAt }
+        $amount = $null; $timestamp = $null
+        if ($null -ne $rate) { $amount = $rate.Rate; $timestamp = $rate.Effective }
+        $quota = Get-LabQuotaRow -Usage $Usage -Key $candidate.Family
+        $option = [pscustomobject]@{ Name = $candidate.Name; Family = $candidate.Family; MemoryGB = $candidate.MemoryGB; OSType = $Workload.OSType; Rate = $amount; PriceTimestamp = $timestamp; FamilyRemaining = $quota.Remaining }
+        if ($null -ne $rate) { $priced += $option }
+        else {
+            $index = 0
+            while ($index -lt $unknown.Count -and [string]::CompareOrdinal($unknown[$index].Name, $option.Name) -le 0) { $index++ }
+            $unknown.Insert($index, $option)
+        }
+    }
+    return @(@(Get-LabCostOrderedOptions -Options $priced) + $unknown.ToArray())
+}
+
+function Test-LabTargetSizeMapping {
+    param([AllowNull()][hashtable]$Mapping, [hashtable]$Options, [object[]]$Usage)
+    $workloads = @(Get-LabSizingWorkloads); $issues = @(); $selected = @(); $canonical = @{}; $used = @{}; $seen = @{}
+    if ($null -eq $Mapping -or $Mapping.Count -ne 4) { $issues += 'TargetVmSizes requires exactly four workload-name keys.' }
+    if ($null -ne $Mapping) {
+        foreach ($key in $Mapping.Keys) {
+            if ($key -isnot [string] -or @($workloads | Where-Object { $_.DisplayName -ceq $key }).Count -ne 1) { $issues += 'TargetVmSizes contains an unknown or non-exact workload name.'; continue }
+            if ($seen.ContainsKey($key)) { $issues += 'TargetVmSizes contains duplicate case-insensitive workload keys.' }
+            $seen[$key] = $true
+        }
+    }
+    foreach ($workload in $workloads) {
+        $name = $workload.DisplayName
+        $keys = @()
+        if ($null -ne $Mapping) { $keys = @($Mapping.Keys | Where-Object { $_ -is [string] -and $_ -ceq $name }) }
+        if ($keys.Count -ne 1) { $issues += "TargetVmSizes is missing exact key '$name'."; continue }
+        $value = $Mapping[$keys[0]]
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { $issues += "TargetVmSizes '$name' must be one exact SKU string."; continue }
+        $eligibleOptions = @($Options[$name] | Where-Object { $_.Name -ceq $value })
+        if ($eligibleOptions.Count -ne 1) { $issues += "TargetVmSizes '$name' SKU '$value' is unknown, ineligible or below its RAM minimum in current subscription metadata."; continue }
+        $option = $eligibleOptions[0]
+        $canonical[$name] = $option.Name
+        $selected += [pscustomobject]@{ DisplayName = $name; Name = $option.Name; Family = $option.Family; MemoryGB = $option.MemoryGB; OSType = $option.OSType; Rate = $option.Rate; PriceTimestamp = $option.PriceTimestamp }
+        if (-not $used.ContainsKey($option.Family)) { $used[$option.Family] = 0L }
+        $used[$option.Family] += 2
+    }
+    $regional = Get-LabQuotaRow -Usage $Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for the four-choice plan (+8 vCPUs).' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for the four-choice plan (+4 VMs).' }
+    foreach ($family in $used.Keys) {
+        $quota = Get-LabQuotaRow -Usage $Usage -Key $family
+        if ($null -eq $quota -or $used[$family] -gt $quota.Remaining) { $issues += "Combined choices exceed or cannot establish family '$family' remaining quota (need $($used[$family]) vCPUs). Earlier choices were NOT changed." }
+    }
+    return [pscustomobject]@{ SelectionComplete = ($issues.Count -eq 0 -and $selected.Count -eq 4); Selected = $selected; TargetVmSizes = $canonical; Issues = $issues }
+}
+
+function Select-LabTargetVmSizes {
+    param($Snapshot, $Retail, [string]$Location, [AllowNull()][hashtable]$Mapping, [switch]$MappingSupplied)
+    $workloads = @(Get-LabSizingWorkloads); $options = @{}; $issues = @($Snapshot.Issues)
+    $candidates = @(Get-LabSizingCandidates -Skus $Snapshot.Skus -Usage $Snapshot.Usage -Location $Location)
+    foreach ($workload in $workloads) {
+        $options[$workload.DisplayName] = @(Get-LabTargetSizeOptions -Candidates $candidates -Usage $Snapshot.Usage -Retail $Retail -Location $Location -Workload $workload)
+        if ($options[$workload.DisplayName].Count -eq 0) { $issues += "No authorized eligible subscription choices for $($workload.DisplayName); metadata/quota/RAM cannot be bypassed." }
+    }
+    $regional = Get-LabQuotaRow -Usage $Snapshot.Usage -Key 'cores'; $vmCount = Get-LabQuotaRow -Usage $Snapshot.Usage -Key 'virtualMachines'
+    if ($null -eq $regional -or $regional.Remaining -lt 8) { $issues += 'Target Total Regional vCPU quota Unknown or insufficient for four two-vCPU VMs.' }
+    if ($null -eq $vmCount -or $vmCount.Remaining -lt 4) { $issues += 'Target regional VM-count quota Unknown or insufficient for four VMs.' }
+    if ($issues.Count -gt 0) {
+        if ($MappingSupplied) { throw ('[Blocked] TargetVmSizes live validation failed: ' + ($issues -join '; ')) }
+        return [pscustomobject]@{ SelectionComplete = $false; Selected = @(); TargetVmSizes = @{}; Issues = $issues }
+    }
+    if ($MappingSupplied) {
+        $result = Test-LabTargetSizeMapping -Mapping $Mapping -Options $options -Usage $Snapshot.Usage
+        if (-not $result.SelectionComplete) { throw ('[Blocked] Invalid TargetVmSizes: ' + ($result.Issues -join '; ')) }
+        return $result
+    }
+    Write-Host 'Select ALL FOUR workload target sizes explicitly (even for a Step 3 workload pair); aggregate quota is checked for the combined set. Source host is NOT resized.' -ForegroundColor Cyan
+    Write-Host 'Signed-in subscription metadata and remaining quota only; not current physical capacity, a reservation or an assessment. No resources are allocated.'
+    while ($true) {
+        $chosen = @{}
+        foreach ($workload in $workloads) {
+            $name = $workload.DisplayName; $choices = @($options[$name])
+            Write-Host "$name | $($workload.OSType) | minimum RAM=$($workload.MinimumMemoryGB) GiB | exactly 2 vCPUs"
+            if (@($choices | Where-Object { $null -eq $_.Rate }).Count -gt 0) { Write-Warning 'Price unavailable for eligible choices: not a complete cost ranking. Unknown prices follow known prices in stable SKU order; no cheapest claim.' }
+            $unpricedHeading = $false
+            for ($i = 0; $i -lt $choices.Count; $i++) {
+                $option = $choices[$i]; $price = 'Price unavailable'
+                if ($null -ne $option.Rate) { $price = 'USD/hr=' + $option.Rate.ToString([Globalization.CultureInfo]::InvariantCulture) }
+                elseif (-not $unpricedHeading) { Write-Host '  Eligible choices with unavailable prices:'; $unpricedHeading = $true }
+                Write-Host "  [$($i + 1)] $($option.Name) | RAM=$($option.MemoryGB) GiB | OS=$($option.OSType) | $price | family=$($option.Family) remaining=$($option.FamilyRemaining) vCPUs (before this four-choice plan)"
+            }
+            while ($true) {
+                $answer = Read-Host "Number for $name (blank cancels entire selection; no default)"
+                if ([string]::IsNullOrWhiteSpace($answer)) { throw '[Cancelled] Entire VM selection cancelled before resource/provider writes. No earlier choice was accepted.' }
+                $number = 0
+                if ($answer -match '^[0-9]+$' -and [int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $choices.Count) { $chosen[$name] = $choices[$number - 1].Name; break }
+                Write-Warning "Enter a number from 1 to $($choices.Count), or blank to cancel."
+            }
+        }
+        $result = Test-LabTargetSizeMapping -Mapping $chosen -Options $options -Usage $Snapshot.Usage
+        if ($result.SelectionComplete) { return $result }
+        foreach ($issue in $result.Issues) { Write-Warning $issue }
+        while ($true) {
+            $restart = Read-Host '[1] Reselect all four sizes  [2] Stop (blank also stops)'
+            if ($restart -eq '1') { break }
+            if ([string]::IsNullOrWhiteSpace($restart) -or $restart -eq '2') { throw '[Cancelled] Combined plan is infeasible; stopped without changing choices or allocating resources.' }
+            Write-Warning 'Enter 1 to restart selection or 2 to stop.'
+        }
+    }
+}
+
+function Show-LabTargetSizeSelection {
+    param($Selection)
+    if (-not $Selection.SelectionComplete) { Write-Warning 'VM selection incomplete: NETWORK-ONLY setup is not VM allocation approval.'; return }
+    Write-Host 'Explicit four-workload choices validated against current subscription SKU metadata and aggregate quota (not a capacity guarantee):' -ForegroundColor Cyan
+    foreach ($choice in $Selection.Selected) {
+        $price = 'Price unavailable'
+        if ($null -ne $choice.Rate) { $price = 'USD/hr=' + $choice.Rate.ToString([Globalization.CultureInfo]::InvariantCulture) }
+        Write-Host "  $($choice.DisplayName) -> $($choice.Name) | RAM=$($choice.MemoryGB) GiB | OS=$($choice.OSType) | $price"
+    }
+    $entries = @($Selection.Selected | ForEach-Object { "'$($_.DisplayName)' = '$($_.Name)'" })
+    Write-Host ('$targetVmSizes = @{ ' + ($entries -join '; ') + ' }')
+    Write-Host 'Copy this mapping with the same-environment Step 3 command; Step 3 revalidates live eligibility/quota and never silently reprices into a different SKU. No local state file.'
 }
 
 function Get-LabQuotaRow {
@@ -959,7 +1350,7 @@ function Get-LabRegionQuotaSnapshot {
 }
 
 function Show-LabQuotaPreflight {
-    param($SourceHost, [string]$TargetLocation, [string[]]$PlannedSizes)
+    param($SourceHost, [string]$TargetLocation, [string[]]$PlannedSizes, [hashtable]$Mapping, [switch]$MappingSupplied)
     Write-Host ''
     Write-Host "READ-ONLY SUBSCRIPTION QUOTA HEADS-UP | UTC $([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" -ForegroundColor Cyan
     Write-Host "Subscription: $script:LabSubscriptionName $(Format-LabSubscriptionId $script:LabSubscriptionId) (same signed-in subscription for source and target)"
@@ -978,13 +1369,22 @@ function Show-LabQuotaPreflight {
     if (-not $sourcePlan.Known) { Write-Warning 'Source host family quota: Unknown (actual SKU family/vCPUs metadata unresolved; no hard-coded host sizing used).' }
     Write-Host 'Four nested workload VMs and MigrateAppl are NOT separate Azure VMs; source quota counts the Azure host only, plus other Azure allocations.'
     Write-Host "TARGET MIGRATION REGION: $TargetLocation"
+    $retail = Get-LabRetailSnapshot -Location $TargetLocation
+    $candidates = @(Get-LabSizingCandidates -Skus $target.Skus -Usage $target.Usage -Location $TargetLocation)
+    $costPlan = Get-LabCostTargetPlan -Candidates $candidates -Usage $target.Usage -Retail $retail -Location $TargetLocation
+    Show-LabCostTargetPlan -Plan $costPlan -Location $TargetLocation
+    $selection = Select-LabTargetVmSizes -Snapshot $target -Retail $retail -Location $TargetLocation -Mapping $Mapping -MappingSupplied:$MappingSupplied
+    Show-LabTargetSizeSelection -Selection $selection
+    if ($null -eq $PlannedSizes -or $PlannedSizes.Count -eq 0) {
+        $PlannedSizes = @($selection.Selected | ForEach-Object { $_.Name })
+    } else { Write-Warning 'The following custom quota forecast is nonbinding and cannot override or bypass explicit selection validation.' }
     $plan = Get-LabSkuPlan -Skus $target.Skus -Sizes $PlannedSizes -Location $TargetLocation
     $regional = Get-LabQuotaRow -Usage $target.Usage -Key 'cores'
     $vmCount = Get-LabQuotaRow -Usage $target.Usage -Key 'virtualMachines'
     $additional = if ($plan.Known) { $plan.Total } else { $null }
     Write-LabQuotaRow -Label 'Total Regional vCPUs' -Row $regional -Additional $additional
     Write-LabQuotaRow -Label 'Regional VM count' -Row $vmCount -Additional $plan.Count
-    $issues = @($target.Issues + $plan.Issues)
+    $issues = @($target.Issues + $plan.Issues + $selection.Issues)
     if ($null -eq $regional) { $issues += 'Target Total Regional vCPU quota Unknown.' }
     elseif ($plan.Known -and $regional.Remaining -lt $plan.Total) { $issues += 'Insufficient target Total Regional vCPU quota for the planning baseline.' }
     if ($null -eq $vmCount) { $issues += 'Target regional VM-count quota Unknown.' }
@@ -1016,7 +1416,7 @@ function Show-LabQuotaPreflight {
     Write-Host 'Step 4 normally cleans up test VMs before step 5; replication disks do not reserve VM cores. Existing target VMs are already in reported usage: do not add them again as actual usage.'
     Write-Host 'Forecasts are NOT reservations. Rerun with actual planned sizes/counts before VM/test allocation. Quota is not physical capacity; SKU restrictions, subscription policy and region access can still block allocation.'
     foreach ($issue in $issues) { Write-Warning $issue }
-    return [pscustomobject]@{ NeedsAcknowledgement = ($issues.Count -gt 0); Issues = $issues }
+    return [pscustomobject]@{ NeedsAcknowledgement = ($issues.Count -gt 0 -or -not $selection.SelectionComplete); Issues = $issues; CostPlan = $costPlan; Selection = $selection }
 }
 
 function Assert-LabLandingZoneRegion {
@@ -1050,6 +1450,9 @@ trap {
 
 $script:LabTrafficExplicit = $PSBoundParameters.ContainsKey('LabTraffic')
 $script:LabStep1Interactive = [string]::IsNullOrWhiteSpace($SourceResourceGroup) -or [string]::IsNullOrWhiteSpace($TargetResourceGroup) -or [string]::IsNullOrWhiteSpace($Location) -or [string]::IsNullOrWhiteSpace($MigrateProjectName)
+$customForecast = $PSBoundParameters.ContainsKey('ForecastVmSizes')
+Write-Host 'Subscription-first target choices: live B2/D2 metadata and OS-specific USD/hour prices; every workload needs an explicit selection.' -ForegroundColor Cyan
+if ($customForecast) { Write-Warning 'Custom ForecastVmSizes: nonbinding quota-only forecast, separate from explicit target choices; never resizes replication.' }
 $locationWasSupplied = -not [string]::IsNullOrWhiteSpace($Location)
 $context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Network', 'Az.Compute') -OptionalModules @('Az.Migrate') -SkipSubscriptionPrompt:(-not $script:LabStep1Interactive)
 foreach ($command in @('Get-AzVM', 'Get-AzLocation', 'Get-AzVirtualNetwork', 'Get-AzNetworkSecurityGroup')) {
@@ -1077,7 +1480,7 @@ Write-Warning 'Project migration target lock was NOT verified by this preflight.
 while ($true) {
     $Location = Read-LabTargetRegion -Value $Location -SourceLocation $sourceHost.Location
     Assert-LabLandingZoneRegion -ResourceGroupName $TargetResourceGroup -Location $Location
-    $quotaPreflight = Show-LabQuotaPreflight -SourceHost $sourceHost -TargetLocation $Location -PlannedSizes $ForecastVmSizes
+    $quotaPreflight = Show-LabQuotaPreflight -SourceHost $sourceHost -TargetLocation $Location -PlannedSizes $ForecastVmSizes -Mapping $TargetVmSizes -MappingSupplied:($PSBoundParameters.ContainsKey('TargetVmSizes'))
     if (-not $quotaPreflight.NeedsAcknowledgement) { break }
     if ($AllowQuotaWarning) {
         Write-Warning 'Explicit -AllowQuotaWarning: NETWORK-ONLY landing zone may proceed; quota/SKU eligibility remains unresolved. No VM allocation is approved or guaranteed.'
@@ -1819,6 +2222,16 @@ Write-StepHeader -Step 5 -Title "Create Azure Migrate Project"
 $migrateProject = $null
 $projectLookupSucceeded = $false
 $rerunStep1Command = ".\migrate-step1-setup-project.ps1 -SourceResourceGroup '$SourceResourceGroup' -TargetResourceGroup '$TargetResourceGroup' -Location '$Location' -MigrateProjectName '$MigrateProjectName' -HyperVHostVMName '$HyperVHostVMName'"
+if ($customForecast) { $rerunStep1Command += ' -ForecastVmSizes ' + ((@($ForecastVmSizes | ForEach-Object { "'" + $_.Replace("'", "''") + "'" })) -join ',') }
+Show-LabTargetSizeSelection -Selection $quotaPreflight.Selection
+$replicationSizeArgument = ''
+if ($quotaPreflight.Selection.SelectionComplete) {
+    $replicationSizeArgument = ' -TargetVmSizes $targetVmSizes'
+    $rerunStep1Command += $replicationSizeArgument
+}
+$replicationProfileCommands = @(
+    ".\migrate-step3-replicate.ps1 -SourceResourceGroup '$SourceResourceGroup' -TargetResourceGroup '$TargetResourceGroup' -Location '$Location' -MigrateProjectName '$MigrateProjectName' -Workload All$replicationSizeArgument"
+)
 $projectCreationInstructions = @(
     "1. Azure portal > search for 'Azure Migrate' > Create project."
     "2. Subscription: the one you are signed in to here."
@@ -1918,6 +2331,12 @@ if ($migrateProject) {
     Write-Host "  [!] Migrate Project   : $MigrateProjectName `(could not verify; retry required`)" -ForegroundColor Yellow
 }
 Write-Host "  [i] Migration target  : $Location" -ForegroundColor Cyan
+Write-Host '  [i] Target sizing: live AutoCost guidance; no target VMs created or quota reserved.' -ForegroundColor Cyan
+if ($customForecast) { Write-Warning 'Custom ForecastVmSizes remains a nonbinding quota-only forecast; it does not change explicit target choices.' }
+Write-Host '  No target VMs created or quota reserved; capacity/SKU/quota failures remain possible.' -ForegroundColor Yellow
+Write-Host '  After verified Step 1 and Step 2, choose a replication path with the same explicit profile:' -ForegroundColor White
+foreach ($command in $replicationProfileCommands) { Write-Host "    $command" -ForegroundColor Cyan }
+Write-Host '  3a/3b also run test migration and source-shutdown cutover; review their warnings and prompts.' -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Source Environment (already deployed):" -ForegroundColor White
 Write-Host "  [i] Resource Group    : $SourceResourceGroup" -ForegroundColor Cyan

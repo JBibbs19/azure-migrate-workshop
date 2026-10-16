@@ -1,31 +1,23 @@
 ﻿<#
 .SYNOPSIS
-    Step 5: Execute the production migration cutover.
+    Step 5: Manual Hyper-V portal cutover handoff; no source shutdown or Azure actions run.
 
 .DESCRIPTION
-    This is the FINAL migration step. Source VMs will be shut down
-    and migrated VMs will take over in Azure.
+    This lab's four source VMs are Hyper-V. The retained migration implementation uses
+    VMwareCbt methods and is NOT a verified automation contract for these Hyper-V sources.
+    An unconditional safety boundary stops before Azure sign-in, replication lookups,
+    migration, source shutdown, completion or network/security changes.
 
-    ⚠️ WARNING: This will shut down the source VMs on the Hyper-V host.
-    Ensure you have completed test migration (Step 4) successfully.
+    The script prints the selected workload and required operator authorization, then exits
+    nonzero with ManualActionRequired. It does not claim migration or a module section complete.
+    Missing/unknown workload or environment metadata never permits automation. The legacy
+    body is retained below the boundary but is unreachable for every workload selection.
 
-    Cutover sequence:
-    1. Final delta replication sync
-    2. Source VM shutdown (optional but recommended)
-    3. Failover to Azure
-    4. Post-migration validation
-    5. Complete migration (stop replication)
-
-    VMs being migrated:
-      - OnPrem-Web       (Windows Server + IIS)
-      - OnPrem-SQL       (Windows Server + SQL Server Express)
-      - OnPrem-Linux-Web (Ubuntu + Nginx)
-      - OnPrem-Linux-App (Ubuntu + Tomcat order desk)
-
-    Prerequisites:
-      - Steps 1-4 completed (test migration passed, test resources cleaned up)
-      - Replication is in a healthy "Protected" state for all VMs
-      - Maintenance window approved (source VMs will be shut down)
+    Validate the documented portal test migration and cleanup, applications, dependencies,
+    healthy selected-source replication and approved maintenance window before cutover.
+    Only an authorized operator may explicitly start the selected Hyper-V migration in the
+    portal and choose source-shutdown behavior according to the approved cutover plan.
+    Running this script, or passing -TurnOffSourceVMs, is NOT cutover authorization.
 
 .PARAMETER SourceResourceGroup
     Resource group containing the Hyper-V host and on-prem VMs.
@@ -37,12 +29,12 @@
     Name of the Azure Migrate project.
 
 .PARAMETER Location
-    Uses the actual target VNet region, never RG metadata. Explicit mismatch stops before writes.
-    Azure region for resources. Prompted when not supplied (example: eastus).
+    Planning value only. Confirm the actual target region in the portal.
+    The safety boundary does not read, create or move Azure resources.
 
 .PARAMETER TurnOffSourceVMs
-    Whether to shut down source VMs before cutover. Prompted when not supplied (example: Yes).
-    Recommended to ensure no writes are lost during final sync.
+    Retained for compatibility only; it never shuts down a Hyper-V source in this script.
+    Neither Yes nor No bypasses the guard or constitutes portal cutover authorization.
 
 .EXAMPLE
     .\migrate-step5-cutover.ps1
@@ -50,15 +42,12 @@
 .EXAMPLE
     .\migrate-step5-cutover.ps1 -TurnOffSourceVMs "No"
 MODULE COVERAGE
-    The scripts and the modules are run separately. What this completes depends on -Workload:
-
-      -Workload Agentless   Module 2, section 9 (Cutover Planning and Execution).
-      -Workload AgentBased  Module 3, section 11 (Cutover for Stateful Workloads).
-      -Workload All         Both, in one pass. The default.
-
-    Not covered: Module 2 section 10 and Module 3 sections 11.5 to 11.8 - post-cutover
-    validation, connection strings, end-to-end checks. Those confirm the migration actually
-    worked and are the point of the exercise.
+    Manual guidance only, not automated completion:
+      -Workload Agentless: Module 2 section 9, portal cutover.
+      -Workload AgentBased: Module 3 section 11, portal cutover.
+      -Workload All: both selected groups, four Hyper-V VMs.
+    No module section is completed by this script. Use the SAME workload selection as Step 3.
+    Unknown/missing selection stops safely without choosing source VMs or contacting Azure.
 #>
 
 [CmdletBinding()]
@@ -855,6 +844,49 @@ trap {
     Wait-LabBeforeExit
     exit 1
 }
+
+function Get-LabHyperVManualHandoff {
+    param([AllowNull()][AllowEmptyString()][string]$Workload, [int]$Stage)
+    if ($Stage -notin @(4, 5)) { throw '[ManualActionRequired] Unknown migration stage; no automation is authorized.' }
+    $entry = if ($null -ne $Workload) { $Workload.Trim() } else { '' }
+    $normalized = switch ($entry) {
+        'All' { 'All' }
+        'Agentless' { 'Agentless' }
+        'AgentBased' { 'AgentBased' }
+        'Agent-based' { 'AgentBased' }
+        default { 'UnspecifiedOrInvalid' }
+    }
+    $groups = @{
+        All = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
+        Agentless = @('OnPrem-Web', 'OnPrem-Linux-Web')
+        AgentBased = @('OnPrem-SQL', 'OnPrem-Linux-App')
+        UnspecifiedOrInvalid = @()
+    }
+    $module2 = if ($Stage -eq 4) { 'Module 2 section 8 (portal test migration and cleanup)' } else { 'Module 2 section 9 (portal cutover)' }
+    $module3 = if ($Stage -eq 4) { 'Module 3 section 10 (portal test migration and cleanup)' } else { 'Module 3 section 11 (portal cutover)' }
+    $coverage = switch ($normalized) {
+        'All' { "$module2; $module3" }
+        'Agentless' { $module2 }
+        'AgentBased' { $module3 }
+        default { 'None selected: specify All, Agentless or AgentBased before taking portal actions.' }
+    }
+    return [pscustomobject]@{ Status = 'ManualActionRequired'; CanAutomate = $false; Workload = $normalized; VMNames = @($groups[$normalized]); ManualCoverage = $coverage }
+}
+
+# BEGIN HYPERV MANUAL HANDOFF GUARD
+$manualHandoff = Get-LabHyperVManualHandoff -Workload $Workload -Stage 5
+Write-Host '[ManualActionRequired] Hyper-V automation is blocked: no verified contract in this script.' -ForegroundColor Yellow
+Write-Host "  Selected workload: $($manualHandoff.Workload)" -ForegroundColor Cyan
+foreach ($name in $manualHandoff.VMNames) { Write-Host "    $name (Hyper-V source; confirm actual VM GUID and registered host in the portal)" -ForegroundColor Cyan }
+Write-Host "  Manual module coverage only: $($manualHandoff.ManualCoverage)" -ForegroundColor White
+Write-Host '  No Azure calls, migration jobs, network changes, guest commands or source shutdown were performed. No module section is claimed complete.' -ForegroundColor Yellow
+Write-Host '  Missing/unknown source, target, project or workload metadata never authorizes automation; independently validate the exact project and selected source identities in the portal.' -ForegroundColor Yellow
+Write-Host '  Use Azure portal > Azure Migrate > your project > Replicating machines (Hyper-V); never select by display name alone.' -ForegroundColor White
+Write-Host '  Before portal Migrate: verify successful selected-workload test migration and cleanup, application/data/dependency validation, healthy replication and an approved maintenance window.' -ForegroundColor White
+Write-Host '  An authorized operator must explicitly approve and start portal cutover for the exact selected Hyper-V sources, including the approved source-shutdown choice. No authorization is inferred from this script or -TurnOffSourceVMs.' -ForegroundColor Yellow
+Write-Host '  Supported Hyper-V procedure: https://learn.microsoft.com/azure/migrate/tutorial-migrate-hyper-v' -ForegroundColor White
+throw '[ManualActionRequired] Step 5 Hyper-V portal action is required; no automatic stage completion or source shutdown occurred.'
+# END HYPERV MANUAL HANDOFF GUARD
 
 $context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Migrate')
 
