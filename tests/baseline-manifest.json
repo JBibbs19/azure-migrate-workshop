@@ -4,7 +4,7 @@
     "CHANGES.md": {
       "status": "renamed",
       "baseline_sha256": "633322ccfe4077bae6a25826b541d7e8bbdb75f26d0edb8455c014009b5f372c",
-      "current_sha256": "05014385ae02c2eced5f46bc45b3a0e95facbb5a594106d1f5c822234c090551",
+      "current_sha256": "745c7dc05f696999c791f38dccbfe08fa78672d065a96cea772fadb5cc8cce70",
       "current_path": "VersionNotes.md"
     },
     "README.md": {
@@ -15,12 +15,12 @@
     "docs/Lab-Traffic.md": {
       "status": "changed",
       "baseline_sha256": "ba5fbb717b56036801a6df4ab7a69ae7cd97700749a9e7f2537a2122a7ff81a6",
-      "current_sha256": "9b47f906348be62f7421b84f2a0dbbdced466258aa2917503e96119897f80059"
+      "current_sha256": "c23d5bc3f3f280637223e40ca304b5ab7574d3529e8f5154cb5137bcc7c6cc9d"
     },
     "docs/Module-0-Setup.md": {
       "status": "changed",
       "baseline_sha256": "937048b5baf720035ac50e4af3cc5017e519ae33e78719844079b6563e7ead93",
-      "current_sha256": "e3833630ab70bcd94099d023d7c2ed2f8f07ddb9bb61cfc558667ac193e148af"
+      "current_sha256": "8e99e80e3209764ddf08d03f1e91145766f0187beb950cc5a0ae5745ab0e681f"
     },
     "docs/Module-1-Discovery.md": {
       "status": "changed",
@@ -56,7 +56,7 @@
     "scripts/check-lab-scripts.ps1": {
       "status": "changed",
       "baseline_sha256": "96121ebd7ae67c8d5d032d478e73f5b88a5dd5cf5f5534c49663cdc6ecac481c",
-      "current_sha256": "e5c3225785d0465e082fb68d933dce85d7f750db8853f4b998b6ad427a084701"
+      "current_sha256": "a5b8d4c376c8b638a38104a4cdff59e2443be90aefd2ac05454f74de5d39517b"
     },
     "scripts/cleanup-lab.ps1": {
       "status": "unchanged",
@@ -66,12 +66,12 @@
     "scripts/deploy-lab.ps1": {
       "status": "changed",
       "baseline_sha256": "64c6ef5486d8e2ff22c074e28462ebefebda341384b64080afd93573155b5b72",
-      "current_sha256": "12f4264d50e36d58257370fe413cb0522b07a7c5547392f909a80c9d256564ad"
+      "current_sha256": "8f71b7fd23fe7cd2706e719584f6243e07f82779c4bddd65a248edd715d7f02a"
     },
     "scripts/enable-lab-traffic.ps1": {
       "status": "changed",
       "baseline_sha256": "cc9542e73cce27cd33ecb07fa7ff2d2eed6d295fe6c0e2841feac9cd20325a19",
-      "current_sha256": "75faf4e10847ed058bbbde92a96e4cca0d3564231ebf22bd772554f3abbee148"
+      "current_sha256": "cec4c7de1bca25b8543bc6007ae35fd704204a9e496b95d17c8693cd4bdb5f21"
     },
     "scripts/health.ps1": {
       "status": "unchanged",
@@ -81,12 +81,12 @@
     "scripts/host/configure-host.ps1": {
       "status": "changed",
       "baseline_sha256": "02a85b27aa9a7b63d8883e5e0a834ce74709df6139905a738ec41df2f5dd80f1",
-      "current_sha256": "00226e52092e55d55c6dd2314a443a2df25f2334f5bf0c1e1e9848649d39da80"
+      "current_sha256": "889be7516e05977243a500bb7475ed366e78f6587b4b7f70dd6c56035c429cc4"
     },
     "scripts/migrate-step1-setup-project.ps1": {
       "status": "changed",
       "baseline_sha256": "07028ea73ca7ac425b89c9e0e9b7ceabbcd9ed61115d7969ef29d9142c4f3c93",
-      "current_sha256": "0639505613dd6dee0a73edb6cf912645d0608233d8f2c6fd239a42012d1dd65d"
+      "current_sha256": "04d93ac2adc1d5e808919fe9980da000862f0e6925dbf62e8e6bbd1aa683b383"
     },
     "scripts/migrate-step2-discover-assess.ps1": {
       "status": "changed",
@@ -164,8 +164,13 @@
     "apps/contoso-orderdesk/src/main/webapp/WEB-INF/web.xml",
     "apps/contoso-orderdesk/tests/static_checks.py",
     "docs/post-migration-labtraffic.md",
+    "scripts/cpu-simulation/control.ps1",
+    "scripts/cpu-simulation/linux-cpu.py",
+    "scripts/cpu-simulation/windows-cpu.ps1",
     "scripts/post-migration-labtraffic.ps1",
     "tests/baseline-manifest.json",
+    "tests/cpu-native-tests.ps1",
+    "tests/cpu_simulation_checks.py",
     "tests/integration_checks.py"
   ],
   "revision": "Ubuntu 24.04 / Tomcat 10.1 / Classic Azure VM assessment restored 2026-10-08",
@@ -176,7 +181,7 @@
   "previous_revision_files": {
     "CHANGES.md": {
       "previous_sha256": "b2d0b7d2b14d04b931ce5cfe106b9856c0fcc81ae0e14182fe6899210536dd9d",
-      "current_sha256": "05014385ae02c2eced5f46bc45b3a0e95facbb5a594106d1f5c822234c090551",
+      "current_sha256": "745c7dc05f696999c791f38dccbfe08fa78672d065a96cea772fadb5cc8cce70",
       "status": "renamed",
       "current_path": "VersionNotes.md"
     },
@@ -192,7 +197,7 @@
     },
     "STATIC-VALIDATION-REPORT.md": {
       "previous_sha256": "1eb75826d3961fe51c8d9ff60a5f8f9cbb41a07d6e59881b92c330b4782053e2",
-      "current_sha256": "5abd16b4690def5723fe77685488d1fe74c6afc7654ffadc676ab7eee296c9e6",
+      "current_sha256": "12dc24976ad68becd1fdc7dc0f9db9908314076288a6db2998cfb29fd5d9fd3c",
       "status": "changed"
     },
     "apps/contoso-orderdesk/CHANGES.md": {
@@ -362,12 +367,12 @@
     },
     "docs/Lab-Traffic.md": {
       "previous_sha256": "1528369087b35babab628fd1c5f003f9f5ef70d193ad8e7291e3c8f0381f6125",
-      "current_sha256": "9b47f906348be62f7421b84f2a0dbbdced466258aa2917503e96119897f80059",
+      "current_sha256": "c23d5bc3f3f280637223e40ca304b5ab7574d3529e8f5154cb5137bcc7c6cc9d",
       "status": "changed"
     },
     "docs/Module-0-Setup.md": {
       "previous_sha256": "189cffcd2d2dd79c46394b613ca86b5acf397da5aa5d48ce9fc3947d88cd2159",
-      "current_sha256": "e3833630ab70bcd94099d023d7c2ed2f8f07ddb9bb61cfc558667ac193e148af",
+      "current_sha256": "8e99e80e3209764ddf08d03f1e91145766f0187beb950cc5a0ae5745ab0e681f",
       "status": "changed"
     },
     "docs/Module-1-Discovery.md": {
@@ -397,7 +402,7 @@
     },
     "scripts/check-lab-scripts.ps1": {
       "previous_sha256": "927264dab1d741eb76096af9eff3e7fe5986952ba17c4d0f137dd8fb874ca3e7",
-      "current_sha256": "e5c3225785d0465e082fb68d933dce85d7f750db8853f4b998b6ad427a084701",
+      "current_sha256": "a5b8d4c376c8b638a38104a4cdff59e2443be90aefd2ac05454f74de5d39517b",
       "status": "changed"
     },
     "scripts/cleanup-lab.ps1": {
@@ -407,13 +412,13 @@
     },
     "scripts/deploy-lab.ps1": {
       "previous_sha256": "875fe6a2443fc8bc1929d3207b812cf3fd46262421648357b61239e56d2cee58",
-      "current_sha256": "12f4264d50e36d58257370fe413cb0522b07a7c5547392f909a80c9d256564ad",
+      "current_sha256": "8f71b7fd23fe7cd2706e719584f6243e07f82779c4bddd65a248edd715d7f02a",
       "status": "changed"
     },
     "scripts/enable-lab-traffic.ps1": {
       "previous_sha256": "75faf4e10847ed058bbbde92a96e4cca0d3564231ebf22bd772554f3abbee148",
-      "current_sha256": "75faf4e10847ed058bbbde92a96e4cca0d3564231ebf22bd772554f3abbee148",
-      "status": "unchanged"
+      "current_sha256": "cec4c7de1bca25b8543bc6007ae35fd704204a9e496b95d17c8693cd4bdb5f21",
+      "status": "changed"
     },
     "scripts/health.ps1": {
       "previous_sha256": "7a0bffa3e91b5e8646ebc7479dbcf61c503e190be98330a9b5a7f134358862ec",
@@ -422,12 +427,12 @@
     },
     "scripts/host/configure-host.ps1": {
       "previous_sha256": "50dd0fedfc501432193387f003b8d56ca2771217ccc6f2e899b83e49ba84e9fe",
-      "current_sha256": "00226e52092e55d55c6dd2314a443a2df25f2334f5bf0c1e1e9848649d39da80",
+      "current_sha256": "889be7516e05977243a500bb7475ed366e78f6587b4b7f70dd6c56035c429cc4",
       "status": "changed"
     },
     "scripts/migrate-step1-setup-project.ps1": {
       "previous_sha256": "c916a35e7e6c3709e67d1d7676a2f7a34c1a737f424e2f7de171a668facceaee",
-      "current_sha256": "0639505613dd6dee0a73edb6cf912645d0608233d8f2c6fd239a42012d1dd65d",
+      "current_sha256": "04d93ac2adc1d5e808919fe9980da000862f0e6925dbf62e8e6bbd1aa683b383",
       "status": "changed"
     },
     "scripts/migrate-step2-discover-assess.ps1": {
@@ -474,21 +479,46 @@
     },
     "tests/integration_checks.py": {
       "previous_sha256": "6ca549aa2c49b9244a2bd51a4067eaa27166aff4545d12a96e74d6584592c9c9",
-      "current_sha256": "7551b63a477965c38077a1fe49405a1f490a7ba77cdd7669781f0426ad979ab1",
+      "current_sha256": "0731bfaeebe0b6e5c48d4850c0fc6f93de1e9be9c503de13cbf0d327fe709c72",
       "status": "changed"
     },
     "docs/post-migration-labtraffic.md": {
       "previous_sha256": null,
-      "current_sha256": "3c7b93a1f06c2513c10fe6dfc707c058144e15a53dbf82207a1bb28df02c3a86",
+      "current_sha256": "618796931e1c4bd1f81831e0b09630e80f2befc81de1394b8fb5fe1f786808a9",
       "status": "changed"
     },
     "scripts/post-migration-labtraffic.ps1": {
       "previous_sha256": null,
-      "current_sha256": "dad264dccd09e8f109239c8e992b419f36e664ed4ab595bb9bdd3f7efbb88fa4",
+      "current_sha256": "abf43624ab2785529b5ba6522f6374f38e99fe6dd62d5339dd742dde5b695358",
+      "status": "changed"
+    },
+    "scripts/cpu-simulation/control.ps1": {
+      "previous_sha256": null,
+      "current_sha256": "240c7c118dfcadc5874f3787057a202cdc544e6e83322eb3abc9c40eca2bd5b0",
+      "status": "changed"
+    },
+    "scripts/cpu-simulation/linux-cpu.py": {
+      "previous_sha256": null,
+      "current_sha256": "0085dbc731cd02dce81118df14e67b4c196d2d7b6bcdfbf7629ec94b725b125f",
+      "status": "changed"
+    },
+    "scripts/cpu-simulation/windows-cpu.ps1": {
+      "previous_sha256": null,
+      "current_sha256": "82fe466dfc9924cf8935c8a398d29fa377d1fadef561ca7f82687c981755e10c",
+      "status": "changed"
+    },
+    "tests/cpu-native-tests.ps1": {
+      "previous_sha256": null,
+      "current_sha256": "05324a86bce2560038e73f1e669551cb266ed20cbaa8097fc087232099af8a55",
+      "status": "changed"
+    },
+    "tests/cpu_simulation_checks.py": {
+      "previous_sha256": null,
+      "current_sha256": "07c75986220e73c11b206d9f56b9761f5109f6a5b9f299770b59338028a70ca0",
       "status": "changed"
     }
   },
-  "integrity_metadata_note": "All 24 original baseline entries/hashes and historical previous/archive hashes are preserved. CHANGES.md maps to VersionNotes.md. Only the dated checker output and exactly two authorized retired Step 3a/3b wrappers are omitted, with preserved baseline hashes, explicit reasons and null current_sha256. Root SHA256SUMS covers 59 files; the manifest and root checksum file do not embed their own current hash.",
+  "integrity_metadata_note": "All 24 original baseline entries/hashes and historical previous/archive hashes remain preserved. CHANGES.md maps to VersionNotes.md. The dated checker output and two retired Step 3a/3b wrappers remain omitted with original hashes, reasons and null current_sha256. Root SHA256SUMS covers 64 current files and excludes only itself; the manifest and root checksum entries retain null current_sha256 to avoid self-reference. New CPU files have null previous_sha256, never invented historical hashes.",
   "modernization_lineage": {
     "revision": "Modern MachineAssessmentV2 server assessment / 2024-03-03-preview / Ubuntu only",
     "previous_file_count": 60,
@@ -1802,7 +1832,7 @@
       }
     }
   },
-  "previous_revision_inventory_note": "The comparison ledger covers current files; the 60 original previous-revision entries and hashes remain intact. Two later additions have null previous_sha256, not invented historical hashes.",
+  "previous_revision_inventory_note": "The live comparison ledger covers all 65 current files. The 60 original previous-revision entries/hashes, two historical omissions and original count remain intact. 7 later additions have null previous_sha256 rather than invented historical hashes.",
   "postmigration_traffic_lineage": {
     "revision": "Reviewed post-migration traffic controller / exact five NSG edges / 2026-10-13",
     "previous_archive": "azure-migrate-workshop-ubuntu2404.zip",
@@ -3719,5 +3749,101 @@
         "current_sha256": "e6a8d4c39d45149b78ea3ab9d387e3279c481d3480608c9375be407265dcdd1c"
       }
     }
+  },
+  "cpu_simulation_lineage": {
+    "revision": "Optional source-only Ubuntu guest CPU simulation 2026-10-16",
+    "previous_archive": "azure-migrate-workshop-ubuntu2404-step3-vault-update.zip",
+    "previous_archive_sha256": "0291e8a0435d3529e33aaf02455c3eca6d41b0c1df60c5554342520d82d45cd3",
+    "previous_file_count": 60,
+    "file_count": 65,
+    "modified_files": [
+      "SHA256SUMS",
+      "STATIC-VALIDATION-REPORT.md",
+      "VersionNotes.md",
+      "docs/Lab-Traffic.md",
+      "docs/Module-0-Setup.md",
+      "docs/post-migration-labtraffic.md",
+      "scripts/check-lab-scripts.ps1",
+      "scripts/deploy-lab.ps1",
+      "scripts/enable-lab-traffic.ps1",
+      "scripts/host/configure-host.ps1",
+      "scripts/migrate-step1-setup-project.ps1",
+      "scripts/post-migration-labtraffic.ps1",
+      "tests/baseline-manifest.json",
+      "tests/integration_checks.py"
+    ],
+    "added_files": [
+      "scripts/cpu-simulation/control.ps1",
+      "scripts/cpu-simulation/linux-cpu.py",
+      "scripts/cpu-simulation/windows-cpu.ps1",
+      "tests/cpu-native-tests.ps1",
+      "tests/cpu_simulation_checks.py"
+    ],
+    "deleted_files": [],
+    "code_freeze_utc": "2026-10-16T15:04:57Z",
+    "approved_code_sha256": {
+      "scripts/check-lab-scripts.ps1": "a5b8d4c376c8b638a38104a4cdff59e2443be90aefd2ac05454f74de5d39517b",
+      "scripts/deploy-lab.ps1": "8f71b7fd23fe7cd2706e719584f6243e07f82779c4bddd65a248edd715d7f02a",
+      "scripts/enable-lab-traffic.ps1": "cec4c7de1bca25b8543bc6007ae35fd704204a9e496b95d17c8693cd4bdb5f21",
+      "scripts/host/configure-host.ps1": "889be7516e05977243a500bb7475ed366e78f6587b4b7f70dd6c56035c429cc4",
+      "scripts/migrate-step1-setup-project.ps1": "04d93ac2adc1d5e808919fe9980da000862f0e6925dbf62e8e6bbd1aa683b383",
+      "scripts/post-migration-labtraffic.ps1": "abf43624ab2785529b5ba6522f6374f38e99fe6dd62d5339dd742dde5b695358",
+      "tests/integration_checks.py": "0731bfaeebe0b6e5c48d4850c0fc6f93de1e9be9c503de13cbf0d327fe709c72",
+      "scripts/cpu-simulation/control.ps1": "240c7c118dfcadc5874f3787057a202cdc544e6e83322eb3abc9c40eca2bd5b0",
+      "scripts/cpu-simulation/linux-cpu.py": "0085dbc731cd02dce81118df14e67b4c196d2d7b6bcdfbf7629ec94b725b125f",
+      "scripts/cpu-simulation/windows-cpu.ps1": "82fe466dfc9924cf8935c8a398d29fa377d1fadef561ca7f82687c981755e10c",
+      "tests/cpu-native-tests.ps1": "05324a86bce2560038e73f1e669551cb266ed20cbaa8097fc087232099af8a55",
+      "tests/cpu_simulation_checks.py": "07c75986220e73c11b206d9f56b9761f5109f6a5b9f299770b59338028a70ca0"
+    },
+    "approved_docs_sha256": {
+      "VersionNotes.md": "745c7dc05f696999c791f38dccbfe08fa78672d065a96cea772fadb5cc8cce70",
+      "docs/Lab-Traffic.md": "c23d5bc3f3f280637223e40ca304b5ab7574d3529e8f5154cb5137bcc7c6cc9d",
+      "docs/Module-0-Setup.md": "8e99e80e3209764ddf08d03f1e91145766f0187beb950cc5a0ae5745ab0e681f",
+      "docs/post-migration-labtraffic.md": "618796931e1c4bd1f81831e0b09630e80f2befc81de1394b8fb5fe1f786808a9"
+    },
+    "prior_primary_ledger_status_counts": {
+      "baseline_files": {
+        "changed": 18,
+        "omitted": 3,
+        "renamed": 1,
+        "unchanged": 2
+      },
+      "previous_revision_files": {
+        "changed": 41,
+        "omitted": 2,
+        "renamed": 1,
+        "unchanged": 18
+      }
+    },
+    "historical_ledgers_and_lineages_preserved": true,
+    "existing_integration_methods_retained": 16,
+    "executed_validation": {
+      "integration": 16,
+      "application": 14,
+      "cpu": 16,
+      "distinct_unittest_count": 46,
+      "skips": 0,
+      "separate_real_linux_subprocess_cases": 2,
+      "python_ast_files": 11,
+      "bash_syntax_files": 9,
+      "native_checker_groups_defined_not_executed": 205,
+      "native_cpu_test_script_executed": false
+    },
+    "native_powershell_executed": false,
+    "live_guest_deployment_executed": false,
+    "cloud_calls": 0,
+    "runtime_war_app_bytes_unchanged": true,
+    "modules_1_through_5_unchanged": true,
+    "cpu_source_only_opt_in": true,
+    "postmigration_cpu_start": false,
+    "profile": "06:00-22:00 UTC target15% total guest CPU; 22:00-06:00 target2%; 16h/8h; two-vCPU guests",
+    "capture_duration_hours": "Explicit bounded1-168; default24; no reboot auto-resume; explicit renewal",
+    "validation_limits": [
+      "No native PowerShell parser/checker/Windows worker/task scheduler execution",
+      "No installed systemd service or all-four-guest acceptance",
+      "No active-duty 15%/2% calibration or achieved-target utilization validation; bounded smoke remained baseline-rest/invalid-sample",
+      "No 24-hour capture or Azure performance-based assessment",
+      "No Azure/Hyper-V/SQL/JVM/Tomcat execution or package/runtime installation"
+    ]
   }
 }

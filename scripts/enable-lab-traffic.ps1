@@ -46,9 +46,22 @@ Fails before generator changes if Linux password/sudo access cannot be driven wi
 Emits LAB_TRAFFIC_FULLY_STARTED only when both generators and the proxy check are confirmed;
 otherwise reports LAB_TRAFFIC_PARTIAL_OR_FAILED or LAB_TRAFFIC_NOT_STARTED. Intended for the
 protected Step 1 host launcher, not direct workstation execution.
+.PARAMETER Mode
+Start (default), Check/Status (inventory), or Stop. Check is an alias for Status.
+.PARAMETER Component
+Network or Cpu or Both. Start defaults to Network; Check/Status/Stop and Disable default to
+Both. Explicit Component Network leaves CPU unchanged. Component Cpu starts CPU only.
+.PARAMETER CpuSimulation
+Prompt (interactive default), Start, or Skip. Independent opt-in after the network startup;
+NonInteractive Prompt skips CPU. CPU outcomes never replace the network startup result.
+.PARAMETER CpuDurationHours
+Guest-local CPU lifetime, default 24 hours, range 1-168; separate from network traffic.
+.PARAMETER RenewCpu
+Explicitly replace the existing CPU run/deadline. Without this switch Start is idempotent
+for a healthy active run and refuses to extend an expired/stopped/unresolved deadline.
 .PARAMETER Disable
-Stop and remove only the generators. Leaves Tomcat, its SQL login, the Nginx proxy,
-the firewall rules and the hosts entries in place.
+Alias for Stop, defaulting to Both network and CPU generators. Leaves Tomcat, its SQL login,
+the Nginx proxy, the firewall rules and the hosts entries in place.
 .EXAMPLE
 C:\AzMigrateLab\enable-lab-traffic.ps1
 .EXAMPLE
@@ -72,9 +85,27 @@ param(
     [string]$SettingsPath,
     [switch]$SkipLinux,
     [switch]$Disable,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [ValidateSet('Start','Check','Status','Stop')][string]$Mode = 'Start',
+    [ValidateSet('Network','Cpu','Both')][string]$Component = 'Network',
+    [ValidateSet('Prompt','Start','Skip')][string]$CpuSimulation = 'Prompt',
+    [ValidateRange(1,168)][int]$CpuDurationHours = 24,
+    [switch]$RenewCpu
 )
 $ErrorActionPreference = 'Stop'
+if ($Disable) { $Mode = 'Stop' }
+if ($Mode -eq 'Check') { $Mode = 'Status' }
+if ($Mode -ne 'Start' -and -not $PSBoundParameters.ContainsKey('Component')) { $Component = 'Both' }
+if ($NonInteractive -and $CpuSimulation -eq 'Prompt') { $CpuSimulation = 'Skip' }
+if ($Mode -eq 'Start' -and $Component -in @('Cpu','Both')) {
+    if ($PSBoundParameters.ContainsKey('CpuSimulation') -and $CpuSimulation -eq 'Skip') { throw 'Component Cpu/Both conflicts with CpuSimulation Skip.' }
+    $CpuSimulation = 'Start'
+}
+$cpuAssetsPath = Join-Path $PSScriptRoot 'cpu-simulation'
+foreach ($asset in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $cpuAssetsPath $asset))) { throw 'CPU assets missing. Refresh enable-lab-traffic.ps1 AND the cpu-simulation folder together.' }
+}
+. (Join-Path $cpuAssetsPath 'control.ps1')
 
 $labRoot     = 'C:\AzMigrateLab'
 $trafficRoot = Join-Path $labRoot 'Traffic'
@@ -109,7 +140,7 @@ function Get-LabSetting {
     if ($null -ne $settings -and $null -ne $settings.PSObject.Properties[$Name]) { return $settings.$Name }
     return $null
 }
-if ($NonInteractive -and ($SkipLinux -or $Disable -or $null -eq $settings)) {
+if ($NonInteractive -and ($SkipLinux -or $null -eq $settings)) {
     throw 'NonInteractive startup requires deployment settings and all guests; use the elevated host-interactive script for other modes.'
 }
 if (-not $LinuxUsername) {
@@ -368,7 +399,7 @@ function Invoke-LabLinuxPayload {
     }
     $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
     if ($NonInteractive -and (-not $ssh -or -not $script:LabAskpass)) { throw 'Noninteractive SSH is unavailable; no capability installation or interactive fallback is permitted.' }
-    if (-not $ssh) {
+    if (-not $ssh -and $Mode -eq 'Start') {
         Write-Step 'No SSH client found. Attempting to add the OpenSSH client capability.'
         try {
             Add-WindowsCapability -Online -Name 'OpenSSH.Client~~~~0.0.1.0' -ErrorAction Stop | Out-Null
@@ -441,7 +472,17 @@ try {
     }
     Assert-TrafficWorkloadPower
 
-    if ($Disable) {
+    if ($Mode -in @('Status','Stop')) {
+        if ($Component -in @('Cpu','Both')) { Invoke-LabCpuSimulation -Action $Mode }
+        if ($Component -eq 'Cpu') { return }
+        if ($Mode -eq 'Status') {
+            Invoke-Command -VMName 'OnPrem-Web' -Credential $credential -ScriptBlock {
+                Get-ScheduledTask -TaskName LabOrderDeskTraffic -ErrorAction SilentlyContinue | Select-Object TaskName,State
+            } | ForEach-Object { Write-Host ($_ | Out-String) }
+            $statusPayload = "set -e`nsystemctl show contoso-orderdesk-traffic.service --property=LoadState,ActiveState,UnitFileState`necho LAB_NETWORK_STATUS_CONFIRMED"
+            $null = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-App' -Address $labHosts['onprem-app'] -Payload $statusPayload -Marker 'LAB_NETWORK_STATUS_CONFIRMED'
+            return
+        }
         Write-Step 'Stopping optional traffic only; initial application dependencies are preserved.'
         Invoke-Command -VMName 'OnPrem-Web' -Credential $credential -ScriptBlock $removeWebGenerator |
             ForEach-Object { Write-Host "  $_" }
@@ -453,6 +494,18 @@ try {
             Write-Warning 'Windows traffic stopped; Linux traffic stop was not confirmed. Run the staged Linux command from its console. Primary application dependencies are unchanged.'
         }
         return
+    }
+
+    if ($Component -eq 'Cpu') { Invoke-RequestedCpuStart; return }
+    # Bare interactive use asks Network first; explicit Start/component and automation do not re-prompt.
+    if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Mode') -and
+        -not $PSBoundParameters.ContainsKey('Component')) {
+        $answer = Read-Host 'Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]'
+        if ($answer -notmatch '^(?i:y|yes)$') {
+            Write-Host 'Network traffic not initiated; existing network generators are unchanged.'
+            Invoke-RequestedCpuStart
+            return
+        }
     }
 
     Write-Step 'Adding hosts entries to the Windows guests.'
@@ -494,6 +547,8 @@ try {
     Write-Host 'Explicitly stop with C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable, or stop/remove VMs during teardown.'
     if ($appReady -and $nginxReady) { Write-Output 'LAB_TRAFFIC_FULLY_STARTED' }
     else { Write-Output 'LAB_TRAFFIC_PARTIAL_OR_FAILED' }
+    # CPU has its own outcome; a CPU failure never re-labels confirmed network startup.
+    Invoke-RequestedCpuStart
 } catch {
     if ($generatorChangesAttempted) { Write-Output 'LAB_TRAFFIC_PARTIAL_OR_FAILED' }
     else { Write-Output 'LAB_TRAFFIC_NOT_STARTED' }

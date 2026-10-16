@@ -403,6 +403,24 @@ overrides to mask subscription IDs, and a leftover one used to make `deploy-lab.
 
 <strong style="color: red;">Not to be included in final distribution.</strong>
 
+### Selective CPU and lab-traffic documentation merge (2026-10-16)
+
+Merged focused CPU/network guidance onto the current Word-edited Code Assessment
+Markdown baseline, retaining its manual steps, formatting, variable tables and prompt
+sections. Module 0 keeps Section 6 with independent optional network/CPU choices and
+manual observations; Module 1 only conditions the existing traffic pre-flight check.
+Modules 2–5 are unchanged. VM-size, region and quota guidance is untouched; target
+VM-size selection guidance remains deferred for separate review.
+
+The operator guides document the CPU feature implemented earlier in the separately
+delivered CPU-enabled package: local UTC day/night targets, bounded expiry, independent
+controls and inherited-worker inventory/disarm. This is a **documentation-only overlay**,
+not installation of that feature. No script, README, application or Tomcat changes are
+included. Educational capture timing and normal ongoing charges are distinguished from
+the required as-on-premises assessment. Native Windows/Hyper-V calibration and live
+four-guest acceptance have **not been newly validated**; this entry does not claim new
+live execution. Historical entries and numbered troubleshooting/open items are retained.
+
 ### Existing vault and provider checks; manual Hyper-V handoff retained (2026-10-15)
 
 Step 3 now reads existing vault provisioning and provider `CurrentConnection` through typed,

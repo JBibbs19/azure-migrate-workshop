@@ -129,6 +129,9 @@ function Test-LabMissingHelper {
         if ($leaf) { $companions += $leaf }
     }
     if ((Get-Content -LiteralPath $Path -Raw) -match 'LAB_HEALTH_HELPERS') { $companions += 'health.ps1' }
+    # The optional CPU helper and entrypoint intentionally share the protected transports.
+    if ((Split-Path -Leaf $Path) -eq 'enable-lab-traffic.ps1') { $companions += 'cpu-simulation/control.ps1' }
+    if ((Split-Path -Leaf $Path) -eq 'control.ps1' -and (Split-Path -Leaf $folder) -eq 'cpu-simulation') { $companions += '../enable-lab-traffic.ps1' }
 
     foreach ($companion in ($companions | Select-Object -Unique)) {
         $companionPath = Join-Path $folder $companion
@@ -1169,10 +1172,11 @@ function Invoke-LabOfflineRegression {
             Assert-Contains $step1 @('Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]')
         }
         $checks['readiness/supplied_input_safe_default_and_explicit_controls [contract]'] = {
-            Assert-Contains $step1 @("[ValidateSet('Prompt', 'Start', 'Skip')]", '[SecureString]$LabTrafficPassword', "`$script:LabTrafficExplicit = `$PSBoundParameters.ContainsKey('LabTraffic')", '-not $script:LabTrafficExplicit')
+            Assert-Contains $step1 @("[ValidateSet('Prompt', 'Start', 'Skip')]", '[SecureString]$LabTrafficPassword', "`$script:LabTrafficExplicit = `$PSBoundParameters.ContainsKey('LabTraffic')", "[ValidateSet('Prompt','Start','Skip')][string]`$CpuSimulation = 'Prompt'")
             $offer = Get-Section $step1 'function Invoke-LabTrafficOffer {' '# Target networking configuration'
-            Assert-Contains $offer @("`$LabTraffic -eq 'Skip'", "`$LabTraffic -eq 'Prompt' -and -not `$script:LabStep1Interactive", "if (`$LabTraffic -ne 'Start')")
-            Assert-Before $offer 'return' 'Read-Host'; Assert-Before $offer 'Read-Host' 'Start-LabTrafficOnSelectedHost'
+            Assert-Contains $offer @("`$LabTraffic -eq 'Skip'", "`$LabTraffic -eq 'Prompt' -and -not `$script:LabStep1Interactive", "elseif (`$LabTraffic -ne 'Start')", "elseif (`$script:LabStep1Interactive)", "if (-not `$networkStart -and `$cpuChoice -eq 'Skip') { return }")
+            Assert-Before $offer 'Would you like to initiate lab traffic' 'Would you like to turn on optional CPU Simulation'
+            Assert-Before $offer 'Read-Host' 'Start-LabTrafficOnSelectedHost'
             $offerAst = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-LabTrafficOffer' }, $true))[0]
             $conditions = @($offerAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] }, $true) |
                 ForEach-Object { $_.Clauses[0].Item1 } | Where-Object { $_.Extent.Text.Contains("`$LabTraffic -eq 'Skip'") })
@@ -1182,7 +1186,8 @@ function Invoke-LabOfflineRegression {
             $expression = $conditions[0].Extent.Text.Replace('$script:LabStep1Interactive', '$interactive').Replace('$script:LabTrafficExplicit', '$explicit')
             $skip = [scriptblock]::Create('param($LabTraffic, $interactive, $explicit) return (' + $expression + ')')
             Assert-Check (& $skip 'Prompt' $false $false)
-            Assert-Check (-not (& $skip 'Prompt' $false $true))
+            # Even explicitly supplied Prompt must never hang noninteractive automation.
+            Assert-Check (& $skip 'Prompt' $false $true)
             Assert-Check (-not (& $skip 'Start' $false $true))
             Assert-Check (& $skip 'Skip' $true $true)
         }
@@ -1210,7 +1215,7 @@ function Invoke-LabOfflineRegression {
             Assert-Contains $execution @('    Assert-TrafficWorkloadPower'); Assert-Contains $traffic @("`$task.State -ne 'Running'", 'if ($appReady -and $nginxReady)')
         }
         $checks['readiness/noninteractive_cannot_prompt_install_or_skip_linux [contract]'] = {
-            Assert-Contains $traffic @('$NonInteractive -and ($SkipLinux -or $Disable -or $null -eq $settings)', 'NonInteractive startup requires LinuxUsername', 'NonInteractive startup requires a supplied SecureString password', 'NonInteractive startup requires workload addresses', 'Noninteractive SSH is unavailable; no capability installation', 'sudo -n bash', 'NumberOfPasswordPrompts=1', 'ServerAliveCountMax=2', "SSH_ASKPASS_REQUIRE = 'force'")
+            Assert-Contains $traffic @('$NonInteractive -and ($SkipLinux -or $null -eq $settings)', 'NonInteractive startup requires LinuxUsername', 'NonInteractive startup requires a supplied SecureString password', 'NonInteractive startup requires workload addresses', 'Noninteractive SSH is unavailable; no capability installation', 'sudo -n bash', 'NumberOfPasswordPrompts=1', 'ServerAliveCountMax=2', "SSH_ASKPASS_REQUIRE = 'force'")
             Assert-Contains (Get-Section $traffic 'function Initialize-LabSshAskpass' 'function Invoke-LabLinuxPayload') @("`$ErrorActionPreference = 'Continue'", 'finally { $ErrorActionPreference = $versionPreference }', 'older than 8.4')
         }
         $checks['readiness/managed_provisioning_success_is_not_execution_success [condition fixtures + contract]'] = {
@@ -1219,7 +1224,7 @@ function Invoke-LabOfflineRegression {
                 ForEach-Object { $_.Clauses[0].Item1 } | Where-Object { $_.Extent.Text.Contains('[int]$view.ExitCode -eq 0') })
             Assert-Check ($conditions.Count -eq 1)
             Assert-Check (@($conditions[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -or $n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] }, $true)).Count -eq 0)
-            $predicate = [scriptblock]::Create('param($view) $state = [string]$view.ExecutionState; $outputText = [string]$view.Output; $errorText = [string]$view.Error; return (' + $conditions[0].Extent.Text + ')')
+            $predicate = [scriptblock]::Create('param($view, $successMarker = ''LAB_STEP1_TRAFFIC_FULLY_STARTED'') $state = [string]$view.ExecutionState; $outputText = [string]$view.Output; $errorText = [string]$view.Error; return (' + $conditions[0].Extent.Text + ')')
             $valid = [pscustomobject]@{ ExecutionState = 'Succeeded'; ExitCode = 0; Error = ''; Output = 'LAB_STEP1_TRAFFIC_FULLY_STARTED' }
             Assert-Check (& $predicate $valid); Assert-Check (-not (& $predicate ([pscustomobject]@{ ProvisioningState = 'Succeeded' })))
             foreach ($change in @(@{ ExecutionState = 'Running' }, @{ ExecutionState = 'Failed' }, @{ ExitCode = 1 }, @{ ExitCode = $null }, @{ Error = 'stderr' }, @{ Output = '' },

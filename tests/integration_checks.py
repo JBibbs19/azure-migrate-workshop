@@ -54,6 +54,9 @@ def composed_host():
     runtime = (APP / 'dist/runtime.zip').read_bytes()
     content = HOST.replace('# LAB_HEALTH_HELPERS', (ROOT / 'scripts/health.ps1').read_text(encoding='utf-8-sig'))
     content = content.replace('__LAB_TRAFFIC_PAYLOAD__', base64.b64encode(gzip.compress(TRAFFIC.encode(), mtime=0)).decode())
+    assets = {name: (ROOT / 'scripts/cpu-simulation' / name).read_text(encoding='utf-8-sig')
+              for name in ('control.ps1', 'windows-cpu.ps1', 'linux-cpu.py')}
+    content = content.replace('__LAB_CPU_ASSETS_PAYLOAD__', base64.b64encode(gzip.compress(json.dumps(assets).encode(), mtime=0)).decode())
     content = content.replace('__TOMCAT_RUNTIME_PAYLOAD__', base64.b64encode(runtime).decode())
     return content.replace('__TOMCAT_RUNTIME_SHA256__', hashlib.sha256(runtime).hexdigest())
 
@@ -67,7 +70,7 @@ class IntegrationChecks(unittest.TestCase):
         for value in ("'apps/contoso-orderdesk'", "'dist/runtime.zip'", 'Get-FileHash -LiteralPath $runtimePath', 'Parser]::ParseInput($content'):
             self.assertIn(value, DEPLOY)
         self.assertLess(DEPLOY.index('$hostScript = Read-LabHostConfiguration'), DEPLOY.index('Set-AzVMRunCommand -ResourceGroupName'))
-        for marker in ('# LAB_HEALTH_HELPERS', '__LAB_TRAFFIC_PAYLOAD__', '__TOMCAT_RUNTIME_PAYLOAD__', '__TOMCAT_RUNTIME_SHA256__'):
+        for marker in ('# LAB_HEALTH_HELPERS', '__LAB_TRAFFIC_PAYLOAD__', '__LAB_CPU_ASSETS_PAYLOAD__', '__TOMCAT_RUNTIME_PAYLOAD__', '__TOMCAT_RUNTIME_SHA256__'):
             self.assertEqual(HOST.count(marker), 1)
             self.assertNotIn(marker, composed_host())
         for value in ('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img',

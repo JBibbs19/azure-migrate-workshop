@@ -450,6 +450,19 @@ function Read-LabHostConfiguration {
     $null = [System.Management.Automation.Language.Parser]::ParseInput($traffic, [ref]$trafficTokens, [ref]$trafficErrors)
     if ($trafficErrors.Count) { throw 'The lab traffic script has syntax errors. Obtain the reviewed workshop revision.' }
     $content = $content.Replace('__LAB_TRAFFIC_PAYLOAD__', (Compress-LabScript $traffic))
+    if (([regex]::Matches($content, '__LAB_CPU_ASSETS_PAYLOAD__')).Count -ne 1) { throw 'CPU host payload marker incompatible.' }
+    $cpuAssets = [ordered]@{}
+    foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+        $asset = Get-Content -LiteralPath (Join-Path $scriptsRoot ('cpu-simulation/' + $name)) -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($asset)) { throw 'CPU asset missing or empty. Obtain the complete workshop checkout.' }
+        if ($name.EndsWith('.ps1')) {
+            $assetTokens = $null; $assetErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseInput($asset, [ref]$assetTokens, [ref]$assetErrors)
+            if ($assetErrors.Count) { throw 'CPU asset syntax errors. Obtain the reviewed workshop revision.' }
+        }
+        $cpuAssets[$name] = $asset
+    }
+    $content = $content.Replace('__LAB_CPU_ASSETS_PAYLOAD__', (Compress-LabScript ($cpuAssets | ConvertTo-Json -Compress)))
     $appRoot = Join-Path (Split-Path $scriptsRoot -Parent) 'apps/contoso-orderdesk'
     $runtimePath = Join-Path $appRoot 'dist/runtime.zip'
     $runtimeHashPath = Join-Path $appRoot 'dist/runtime.sha256'

@@ -7,6 +7,20 @@ Windows PowerShell 5.1+ controller, not a Cloud Shell, Hyper-V Direct, WinRM or 
 script. Existing generators may survive replication and already have inserted orders:
 **inventory first is not prevention of inherited traffic**.
 
+**Operator prerequisite:** Use `scripts/post-migration-labtraffic.ps1` from the separately
+delivered CPU-enabled Ubuntu 24.04 package, not an older checkout. This documentation-only
+overlay does not update the controller; an older script may lack CPU inventory/disarm.
+See the [source operator guide](Lab-Traffic.md) for CPU-enabled asset verification and
+existing-host refresh without redeployment or replication restart.
+
+Source CPU simulation is independent of network/order traffic, locally bounded and has
+no reboot auto-resume. Do not assume a copied worker is stopped merely because its
+deadline is bounded. Check/Status inventory inherited CPU workers on all four guests
+without changing them. Prepare/Start/Stop stop and disarm inherited CPU workers on the
+confirmed running guests; an unreachable or powered-off guest remains unverified.
+**Start here starts only bounded network traffic, never CPU simulation on test or
+migrated VMs.** These actions leave SQL, Tomcat, Nginx and IIS intact.
+
 ## Prerequisites and target confirmation
 
 - Existing Az.Accounts, Az.Resources, Az.Network and Az.Compute, including managed
@@ -26,7 +40,9 @@ script. Existing generators may survive replication and already have inserted or
 - Default names are `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`,
   `OnPrem-Linux-App`. Explicit `-TestMigration` selects only their `-test` counterparts;
   it never falls back to cutover VMs. **Isolate test copies from source networks before
-  their first boot**, including inherited application connections and generators.
+  their first boot**, including inherited application connections and generators. Stop
+  source CPU simulation before migration testing or cutover, not just because initial
+  replication begins; verify copied CPU workers are stopped/disarmed before testing.
 - Even Check/Status create/remove Azure Run Command resources and need execution/write
   permission, not Reader alone. Default Check/Status are read-only in the guests:
   first-inventory/validation summaries are console-only, with no guest log/ACL writes,
@@ -122,6 +138,15 @@ limits this run's messages. **Linux detail is not merged into Web's summary**, a
 Azure Monitor/DCR collector is added. Status reports native/inherited Windows tasks,
 both original/legacy Linux generators, the guest deadline timer/handler, and durable
 state/deadline (an expired flag can remain with a last-written running phase after a kill).
+
+The CPU observation reports `LabCpuSimulation` tasks on both Windows guests and
+`lab-cpu-simulation.service` on both Linux guests, including actual PID, heartbeat
+freshness/staleness, UTC phase, total target, measured total/baseline/worker CPU,
+guard/cooldown and expiry when state is available. A live service/task and fresh
+heartbeat do not prove the CPU target was achieved; a worker may be deliberately
+resting. After Prepare/Start/Stop, verify the CPU task/unit is disarmed and its worker
+PID is absent on every confirmed guest. Partial/unknown results require inspection,
+not an assumption that expiry or controller completion stopped all copied workers.
 
 ARM provisioning success is insufficient: every action needs Succeeded InstanceView,
 exit code zero and one matching compact JSON marker. Polls are bounded, writes are not

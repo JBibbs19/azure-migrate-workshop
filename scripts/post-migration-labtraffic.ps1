@@ -205,7 +205,52 @@ function Get-TaskObservation {
     if ([string]$task.State -notin @('Ready','Running','Disabled','Queued')) { throw 'Generator task state unknown' }
     return @{ exists=$true; state=[string]$task.State; enabled=[bool]$task.Settings.Enabled; startup=(@($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' }).Count -gt 0) }
 }
+function Get-InheritedCpuObservation {
+    $task=Get-TaskObservation 'LabCpuSimulation'
+    $state=$null; $stale=$true; $healthy=$false; $actualPid=$null
+    try {
+        $path='C:\LabCpuSimulation\state.json'
+        if ((Get-Item -LiteralPath $path).Length -gt 16384) { throw 'CPU state too large' }
+        $stored=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $state=@{}
+        foreach ($name in @('runId','pid','status','phase','heartbeatUtc','expiresUtc','targetTotalCpuPercent','targetWorkerCpuPercent','measuredTotalCpuPercent','measuredWorkerCpuPercent','baselineCpuPercent','baselineAboveGoal','guard','cooldownRemainingSeconds','reason')) { $state[$name]=$stored.$name }
+        $age=([DateTime]::UtcNow-[DateTime]::Parse($stored.heartbeatUtc).ToUniversalTime()).TotalSeconds
+        $stale=($age -lt 0 -or $age -gt 10)
+        $process=Get-Process -Id ([int]$stored.pid) -ErrorAction Stop
+        $identity=Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$stored.pid) -ErrorAction Stop
+        if ($process.ProcessName -eq 'powershell' -and $identity.CommandLine -match '(?i)C:\\LabCpuSimulation\\windows-cpu\.ps1.*-Mode Worker' -and $process.StartTime.ToUniversalTime().ToString('o') -eq $stored.processStartUtc) { $actualPid=[int]$stored.pid }
+        $cpuConfig=Get-Content 'C:\LabCpuSimulation\config.json' -Raw | ConvertFrom-Json
+        $healthy=($task.state -eq 'Running' -and $null -ne $actualPid -and -not $stale -and $stored.status -eq 'running' -and $stored.runId -eq $cpuConfig.runId -and [DateTime]::UtcNow -lt [DateTime]::Parse($cpuConfig.expiresUtc).ToUniversalTime())
+    } catch { $healthy=$false }
+    return @{task=$task;pid=$actualPid;healthy=$healthy;stale=$stale;state=$state}
+}
+function Stop-InheritedCpu {
+    $before=Get-InheritedCpuObservation
+    $tasks=@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'LabCpuSimulation' })
+    if ($tasks.Count -gt 1) { throw 'Ambiguous CPU task' }
+    if ($tasks.Count) {
+        if ([string]$tasks[0].State -in @('Running','Queued')) { $tasks[0] | Stop-ScheduledTask -ErrorAction Stop }
+        $tasks[0] | Disable-ScheduledTask -ErrorAction Stop | Out-Null
+        $tasks[0] | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
+    }
+    if ($null -ne $before.pid) {
+        $wait=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $remaining=Get-InheritedCpuObservation
+            if ($null -eq $remaining.pid) { break }
+            Start-Sleep -Milliseconds 200
+        } while ($wait.Elapsed.TotalSeconds -lt 15)
+        if ($null -ne $remaining.pid) { throw 'CPU process stop unverified' }
+    }
+    $cpuProcesses=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop | Where-Object {
+        $_.CommandLine -match '(?i)C:\\LabCpuSimulation\\windows-cpu\.ps1.*-Mode Worker'
+    })
+    if ((Get-TaskObservation 'LabCpuSimulation').exists -or $cpuProcesses.Count -gt 0) { throw 'CPU task/process disarm unverified' }
+    $path='C:\LabCpuSimulation\state.json'
+    if (Test-Path -LiteralPath $path) { @{status='stopped';targetWorkerCpuPercent=0;heartbeatUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json -Compress | Set-Content -LiteralPath $path -Encoding UTF8 }
+}
 function Stop-LabGenerators {
+    Stop-InheritedCpu
     foreach ($name in @('LabOrderDeskTraffic','LabPostMigrationExpiry')) {
         $tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq $name })
         if ($tasks.Count -gt 1) { throw 'Ambiguous generator task' }
@@ -314,7 +359,7 @@ function Get-GuestObservation {
     $services = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq $serviceName })
     $serviceStatus = if ($services.Count -eq 1) { [string]$services[0].Status } else { 'unavailable' }
     $port = if ($config.role -eq 'Web') { 80 } else { 1433 }
-    return @{ hostname=$hostname; fqdn=$fqdn; ownIPMatched=$ownIPMatched; aliases=$aliases; service=$serviceStatus; listeners=@{$port=(Test-Tcp '127.0.0.1' $port)}; generator=$task; expiry=$expiry; durableState=$state }
+    return @{ hostname=$hostname; fqdn=$fqdn; ownIPMatched=$ownIPMatched; aliases=$aliases; service=$serviceStatus; listeners=@{$port=(Test-Tcp '127.0.0.1' $port)}; generator=$task; expiry=$expiry; durableState=$state; cpu=(Get-InheritedCpuObservation) }
 }
 try {
     if ($config.action -eq 'Pause' -or $config.action -eq 'Stop') { Stop-LabGenerators }
@@ -583,7 +628,53 @@ def write_state(state, phase):
     (ROOT / 'state.json').write_text(json.dumps(state, separators=(',', ':')) + '\n')
 
 
+def cpu_observation():
+    unit = unit_observation('lab-cpu-simulation.service')
+    state, stale, healthy = None, True, False
+    pid = 0
+    try:
+        pid = int(command('systemctl', 'show', 'lab-cpu-simulation.service', '--property=MainPID', '--value') or '0') if unit['exists'] else 0
+        path = pathlib.Path('/var/lib/lab-cpu-simulation/state.json')
+        if path.stat().st_size > 16384:
+            raise ValueError('cpu_state_too_large')
+        stored = json.loads(path.read_text())
+        names = ('runId', 'pid', 'status', 'phase', 'heartbeatUtc', 'expiresUtc', 'targetTotalCpuPercent',
+                 'targetWorkerCpuPercent', 'measuredTotalCpuPercent', 'measuredWorkerCpuPercent',
+                 'baselineCpuPercent', 'baselineAboveGoal', 'guard', 'cooldownRemainingSeconds', 'reason')
+        state = {name: stored.get(name) for name in names}
+        import datetime
+        age = time.time() - datetime.datetime.fromisoformat(stored['heartbeatUtc']).timestamp()
+        stale = not 0 <= age <= 10
+        config = json.loads(pathlib.Path('/opt/lab-cpu-simulation/config.json').read_text())
+        identity = pathlib.Path('/proc/{}/stat'.format(pid)).read_text().split(') ', 1)[1].split()[19] if pid > 0 else None
+        healthy = (unit['active'] == 'active' and pid > 0 and pid == stored['pid'] and not stale and
+                   stored['status'] == 'running' and stored['runId'] == config['runId'] and time.time() < config['expiresEpoch'] and
+                   stored['bootId'] == pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip() and stored['processStart'] == identity)
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        pass
+    return dict(service=unit, pid=pid, healthy=healthy, stale=stale, state=state)
+
+
+def stop_inherited_cpu():
+    name = 'lab-cpu-simulation.service'
+    unit = unit_observation(name)
+    if unit['exists']:
+        if unit['enabled'] not in ('transient', 'disabled', 'masked', 'static', ''):
+            command('systemctl', 'disable', name)
+        command('systemctl', 'stop', name)
+        after = unit_observation(name)
+        if after['active'] not in ('inactive', 'failed') or after['enabled'] not in ('transient', 'disabled', 'masked', 'static', ''):
+            raise ValueError('cpu_stop_disarm_unverified')
+        pid = command('systemctl', 'show', name, '--property=MainPID', '--value', required=False)
+        if pid not in ('0', ''):
+            raise ValueError('cpu_process_stop_unverified')
+    path = pathlib.Path('/var/lib/lab-cpu-simulation/state.json')
+    if path.exists():
+        path.write_text(json.dumps(dict(status='stopped', targetWorkerCpuPercent=0, heartbeatUtc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))) + '\n')
+
+
 def pause_generators():
+    stop_inherited_cpu()
     timer = unit_observation(DEADLINE_TIMER)
     if timer['exists']:
         command('systemctl', 'disable', '--now', DEADLINE_TIMER)
@@ -632,7 +723,7 @@ def observation(config):
     return dict(hostname=socket.gethostname(), fqdn=actual_dns_fqdn(config['ownIP']),
                 ownIPMatched=ips.count(config['ownIP']) == 1, aliases=aliases_observation(config),
                 service=unit_observation(service)['active'], listeners={str(port): tcp('127.0.0.1', port) for port in ports},
-                generators=generators, expiry=dict(timer=unit_observation(DEADLINE_TIMER), handler=unit_observation(DEADLINE_SERVICE)), durableState=state)
+                generators=generators, expiry=dict(timer=unit_observation(DEADLINE_TIMER), handler=unit_observation(DEADLINE_SERVICE)), durableState=state, cpu=cpu_observation())
 
 
 def prepare(config):
@@ -1179,6 +1270,7 @@ function Show-GuestResult {
         Write-Host ('  generators (including legacy): ' + ($Result.observation.generators | ConvertTo-Json -Compress))
         Write-Host ('  expiry: ' + ($Result.observation.expiry | ConvertTo-Json -Depth 4 -Compress))
     }
+    Write-Host ('  CPU (source capture only; never auto-started here): ' + ($Result.observation.cpu | ConvertTo-Json -Depth 5 -Compress))
     Write-Host ('  durable state: ' + ($Result.observation.durableState | ConvertTo-Json -Compress))
     if (@($Result.checks.PSObject.Properties).Count) { Write-Host ('  checks: ' + ($Result.checks | ConvertTo-Json -Compress)) }
     if ($Result.sqlSnapshot) { Write-Host ('  SQL snapshot: ' + ($Result.sqlSnapshot | ConvertTo-Json -Compress)) }

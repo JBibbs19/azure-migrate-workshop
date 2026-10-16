@@ -147,15 +147,15 @@ Before you create the project, confirm that the environment you built in Module 
 
     If a workload is missing, resolve the incomplete Module 0 setup before proceeding.
 
-8.  Confirm the sample business traffic from Module 0, Section 6, is running: read the orders twice, a minute or two apart.
+8.  If you enabled optional network traffic in Module 0, Section 6, confirm it is running: read the orders twice, a minute or two apart.
 
     ```powershell
     Invoke-RestMethod http://192.168.0.13:3000/api/orders
     ```
 
-    If the number of orders does not increase, complete Module 0, Section 6, before continuing.
+    If you enabled network traffic and the number of orders does not increase, complete its checks in Module 0, Section 6, before continuing. If you declined it, skip this traffic check.
 
-**Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and the sample traffic is adding orders. No replication or cutover has started.
+**Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and any enabled optional network traffic is adding orders. No replication or cutover has started.
 
 ### 1.2 — Create the Project in the Portal
 

@@ -1,3 +1,72 @@
+# Optional Ubuntu CPU simulation — current release validation — 2026-10-16
+
+## Current revision supersedes historical scope/validation statements below
+
+Direct baseline: `azure-migrate-workshop-ubuntu2404-step3-vault-update.zip`, SHA256
+`0291e8a0435d3529e33aaf02455c3eca6d41b0c1df60c5554342520d82d45cd3`.
+The current checkout contains **65 files**, including **5 transparent additions**;
+no baseline path is removed. The prior release's exact-60-entry restriction is historical,
+not a restriction on these approved standalone CPU assets/tests. Changed/added paths and
+exact digests are recorded in current provenance and release-owned evidence.
+
+**Scope and safety:** separate optional network/CPU decisions; source-only guest-native
+CPU calculations on existing two-vCPU workload VMs. UTC targets are approximately15%
+total guest CPU from06:00–22:00 (16h),2% from22:00–06:00 (8h), not additional CPU
+on top of real work. Existing baseline above goal adds zero synthetic work. Workers have
+bounded expiry, no automatic reboot resume, heartbeat/identity checks and fail-closed
+telemetry/high-CPU controls. Postmigration Check/Status inventories inherited CPU;
+Prepare/Start/Stop disarm it rather than starting target CPU simulation. Source CPU
+collection is not replication readiness, real production load, guaranteed utilization,
+capacity/price guidance or a promise of changed assessment recommendations. Partial
+history may appear earlier; compare after a complete24h profile and selected history.
+The required AsOnPremises assessment does not use CPU history for utilization sizing.
+
+All app source/service/HTTP generator/WAR/runtime bytes are unchanged. No HTTP-generator
+relocation, NSG change, Step3 sizing/vault change, or Modules1–5 edit occurred. Module0
+contains only the approved small opt-in paragraph; cancelled table reformatting was not
+performed. Four approved documentation replacements are the only merged docs.
+
+**Actually executed for this revision:** full normal integration **16/16**, application
+**14/14**, CPU **16/16**, all zero skips/failures/errors on an exact private copy. The
+16 existing integration methods and all original assertions remain; only the new CPU
+asset marker is added to composition coverage. CPU tests include actual Linux procstat/
+worker execution, mocked lifecycle decisions and static PowerShell/source contracts.
+Additional release smoke runs the real Linux worker in two bounded subprocesses with
+real procstat telemetry: deadline expiry and SIGTERM stop, low-priority and test-only
+0.1% total target/0.2% single-core duty ceiling, no installed services. Its two-vCPU
+contract override on this shared Linux host is not all-four-VM runtime acceptance.
+Both modes stop and heartbeat state/PID/exit are verified. Actual shared-host baseline
+prevented synthetic busy work: these prove expiry/stop and baseline-rest/invalid-sample
+behavior, NOT active-duty15%/2%calibration or achieved target utilization. These two cases
+are reported separately, not inflated into the46 unittest count. Python AST parsed
+11 files; Bash `-n` checked9 standalone scripts; embedded Bash/Python
+syntax/composition is also covered by the suites. All205 native checker groups
+are **DEFINED, NOT EXECUTED**; `tests/cpu-native-tests.ps1` is **NOT EXECUTED**.
+A final complete integration run after this report/provenance/checksum refresh is
+required and recorded in private final-run evidence; repeated runs do not add tests.
+
+**Explicit validation gaps:** no native PowerShell parser/helper/checker/Windows worker,
+Scheduled Task behavior, installed systemd service, remote SSH/PowerShell/Hyper-V guest
+execution, source/deployment end-to-end acceptance,24h capture, Azure API/assessment,
+replication/test migration/cutover, Java/JSP compilation or SQL/Tomcat runtime test was
+performed. No packages/runtimes were installed. Python models/literal checks and the
+Linux subprocess smoke do not substitute for those unexecuted validations. Independent
+review and artifact delivery are separate parent-owned gates; no cloud/publish/upload
+operation is part of release packaging.
+
+**Integrity/provenance:** original24/prior60 historical counts, old hashes, lineage
+payloads, omission reasons, renamed CHANGES-to-VersionNotes mapping and old report bytes
+are retained. Only live primary-ledger current hashes/derived statuses, added-file coverage
+and live integrity notes are refreshed; genuinely new files have null previous hashes.
+A new CPU-specific lineage is appended without replacing history. Root `SHA256SUMS`
+covers all64 other current files. The manifest/root ledger self-current hashes remain
+null. Protected evidence covers300 old files/five trees and seven old archives, verified
+again at package time. Packaging requires sorted root-relative safe entries, fixed1980
+metadata, two byte-identical builds, CRC and exact every-entry byte/SHA256 parity plus
+local ZIP readback. This report does not claim independent review or delivery completion.
+
+---
+
 # Step 3 vault/provider read-only update — release validation — 2026-10-15
 
 ## Current revision: explicit-version inventory, not automatic replication

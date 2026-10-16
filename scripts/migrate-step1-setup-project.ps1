@@ -57,6 +57,13 @@
     Prompt (default) offers traffic only after a verified project and four Running workloads.
     Fully supplied environment inputs default to no traffic prompt; explicit Prompt requests it.
     Start explicitly opts in, Skip makes no generator changes. No option bypasses readiness.
+.PARAMETER CpuSimulation
+Prompt (default), Start, or Skip optional source-only CPU history capture. The independent
+CPU question follows the network question. Prompt skips in supplied-input automation;
+Start never implies a network Start. Host CPU results are reported separately.
+.PARAMETER CpuDurationHours
+Guest-local CPU lifetime, default 24 hours, range 1-168. A full 16-hour day / 8-hour night
+profile needs a complete 24-hour capture; earlier performance history can be partial.
 .PARAMETER LabTrafficPassword
     Optional SecureString deployment password for an explicitly opted-in launch. Otherwise
     privately prompted. Never pass plaintext credentials on command lines.
@@ -115,7 +122,11 @@ param(
 
     [ValidateSet('Prompt', 'Start', 'Skip')][string]$LabTraffic = 'Prompt',
 
-    [SecureString]$LabTrafficPassword
+    [SecureString]$LabTrafficPassword,
+
+    [ValidateSet('Prompt','Start','Skip')][string]$CpuSimulation = 'Prompt',
+
+    [ValidateRange(1,168)][int]$CpuDurationHours = 24
 )
 
 Set-StrictMode -Version Latest
@@ -1663,6 +1674,9 @@ function Test-LabMatchingLocalHost {
 }
 
 function Start-LabTrafficOnSelectedHost {
+    param([bool]$StartNetwork = $true,[ValidateSet('Start','Skip')][string]$CpuChoice = 'Skip')
+    $componentChoice = if ($StartNetwork) { 'Network' } else { 'Cpu' }
+    $successMarker = if ($StartNetwork) { 'LAB_STEP1_TRAFFIC_FULLY_STARTED' } else { 'LAB_STEP1_CPU_FULLY_STARTED' }
     $trafficPath = 'C:\AzMigrateLab\enable-lab-traffic.ps1'
     $manual = "Run $trafficPath in elevated PowerShell ON '$HyperVHostVMName' (not on a workstation)."
     $local = Test-LabMatchingLocalHost
@@ -1671,14 +1685,23 @@ function Start-LabTrafficOnSelectedHost {
         $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
             [Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $elevated -or -not (Test-Path -LiteralPath $trafficPath) -or
-            $null -eq $localCommand -or -not $localCommand.Parameters.ContainsKey('NonInteractive')) {
+            $null -eq $localCommand -or -not $localCommand.Parameters.ContainsKey('NonInteractive') -or
+            -not $localCommand.Parameters.ContainsKey('CpuSimulation') -or
+            -not (Test-Path 'C:\AzMigrateLab\cpu-simulation\control.ps1') -or
+            -not (Test-Path 'C:\AzMigrateLab\cpu-simulation\windows-cpu.ps1') -or
+            -not (Test-Path 'C:\AzMigrateLab\cpu-simulation\linux-cpu.py')) {
             Write-Warning "Traffic NOT initiated by this offer. Use the refreshed traffic script on the host. $manual"
             return
         }
         $password = $LabTrafficPassword
         if (-not $password) { $password = Read-Host 'Lab deployment password (private)' -AsSecureString }
         try {
-            $result = @(& $trafficPath -AdminPassword $password -ErrorAction Stop)
+            $result = @(& $trafficPath -AdminPassword $password -Component $componentChoice -CpuSimulation $CpuChoice -CpuDurationHours $CpuDurationHours -ErrorAction Stop)
+            if ($CpuChoice -eq 'Start') {
+                if (@($result | Where-Object { [string]$_ -ceq 'LAB_CPU_FULLY_STARTED' }).Count -eq 1) { Write-Host 'CPU Simulation fully started on all four source guests; guest-local expiry applies.' -ForegroundColor Green }
+                else { Write-Warning 'CPU Simulation startup is partial/unverified. Network outcome is independent; inspect CPU-only Status/Stop.' }
+            }
+            if (-not $StartNetwork) { return }
             if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -eq 1) {
                 Write-Host 'Lab traffic fully started on the selected host; background sample order creation remains enabled until explicitly stopped or VMs are stopped/removed.' -ForegroundColor Green
             } else {
@@ -1706,7 +1729,11 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
     $path = 'C:\AzMigrateLab\enable-lab-traffic.ps1'
-    if (-not (Test-Path -LiteralPath $path) -or -not (Get-Command $path).Parameters.ContainsKey('NonInteractive')) { throw 'Refresh the staged traffic script.' }
+    if (-not (Test-Path -LiteralPath $path) -or -not (Get-Command $path).Parameters.ContainsKey('NonInteractive') -or
+        -not (Get-Command $path).Parameters.ContainsKey('CpuSimulation')) { throw 'Refresh the staged traffic script.' }
+    foreach ($asset in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+        if (-not (Test-Path (Join-Path 'C:\AzMigrateLab\cpu-simulation' $asset))) { throw 'Refresh the staged CPU assets.' }
+    }
     $settings = Get-Content 'C:\AzMigrateLab\lab-traffic.settings.json' -Raw | ConvertFrom-Json
     if ($settings.LinuxUsername -notmatch '^[a-z][a-z0-9]{2,18}$') { throw 'Valid deployment settings are required.' }
     if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) { throw 'SSH must already be installed.' }
@@ -1737,14 +1764,24 @@ $WarningPreference = 'SilentlyContinue'
 $secure = $null
 try {
     $secure = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
-    $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -ErrorAction Stop 6>$null)
-    if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -ne 1) { throw 'Full startup not confirmed.' }
-    Write-Output 'LAB_STEP1_TRAFFIC_FULLY_STARTED'
+    $startNetwork = __START_NETWORK__
+    $cpuChoice = '__CPU_CHOICE__'
+    $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -Component '__COMPONENT__' -CpuSimulation $cpuChoice -CpuDurationHours __CPU_HOURS__ -ErrorAction Stop 6>$null)
+    if ($cpuChoice -eq 'Start') {
+        if (@($result | Where-Object { [string]$_ -ceq 'LAB_CPU_FULLY_STARTED' }).Count -eq 1) { Write-Output 'LAB_STEP1_CPU_FULLY_STARTED' }
+        else { Write-Output 'LAB_STEP1_CPU_PARTIAL_OR_FAILED' }
+    }
+    if ($startNetwork) {
+        if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -ne 1) { throw 'Full startup not confirmed.' }
+        Write-Output 'LAB_STEP1_TRAFFIC_FULLY_STARTED'
+    }
 } catch {
     Write-Output 'LAB_STEP1_TRAFFIC_PARTIAL_OR_FAILED'
     exit 1
 } finally { $AdminPassword = $null; $secure = $null; $result = $null }
 '@
+    $networkLiteral = if ($StartNetwork) { '$true' } else { '$false' }
+    $payload = $payload.Replace('__START_NETWORK__',$networkLiteral).Replace('__CPU_CHOICE__',$CpuChoice).Replace('__COMPONENT__',$componentChoice).Replace('__CPU_HOURS__',[string]$CpuDurationHours)
     if ($payload -match '[^\x00-\x7F]') { throw 'Traffic host payload must be ASCII.' }
     $password = $LabTrafficPassword
     if (-not $password) { $password = Read-Host 'Lab deployment password (private)' -AsSecureString }
@@ -1781,9 +1818,13 @@ try {
                     if ($state -eq 'Succeeded' -and $null -ne $view.PSObject.Properties['ExitCode'] -and
                         $null -ne $view.ExitCode -and [int]$view.ExitCode -eq 0 -and
                         [string]::IsNullOrWhiteSpace($errorText) -and
-                        ([regex]::Matches($outputText, '(?m)^LAB_STEP1_TRAFFIC_FULLY_STARTED\r?$')).Count -eq 1 -and
+                        ([regex]::Matches($outputText, '(?m)^' + [regex]::Escape($successMarker) + '\r?$')).Count -eq 1 -and
                         $outputText -notmatch 'LAB_STEP1_TRAFFIC_PARTIAL_OR_FAILED') {
-                        Write-Host 'Lab traffic fully started on the selected host; background sample order creation remains enabled until explicitly stopped or VMs are stopped/removed.' -ForegroundColor Green
+                        if ($StartNetwork) { Write-Host 'Lab traffic fully started on the selected host; background sample order creation remains enabled until explicitly stopped or VMs are stopped/removed.' -ForegroundColor Green }
+                        if ($CpuChoice -eq 'Start') {
+                            if (([regex]::Matches($outputText, '(?m)^LAB_STEP1_CPU_FULLY_STARTED\r?$')).Count -eq 1 -and $outputText -notmatch 'LAB_STEP1_CPU_PARTIAL_OR_FAILED') { Write-Host 'CPU Simulation fully started on all four source guests; guest-local expiry applies.' -ForegroundColor Green }
+                            else { Write-Warning 'CPU Simulation startup is partial/unverified. Network outcome is independent; inspect CPU-only Status/Stop.' }
+                        }
                     } else {
                         Write-Warning "Full traffic startup was NOT confirmed; generators may be partially running. Inspect/stop them ON '$HyperVHostVMName'. Do not retry blindly."
                     }
@@ -1819,20 +1860,30 @@ function Invoke-LabTrafficOffer {
     Write-Host 'Keep them running through the lab only if wanted. There is NO automatic lab-completed detector or stop timer.' -ForegroundColor Yellow
     Write-Host 'Completing the lab/script alone does not stop traffic; explicitly stop it, or stop/remove VMs as part of teardown.' -ForegroundColor Yellow
     Write-Host "Stop ON '$HyperVHostVMName' in elevated PowerShell: C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable (prompts for the lab password)." -ForegroundColor White
-    if ($LabTraffic -eq 'Skip' -or ($LabTraffic -eq 'Prompt' -and -not $script:LabStep1Interactive -and
-        -not $script:LabTrafficExplicit)) {
+    $networkStart = ($LabTraffic -eq 'Start')
+    if ($LabTraffic -eq 'Skip' -or ($LabTraffic -eq 'Prompt' -and -not $script:LabStep1Interactive)) {
         Write-Host 'Traffic not initiated (Skip or supplied-input automation default). Existing generators, if any, are unchanged.' -ForegroundColor Gray
-        return
-    }
-    if ($LabTraffic -ne 'Start') {
+    } elseif ($LabTraffic -ne 'Start') {
         $answer = Read-Host 'Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]'
         if ($answer -notmatch '^(?i:y|yes)$') {
             Write-Host 'Traffic not initiated by this offer; no generator changes were made. Existing generators, if any, are unchanged.' -ForegroundColor Gray
-            return
+        } else { $networkStart = $true }
+    }
+    $cpuChoice = 'Skip'
+    if ($CpuSimulation -ne 'Skip') {
+        Write-Host 'Optional CPU Simulation: a 16-hour day / 8-hour night UTC profile, no peaks; approximately 15% total guest CPU by day and 2% by night. Application CPU reduces the worker; high/invalid CPU readings make it rest.' -ForegroundColor Yellow
+        Write-Host 'No additional VM, VM size or paid service is created. CPU activity on existing fixed-price VMs has no separate charge; extending uptime for capture continues normal lab charges.'
+        Write-Host 'Allow a complete 24-hour capture for the full day/night profile (or the longer selected history), then use/recalculate a performance-based portal assessment. Earlier data can be partial; no recommendation change is guaranteed. Step 2 AsOnPremises does not use CPU history.'
+        Write-Host "CPU duration: $CpuDurationHours hours (default 24, range 1-168). No reboot auto-resume; CPU expiry is independent of network traffic."
+        if ($CpuSimulation -eq 'Start') { $cpuChoice = 'Start' }
+        elseif ($script:LabStep1Interactive) {
+            $answer = Read-Host 'Would you like to turn on optional CPU Simulation? [y/N]'
+            if ($answer -match '^(?i:y|yes)$') { $cpuChoice = 'Start' }
         }
     }
+    if (-not $networkStart -and $cpuChoice -eq 'Skip') { return }
     $null = Assert-LabWorkloadPower -Stage 'Before requested traffic startup'
-    Start-LabTrafficOnSelectedHost
+    Start-LabTrafficOnSelectedHost -StartNetwork $networkStart -CpuChoice $cpuChoice
 }
 
 # Target networking configuration

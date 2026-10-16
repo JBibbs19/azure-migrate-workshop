@@ -1333,6 +1333,18 @@ $payloadReader = [IO.StreamReader]::new($decompressor, [Text.UTF8Encoding]::new(
 try { $trafficScript = $payloadReader.ReadToEnd() } finally { $payloadReader.Dispose() }
 if ([string]::IsNullOrWhiteSpace($trafficScript)) { throw 'The staged lab traffic script decoded empty.' }
 [IO.File]::WriteAllText($trafficScriptPath, $trafficScript, [Text.UTF8Encoding]::new($false))
+$cpuAssetPayload = '__LAB_CPU_ASSETS_PAYLOAD__'
+$cpuStream = [IO.MemoryStream]::new([Convert]::FromBase64String($cpuAssetPayload))
+$cpuGzip = [IO.Compression.GzipStream]::new($cpuStream, [IO.Compression.CompressionMode]::Decompress)
+$cpuReader = [IO.StreamReader]::new($cpuGzip, [Text.UTF8Encoding]::new($false))
+try { $cpuAssets = $cpuReader.ReadToEnd() | ConvertFrom-Json } finally { $cpuReader.Dispose() }
+$cpuAssetRoot = Join-Path $labRoot 'cpu-simulation'
+New-Item -ItemType Directory -Path $cpuAssetRoot -Force | Out-Null
+foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+    $asset = $cpuAssets.PSObject.Properties[$name]
+    if ($null -eq $asset -or [string]::IsNullOrWhiteSpace([string]$asset.Value)) { throw 'CPU asset decoded empty.' }
+    [IO.File]::WriteAllText((Join-Path $cpuAssetRoot $name), [string]$asset.Value, [Text.UTF8Encoding]::new($false))
+}
 # Deployment knows the lab user and the guest addresses; record them so the script can be
 # run on this host with no arguments beyond the lab password.
 [ordered]@{

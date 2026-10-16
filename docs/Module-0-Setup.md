@@ -593,11 +593,18 @@ Only if a check fails, read the recent setup entries and identify the failed wor
 
 ## 6. Start the Sample Business Traffic
 
+Network sample traffic and CPU simulation are **independent, optional choices**. The
+learning objective is to distinguish application dependencies from CPU utilization:
+network activity can make connections easier to observe, while local CPU calculations
+add no network dependency. You may decline either or both and continue the workshop.
+Feature availability, installation and control are covered in the
+[operator guide](Lab-Traffic.md); applying documentation alone does not install CPU support.
+
 Initial deployment already connects the Tomcat order desk to SQL and supplies the Nginx proxy. Without traffic, most HTTP connections between the workloads are idle, and Azure Migrate's dependency analysis can miss them; an empty or partial map is not proof that no dependency exists.
 
 The traffic script generates low-rate HTTP through Nginx into Tomcat and adds a scheduled task on `OnPrem-Web` that reads orders from SQL and calls the order desk's health check. Database reads and writes for the Linux application stay in the Tomcat application itself; the generator never connects directly to SQL. `OnPrem-SQL` then appears as a shared dependency of both application tiers — which is the conversation a customer needs to have before moving anything.
 
-Run it after the checks in Section 5 pass and before you begin Module 1, so traffic is already flowing when discovery starts. Dependency analysis samples active connections on a polling interval rather than recording continuously, so traffic that starts minutes before you open the map may not appear in it.
+If you choose either optional component, use the startup steps below after the checks in Section 5 pass and before you begin Module 1. With network traffic enabled, requests can be flowing when discovery starts. Dependency analysis samples active connections on a polling interval rather than recording continuously, so traffic that starts minutes before you open the map may not appear in it.
 
 #### Hands-On Steps
 
@@ -613,26 +620,50 @@ Run it after the checks in Section 5 pass and before you begin Module 1, so traf
 
     The lab username and guest addresses come from `C:\AzMigrateLab\lab-traffic.settings.json`, which deployment wrote alongside the script, so no other values are needed.
 
+    Choose network traffic first, then CPU simulation separately; **No/Enter** is the
+    default for each. Declining network traffic still allows the CPU choice. Declining
+    either leaves any previously enabled instance unchanged; it is not a stop action.
+
 3.  Wait for the script to finish and list the traffic it started.
 
-    It configures the Windows guests through PowerShell Direct and the two Linux guests over SSH, using the deployed Linux username and the same lab password.
+    For an enabled component, it configures the Windows guests through PowerShell Direct and the two Linux guests over SSH, using the deployed Linux username and the same lab password.
 
-4.  Read the current order list through the proxy and note the number of orders.
+4.  If you chose network traffic, read the current order list through the proxy and note the number of orders.
 
     ```powershell
     Invoke-RestMethod http://192.168.0.12:8080/api/ready
     Invoke-RestMethod http://192.168.0.13:3000/api/orders
     ```
 
-5.  Wait a minute or two, then run the orders request again.
+5.  If you chose network traffic, wait a minute or two, then run the orders request again.
 
     ```powershell
     Invoke-RestMethod http://192.168.0.13:3000/api/orders
     ```
 
-**Expected Result:** The proxy returns `ready`, and the number of orders increases between checks. The traffic keeps running in the background, including after a restart, until you stop it.
+**Expected Result:** If network traffic was enabled, the proxy returns `ready`, and the number of orders increases between checks. Network traffic keeps running in the background, including after a restart, until you stop it. Declining it does not block Module 1.
 
-> **Stopping the traffic:** The generator has no automatic stop. When you finish the lab, or before maintenance, run `C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable` on HyperVHost. This stops only the generators; the application, SQL login and proxy remain in place.
+> **Stopping the traffic:** The network generator has no automatic stop. When you finish the lab, or before maintenance, run `C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable` on HyperVHost. This stops both optional network and CPU generators; the application, SQL login and proxy remain in place.
+
+**Optional CPU observation:** In each Windows guest, open **Task Manager > Performance >
+CPU**. In each Linux guest, use `top` and inspect the aggregate CPU summary, not an
+individual process percentage. Observe over several minutes and note UTC time.
+Across each existing two-vCPU guest, the approximate **total** CPU targets are **15%
+from 06:00–22:00 UTC** (16 hours) and **2% from 22:00–06:00 UTC** (8 hours), with no
+peak period. Existing application/OS activity can exceed these targets: synthetic work
+then rests and cannot cap real application CPU.
+
+CPU simulation defaults to a bounded 24-hour run and does not resume after reboot,
+unlike the network generator. For the full 16/8-hour profile, collect a complete
+24 hours while appliance performance collection is active, and match the full selected
+history window to captured data for the [optional second performance-based portal
+assessment in Module 1](Module-1-Discovery.md#56--optional-performance-comparison-and-business-case).
+Earlier data may be partial; the required **As on-premises** assessment does not use CPU
+history. This is educational CPU history, not a production benchmark or RAM/I/O simulation.
+
+No additional VM, resizing or paid service is created. CPU activity on the existing
+fixed-price VM has no separate usage fee, but keeping the lab running longer continues
+normal compute/storage charges.
 
 ---
 
