@@ -1,0 +1,21 @@
+[Unit]
+Description=Optional HTTP traffic via Nginx to Contoso Order Desk
+After=network-online.target contoso-orderdesk.service
+Wants=network-online.target
+Requires=contoso-orderdesk.service
+
+[Service]
+Type=simple
+DynamicUser=true
+ExecStart=/usr/bin/python3 /opt/contoso-orderdesk/scripts/traffic.py
+Restart=on-failure
+RestartSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=64M
+TasksMax=20
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

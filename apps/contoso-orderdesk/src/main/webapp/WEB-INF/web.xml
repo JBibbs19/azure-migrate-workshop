@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee https://jakarta.ee/xml/ns/jakartaee/web-app_6_0.xsd"
+         version="6.0" metadata-complete="true">
+  <display-name>Contoso Order Desk</display-name>
+  <description>TD SYNNEX lab Java/Tomcat order application using the existing ContosoApp database.</description>
+  <servlet>
+    <servlet-name>OrderDesk</servlet-name>
+    <jsp-file>/WEB-INF/views/controller.jsp</jsp-file>
+  </servlet>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/</url-pattern></servlet-mapping>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/health</url-pattern></servlet-mapping>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/info</url-pattern></servlet-mapping>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/ready</url-pattern></servlet-mapping>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/orders</url-pattern></servlet-mapping>
+  <resource-ref>
+    <res-ref-name>jdbc/ContosoApp</res-ref-name>
+    <res-type>javax.sql.DataSource</res-type>
+    <res-auth>Container</res-auth>
+  </resource-ref>
+  <error-page><error-code>404</error-code><location>/WEB-INF/views/notfound.jsp</location></error-page>
+  <error-page><error-code>500</error-code><location>/WEB-INF/views/error.jsp</location></error-page>
+  <error-page><exception-type>java.lang.Throwable</exception-type><location>/WEB-INF/views/error.jsp</location></error-page>
+</web-app>
