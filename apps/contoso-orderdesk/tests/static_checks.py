@@ -32,7 +32,6 @@ def load(name):
 
 hosts = load('hosts')
 configure = load('configure')
-snapshot = load('snapshot')
 driver = load('driver_check')
 traffic = load('traffic')
 
@@ -170,21 +169,16 @@ class PackageChecks(unittest.TestCase):
         self.assertIn('MemoryMax=900M', service)
         self.assertIn('User=contoso-orderdesk', service)
         self.assertNotIn('User=root', service)
-        self.assertIn('CATALINA_HOME=/usr/share/tomcat10', service)
+        self.assertIn('CATALINA_HOME=/opt/tomcat', service)
+        self.assertIn('CATALINA_BASE=/opt/tomcat', service)
+        self.assertIn('ExecStart=/opt/tomcat/bin/catalina.sh run', service)
         self.assertIn('JAVA_HOME=__JAVA_HOME__', service)
-        for name in ('install-fresh.sh', 'install.sh'):
-            installer = (ROOT / 'scripts' / name).read_text()
-            for value in ('VERSION_ID == 24.04', 'require_tomcat101', '/etc/tomcat10/web.xml',
-                          '/usr/share/tomcat10/bin/catalina.sh', 'java-17-openjdk-'):
-                self.assertIn(value, installer)
-            self.assertNotIn('tomcat9', installer)
-        common = (ROOT / 'scripts/common.sh').read_text()
-        self.assertIn('version == 10.1.*', common)
-        for version, expected in (('10.1.55-1~24.04.1', 0), ('10.0.27', 1), ('9.0.100', 1), ('11.0.0', 1)):
-            command = 'source "$1"; dpkg-query() { printf "%s" "$FIXTURE_VERSION"; }; require_tomcat101'
-            result = subprocess.run(['bash', '-c', command, 'fixture', str(ROOT / 'scripts/common.sh')],
-                                    env={**os.environ, 'FIXTURE_VERSION': version}, capture_output=True, text=True)
-            self.assertEqual(result.returncode, expected, result.stderr)
+        installer = (ROOT / 'scripts/install-fresh.sh').read_text()
+        for value in ('VERSION_ID == 24.04', 'require_tomcat101', 'tomcat_dist.py', 'java-17-openjdk-'):
+            self.assertIn(value, installer)
+        for obsolete in ('tomcat9', '/etc/tomcat10', '/usr/share/tomcat10', 'home-conf', 'systemctl disable'):
+            self.assertNotIn(obsolete, installer)
+        self.assertEqual(configure.BASE, Path('/opt/tomcat'))
 
     def test_bounded_hosts_update(self):
         text = '127.0.0.1 localhost\n192.168.0.11 onprem-sql keep-this # note\n192.168.0.10 onprem-web\n# original\n'
@@ -202,61 +196,6 @@ class PackageChecks(unittest.TestCase):
             hosts.replace_hosts(hosts.START + '\n', ips)
         with self.assertRaises(ValueError):
             hosts.replace_hosts(hosts.END + '\n' + hosts.START + '\n', ips)
-
-    def test_snapshot_does_not_reset_and_restores_metadata(self):
-        original = WORK / 'old-traffic.env'
-        original.write_text('fictional fixture only\n')
-        original.chmod(0o600)
-        original_mode = stat.S_IMODE(original.stat().st_mode)
-        absent = WORK / 'absent.service'
-        folder = WORK / 'snapshot'
-        with mock.patch.object(snapshot, 'APP_PATHS', (str(original), str(absent))), \
-             mock.patch.object(snapshot, 'APP_SERVICES', ('fixture.service',)), \
-             mock.patch.object(snapshot, 'state', side_effect=lambda u, operation: 'enabled' if operation == 'is-enabled' else 'active'):
-            snapshot.save(folder)
-            saved = (folder / 'manifest.json').read_bytes()
-            original.write_text('changed after snapshot\n')
-            absent.write_text('new owned service\n')
-            snapshot.save(folder)
-            self.assertEqual((folder / 'manifest.json').read_bytes(), saved)
-            with mock.patch.object(snapshot.os, 'chmod') as chmod:
-                snapshot.restore_files(folder)
-            chmod.assert_called_once_with(original, original_mode)
-        self.assertEqual(original.read_text(), 'fictional fixture only\n')
-        self.assertFalse(absent.exists())
-        self.assertIn('os.chmod(folder, 0o700)', (ROOT / 'scripts/snapshot.py').read_text())
-        incomplete = WORK / 'incomplete'
-        incomplete.mkdir()
-        with self.assertRaises(RuntimeError):
-            snapshot.save(incomplete)
-
-    def test_service_state_restoration_model(self):
-        folder = WORK / 'service-model'
-        folder.mkdir()
-        desired = [
-            {'unit': 'enabled.service', 'enabled': 'enabled', 'active': 'active'},
-            {'unit': 'disabled.service', 'enabled': 'disabled', 'active': 'inactive'},
-            {'unit': 'masked.service', 'enabled': 'masked', 'active': 'inactive'},
-            {'unit': 'new-stock.service', 'enabled': 'not-found', 'active': 'inactive'},
-        ]
-        (folder / 'manifest.json').write_text(json.dumps({'services': desired}))
-        current = {row['unit']: {'is-enabled': 'enabled', 'is-active': 'active'} for row in desired}
-        def query(unit, operation):
-            return current[unit][operation]
-        def run(arguments, **kwargs):
-            operation, unit = arguments[1], arguments[-1]
-            if operation == 'enable': current[unit]['is-enabled'] = 'enabled'
-            elif operation == 'disable': current[unit]['is-enabled'] = 'disabled'
-            elif operation == 'mask': current[unit]['is-enabled'] = 'masked'
-            elif operation == 'unmask' and current[unit]['is-enabled'] == 'masked': current[unit]['is-enabled'] = 'disabled'
-            elif operation == 'start': current[unit]['is-active'] = 'active'
-            elif operation == 'stop': current[unit]['is-active'] = 'inactive'
-            return mock.Mock(returncode=0)
-        with mock.patch.object(snapshot, 'state', side_effect=query), mock.patch.object(snapshot.subprocess, 'run', side_effect=run):
-            snapshot.restore_services(folder)
-        for row in desired:
-            self.assertEqual(current[row['unit']]['is-enabled'], 'disabled' if row['enabled'] == 'not-found' else row['enabled'])
-            self.assertEqual(current[row['unit']]['is-active'], row['active'])
 
     def test_driver_prerequisite_structural_validation(self):
         jar = WORK / 'mssql-jdbc-fixture.jre11.jar'
@@ -282,13 +221,6 @@ class PackageChecks(unittest.TestCase):
         self.assertEqual([c[1] for c in calls], ['/api/health', '/api/orders', '/api/orders'])
         self.assertEqual(calls[-1][2]['customerId'], 7)
         self.assertNotIn('password', (ROOT / 'scripts/traffic.py').read_text().lower())
-        switch = (ROOT / 'scripts/switch.sh').read_text()
-        self.assertIn('lab-traffic.service contoso-app.service', switch)
-        self.assertIn('restore-services', switch)
-        self.assertIn('pid=$pid,', switch)
-        installer = (ROOT / 'scripts/install.sh').read_text()
-        self.assertNotIn('npm install', installer)
-        self.assertIn('save "$SNAPSHOT"', installer)
 
     def test_powershell_encoding_and_static_tokens(self):
         path = ROOT / 'scripts/Prepare-ContosoSql.ps1'

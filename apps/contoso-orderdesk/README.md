@@ -11,13 +11,12 @@ available. Java/JSP compilation, package installation, SQL connectivity, applian
 and migration have not been exercised in the build environment. Tomcat compiles JSPs on the
 target. Servlet signatures use `jakarta.servlet.http`; descriptor schema is Jakarta Servlet
 6.0 / Pages 3.1. Java SE `javax.sql.DataSource` and `javax.naming` remain correct and unchanged.
-Both installers verify installed Tomcat 10.1.x, use `/usr/share/tomcat10` and
-`/etc/tomcat10/web.xml`, and force the Java 17 executable through the service's JAVA_HOME.
-The stock `tomcat10.service` is disabled so only the bounded custom app service runs.
-Complete target checks and fresh appliance OS/software/Java web-asset acceptance before
-training release; WAR deployment/custom CATALINA_BASE are retained, not asserted to fix
-any prior discovery issue. Noble Universe Tomcat security coverage must be reviewed
-separately from standard Main maintenance; actual patch versions are recorded at install.
+Fresh provisioning pins the official standalone Apache Tomcat **10.1.61** distribution,
+with **CATALINA_HOME = CATALINA_BASE = /opt/tomcat**, and forces Java 17 through the service's
+JAVA_HOME. There is no Ubuntu Tomcat package, split HOME/BASE tree or configuration alias.
+Complete fresh appliance OS/software/Java web-asset acceptance before training release;
+this conventional layout is **not** a guarantee of discovery.
+Review Apache Tomcat security releases separately from Ubuntu's Java/OS package maintenance.
 
 ## Initial deployment — recommended
 
@@ -27,14 +26,31 @@ The application lives at `apps/contoso-orderdesk/` in that checkout. Follow
 `scripts/deploy-lab.ps1`. No additional app setup or password prompt is required.
 
 Deployment embeds the checkout's checksum-verified `dist/runtime.zip` into the host/cloud-init
-payload. It never downloads source from a branch URL. Cloud-init installs Tomcat/OpenJDK from
-Ubuntu and the pinned Microsoft JDBC **13.6.0.jre11** driver over HTTPS. It installs on 3000
+payload. It never downloads source from a branch URL or embeds the Tomcat binary in Run Command.
+Cloud-init installs OpenJDK 17, CA certificates and discovery tools from Ubuntu. The fresh
+installer fetches Apache Tomcat **10.1.61** and the pinned Microsoft JDBC **13.6.0.jre11** driver
+over HTTPS. It installs on 3000
 and waits only for SQL-independent liveness. Host PHASE 5 creates the unchanged sample data,
 prepares mixed mode and the shared `labapp` login with the protected deployment password,
 and validates SQL readiness, actual orders/customers, the named page and the Nginx proxy
 before marking success. PHASE 7 host discovery preparation remains unchanged.
 
-The pinned publisher coordinate is:
+The pinned Tomcat publisher coordinate is:
+`https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.61/bin/apache-tomcat-10.1.61.tar.gz`.
+The installer retrieves the same filename's official `.sha512` over bounded HTTPS, requires
+exactly 128 hex digits and the exact filename when supplied, and verifies it **before** any
+extraction. If needed, `downloads.apache.org` may supply only that same version and digest;
+it never searches for latest. This is **publisher-checksum verification over TLS, not independent
+PGP signature verification**. Failure to fetch or validate either artifact stops provisioning.
+The archive is fully checked for bounded sizes, normalized paths, duplicate names and unsafe
+types (all links are refused). The runtime version and the exact Tomcat JDBC pool factory class
+are checked. Bundled ROOT/docs/examples/manager/host-manager webapps are omitted; Apache LICENSE
+and NOTICE are retained. The deployed `webapps` contains only the lab's unchanged `ROOT.war`.
+
+A successful fresh guest records the source URLs and actual publisher SHA512 in
+`/opt/contoso-orderdesk/tomcat-source.json`.
+
+The pinned JDBC publisher coordinate is:
 `https://repo.maven.apache.org/maven2/com/microsoft/sqlserver/mssql-jdbc/13.6.0.jre11/mssql-jdbc-13.6.0.jre11.jar`.
 Availability was not tested in the build environment. Downloads have bounded timeouts/retries;
 JAR CRC, SQL driver class and Java compatibility are checked. These checks and HTTPS are
@@ -47,19 +63,23 @@ embeds the JAR; the guest verifies it again. No Maven/JDK is needed on the deplo
 
 ## Runtime, endpoints and discovery
 
-Fresh deployment creates only `/usr/share/tomcat10/conf/server.xml` as a guarded symlink to
-`/var/lib/contoso-orderdesk/conf/server.xml`, the one canonical server configuration; it does
-not change an existing service. The legacy staged installer is unchanged. Local alias/readability
-checks are not Azure Migrate acceptance: appliance discovery remains **pending**. The stock
-`/etc/tomcat10/server.xml`, port 3000 and private JNDI descriptor are unchanged.
+Fresh deployment creates a real standalone `/opt/tomcat` with actual `conf/server.xml`,
+private `conf/Catalina/localhost/ROOT.xml`, `webapps/ROOT.war` and `lib/mssql-jdbc.jre11.jar`.
+There is no HOME-conf compatibility symlink/helper. `/opt/contoso-orderdesk` holds only lab
+support scripts, the source WAR and installation receipts, not CATALINA_BASE. Installation
+refuses occupied deployment paths/accounts; it does not update an existing lab. The source
+port 3000, root URL, SQL descriptor and Nginx ports remain unchanged. A service pre-start
+check verifies the pinned real distribution on each start; final host checks still require
+Java 17, SQL data/readiness, the named desk and Nginx proxy, not just a listening socket.
+Appliance discovery remains **pending** until tested independently on a fresh deployment.
 
 ```text
 Service       contoso-orderdesk (non-root user/group contoso-orderdesk)
-CATALINA_HOME /usr/share/tomcat10
-CATALINA_BASE /var/lib/contoso-orderdesk
-WAR           /var/lib/contoso-orderdesk/webapps/ROOT.war
-JDBC          /var/lib/contoso-orderdesk/lib/mssql-jdbc.jre11.jar
-Private JNDI  /var/lib/contoso-orderdesk/conf/Catalina/localhost/ROOT.xml
+CATALINA_HOME /opt/tomcat
+CATALINA_BASE /opt/tomcat
+WAR           /opt/tomcat/webapps/ROOT.war
+JDBC          /opt/tomcat/lib/mssql-jdbc.jre11.jar
+Private JNDI  /opt/tomcat/conf/Catalina/localhost/ROOT.xml
 ```
 
 | Endpoint | Contract |
@@ -90,9 +110,9 @@ and removes seed ISOs after readiness. Cloud-init retains root-only user-data: u
 credentials and do not share expanded files or journals containing secrets.
 
 The appliance's actual SSH guest credential needs recursive read/execute on **both**
-CATALINA_HOME and CATALINA_BASE directories, plus sudo `netstat`/`ls`. The existing deployment
+CATALINA_HOME and CATALINA_BASE directories (the same real `/opt/tomcat` tree), plus sudo `netstat`/`ls`. The existing deployment
 user has NOPASSWD sudo. Directory discovery permissions do not make the private descriptor
-world-readable. Validate locally, then separately verify appliance SSH reachability and
+world-readable. Only `logs`, `work` and `temp` are runtime-owned; code/configuration remain root-owned. Validate locally, then separately verify appliance SSH reachability and
 credential mapping. Tomcat discovery/assessment support does not guarantee migration execution;
 Nginx is software inventory, not a separately supported assessed web-app platform.
 

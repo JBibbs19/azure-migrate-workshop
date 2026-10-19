@@ -40,7 +40,7 @@ def build_war():
 
 
 def build_runtime():
-    selected = ['check.py', 'common.sh', 'configure.py', 'driver_check.py', 'hosts.py',
+    selected = ['check.py', 'common.sh', 'configure.py', 'tomcat_dist.py', 'driver_check.py', 'hosts.py',
                 'install-fresh.sh', 'contoso-orderdesk.service.in', 'contoso-orderdesk-traffic.service',
                 'traffic.py', 'traffic.sh', 'repoint.sh', 'validate.sh']
     files = {'dist/contoso-orderdesk.war': (ROOT / 'dist/contoso-orderdesk.war').read_bytes()}

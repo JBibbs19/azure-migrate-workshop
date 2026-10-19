@@ -1,18 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 ROOT=/opt/contoso-orderdesk
-BASE=/var/lib/contoso-orderdesk
-SNAPSHOT=/var/backups/contoso-orderdesk
+BASE=/opt/tomcat
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 require_root() { [[ $EUID -eq 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }; }
 lock_app() { exec 9>/var/lock/contoso-orderdesk.lock; flock -n 9 || { echo 'Another Order Desk operation is running.' >&2; exit 1; }; }
 require_managed() {
-    [[ -f $ROOT/.managed && ( -f $ROOT/.fresh-deployment || -f $SNAPSHOT/complete ) ]] || { echo 'No managed initial deployment or existing-lab snapshot found.' >&2; exit 1; }
+    [[ -f $ROOT/.managed && -f $ROOT/.fresh-deployment ]] || { echo 'No managed fresh deployment found.' >&2; exit 1; }
 }
 require_tomcat101() {
-    local version
-    version=$(dpkg-query -W -f='${Version}' tomcat10)
-    [[ $version == 10.1.* ]] || { echo "Expected Ubuntu Tomcat 10.1.x, got $version; stop and review repositories." >&2; exit 1; }
+    python3 "$HERE/tomcat_dist.py" verify --destination "$BASE"
 }
 configured_port() {
     python3 - "$BASE/conf/server.xml" <<'PY'

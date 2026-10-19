@@ -9,8 +9,9 @@ managed Run Command parameter. No new app-password prompt is added.
 ## Fresh Ubuntu 24.04 scope
 
 This full branch uses a fresh separate host and Noble QCOW2/base-image cache. Do not rerun
-it against the old 22.04 lab or perform an in-place OS upgrade. Both installers require
-Ubuntu 24.04, `tomcat10` 10.1.x and the Java 17 runtime layout. Servlet 6.0 / Pages 3.1 use
+it against an existing lab or perform an in-place OS upgrade. The initial installer requires
+Ubuntu 24.04, pinned standalone Apache Tomcat 10.1.61 and Java 17, with real HOME=BASE
+`/opt/tomcat`; no stock Ubuntu Tomcat service or HOME-conf alias is installed. Servlet 6.0 / Pages 3.1 use
 Jakarta imports, while Java SE JDBC/JNDI namespaces, SQL seeds and bounded pool remain intact.
 Only a marked incomplete build of this revision may resume; older/unmarked hosts are refused.
 
@@ -19,10 +20,16 @@ Only a marked incomplete build of this revision may resume; older/unmarked hosts
 1. Preserve the host, fixed disks, DHCP reservations, VM names, memory/CPU and appliance behavior.
 2. Linux-Web cloud-init retains its original port-80 site and creates the desk proxy on 8080,
    with required lab aliases and the original port-bearing Host header.
-3. Linux-App cloud-init installs Ubuntu Tomcat 10.1/OpenJDK 17 plus discovery tools. `write_files`
+3. Linux-App cloud-init installs Ubuntu OpenJDK 17, CA certificates and discovery tools. `write_files`
    stages a checksum-guarded runtime ZIP and JSON password seed as root:root 0600. Runtime
    verification checks the ZIP digest/CRC and every included script/WAR checksum.
-4. The initial installer obtains the pinned JDBC JAR using bounded HTTPS retries, or verifies
+4. The initial installer obtains the official Apache Tomcat 10.1.61 tarball and its pinned-version
+   publisher SHA512 over bounded HTTPS. It fails closed before extraction on unavailable/invalid
+   checksum, mismatch, unsafe member/type, duplicate path or excessive archive size. A same-version
+   official fallback must match the already acquired digest. This is publisher-checksum verification,
+   not independent PGP verification. It installs the real standalone tree, retains LICENSE/NOTICE,
+   omits Apache bundled webapps and checks the exact JDBC pool factory class and runtime version.
+   It obtains the pinned JDBC JAR using bounded HTTPS retries, or verifies
    the explicitly provided local JAR/checksum embedded by the deploy client. It creates the
    dedicated non-root service, private 0640 JNDI descriptor and bounded JDBC pool, and serves
    on 3000. Health performs no SQL work; only liveness is awaited in cloud-init. Secret staging

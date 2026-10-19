@@ -25,7 +25,7 @@ if (Test-Path "$labRoot\setup-complete.json") {
     throw 'This host has already been provisioned. Use validation, not deployment, after migration starts.'
 }
 $labResuming = Test-Path "$labRoot\setup-log.txt"
-$labBuildMarker = 'LAB_BUILD|ubuntu2404-tomcat101-v1'
+$labBuildMarker = 'LAB_BUILD|ubuntu2404-tomcat101-unified-v1'
 $matchingBuild = $labResuming -and @(Get-Content -LiteralPath $logFile | Where-Object { $_ -ceq $labBuildMarker }).Count -gt 0
 if (($labResuming -and -not $matchingBuild) -or
     (@(Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App -ErrorAction SilentlyContinue).Count -gt 0 -and -not $matchingBuild)) {
@@ -171,7 +171,7 @@ function Assert-LabSourceWorkloads {
         throw 'Tomcat health contract failed or wrong application.'
     }
     $info = Invoke-RestMethod 'http://192.168.0.13:3000/api/info' -TimeoutSec 10
-    if ($info.app -ne 'Contoso Order Desk' -or -not $info.javaVersion) { throw 'Tomcat Java runtime contract failed.' }
+    if ($info.app -ne 'Contoso Order Desk' -or $info.javaVersion -notmatch '^17(?:\.|$)') { throw 'Tomcat Java runtime contract failed.' }
     $ready = Invoke-RestMethod 'http://192.168.0.13:3000/api/ready' -TimeoutSec 20
     if ($ready.status -ne 'ready') { throw 'Tomcat SQL readiness failed.' }
     $orders = Invoke-RestMethod 'http://192.168.0.13:3000/api/orders' -TimeoutSec 20
@@ -1039,7 +1039,7 @@ Create-WindowsGuestVM -VMName "OnPrem-SQL" -IPAddress "192.168.0.11" -MemoryMB 4
 # published VHD, downloaded and imported by the instructor in Module 1; its host memory
 # and 192.168.0.20 reservation are deliberately left unused for that import.
 Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("nginx") -ExtraRunCmdYaml $nginxRunCmdYaml
-Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("tomcat10", "openjdk-17-jre-headless") -ExtraRunCmdYaml $tomcatRunCmdYaml -ExtraWriteFilesYaml $tomcatWriteFilesYaml
+Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("openjdk-17-jre-headless", "ca-certificates") -ExtraRunCmdYaml $tomcatRunCmdYaml -ExtraWriteFilesYaml $tomcatWriteFilesYaml
 
 # =============================================================
 # PHASE 4 - Start VMs and wait for boot

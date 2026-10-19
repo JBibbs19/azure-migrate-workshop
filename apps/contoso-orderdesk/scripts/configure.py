@@ -13,7 +13,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-BASE = Path('/var/lib/contoso-orderdesk')
+BASE = Path('/opt/tomcat')
 GROUP = 'contoso-orderdesk'
 
 
@@ -33,41 +33,14 @@ def runtime_readable(path):
         raise RuntimeError('Tomcat configuration is not readable by the runtime account: ' + str(path))
 
 
-def tomcat_home_conf(home=Path('/usr/share/tomcat10')):
-    """Fresh deployment only: expose the one public server XML, never private JNDI."""
-    source = BASE / 'conf/server.xml'
-    if not home.is_absolute() or not source.is_absolute() or '..' in (*home.parts, *source.parts):
-        raise RuntimeError('Tomcat configuration paths must be absolute and normalized.')
-    real_directory(source.parent)
-    real_directory(home)
-    source_metadata = source.lstat()
-    if not stat.S_ISREG(source_metadata.st_mode) or not os.access(source, os.R_OK, effective_ids=True):
-        raise RuntimeError('Canonical server.xml must be a readable regular file, not a link.')
-    conf = home / 'conf'
-    destination = conf / 'server.xml'
-    if os.path.lexists(conf):
-        real_directory(conf)
-    if os.path.lexists(destination):
-        if not destination.is_symlink() or os.readlink(destination) != str(source):
-            raise RuntimeError('Refusing occupied Tomcat HOME server.xml; nothing was replaced.')
-    else:
-        if not os.path.lexists(conf):
-            conf.mkdir(mode=0o755)
-            os.chown(conf, 0, 0)
-            os.chmod(conf, 0o755)
-        destination.symlink_to(source)
-    if (os.readlink(destination) != str(source) or destination.resolve(strict=True) != source or
-            not os.path.samestat(destination.stat(), source_metadata)):
-        raise RuntimeError('Tomcat HOME server.xml does not resolve to the canonical configuration.')
-    runtime_readable(destination)
-    print('Tomcat HOME server.xml alias verified locally; appliance discovery remains pending.')
-
-
 def write_xml(path, element, private=False):
     ET.indent(element, space='  ')
     content = ET.tostring(element, encoding='utf-8', xml_declaration=True) + b'\n'
     # Ensure the credentials descriptor is protected even while it is first created.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640 if private else 0o644)
+    real_directory(path.parent)
+    if os.path.lexists(path) and not stat.S_ISREG(path.lstat().st_mode):
+        raise RuntimeError('Configuration file must be regular, never a link: ' + str(path))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640 if private else 0o644)
     with os.fdopen(fd, 'wb') as handle:
         handle.write(content)
     os.chmod(path, 0o640 if private else 0o644)
@@ -125,17 +98,18 @@ def database(force=False, password_file=None):
     print('Protected JNDI descriptor written (root/runtime group only).')
 
 
-def initialise(bundle, port=3001, password_file=None):
+def initialise(bundle, port=3000, password_file=None):
     bundle = Path(bundle)
+    real_directory(BASE)
     for name in ('conf/Catalina/localhost', 'lib', 'webapps', 'logs', 'work', 'temp'):
         (BASE / name).mkdir(parents=True, exist_ok=True)
+        real_directory(BASE / name)
     server(port)
-    global_web = Path('/etc/tomcat10/web.xml')
-    if not global_web.is_file():
-        raise RuntimeError('Ubuntu Tomcat default web.xml is missing; JSP runtime cannot be configured.')
-    shutil.copyfile(global_web, BASE / 'conf/web.xml')
+    global_web = BASE / 'conf/web.xml'
+    if not stat.S_ISREG(global_web.lstat().st_mode):
+        raise RuntimeError('Standalone Tomcat default conf/web.xml must be a regular file.')
     (BASE / 'conf/catalina.properties').write_text(
-        'common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar","${catalina.home}/lib","${catalina.home}/lib/*.jar"\n'
+        'common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar"\n'
         'server.loader=\nshared.loader=\n')
     (BASE / 'conf/logging.properties').write_text(
         'handlers = java.util.logging.ConsoleHandler\n'
@@ -147,9 +121,39 @@ def initialise(bundle, port=3001, password_file=None):
     database(password_file=password_file)
 
 
+def validate_layout():
+    account = pwd.getpwnam(GROUP)
+    runtime_gid = grp.getgrnam(GROUP).gr_gid
+    if account.pw_uid == 0:
+        raise RuntimeError('The Tomcat runtime must not be root.')
+    for name in ('', 'bin', 'conf', 'conf/Catalina', 'conf/Catalina/localhost', 'lib', 'webapps', 'logs', 'work', 'temp'):
+        path = BASE / name
+        real_directory(path)
+        metadata = path.lstat()
+        expected_owner = account.pw_uid if name in ('logs', 'work', 'temp') else 0
+        if stat.S_IMODE(metadata.st_mode) != 0o755 or metadata.st_uid != expected_owner:
+            raise RuntimeError('Unexpected Tomcat directory ownership/mode: ' + str(path))
+    for name in ('conf/server.xml', 'conf/web.xml', 'conf/Catalina/localhost/ROOT.xml',
+                 'webapps/ROOT.war', 'lib/mssql-jdbc.jre11.jar', 'bin/catalina.sh'):
+        path = BASE / name
+        metadata = path.lstat()
+        private = name.endswith('/ROOT.xml')
+        expected_mode = 0o640 if private else (0o755 if name == 'bin/catalina.sh' else 0o644)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or
+                stat.S_IMODE(metadata.st_mode) != expected_mode or (private and metadata.st_gid != runtime_gid)):
+            raise RuntimeError('Unexpected Tomcat file type/ownership/mode: ' + str(path))
+        runtime_readable(path)
+    if {p.name for p in (BASE / 'webapps').iterdir()} != {'ROOT.war'}:
+        raise RuntimeError('Only the lab ROOT.war may be deployed; bundled Apache applications must be absent.')
+    connector = ET.parse(BASE / 'conf/server.xml').getroot().find('Service/Connector')
+    if connector is None or connector.get('port') != '3000':
+        raise RuntimeError('The unified Tomcat connector must use the course port 3000.')
+    print('Unified real Tomcat HOME=BASE layout and private descriptor validated locally; discovery remains pending.')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('init', 'port', 'db', 'traffic', 'home-conf'))
+    parser.add_argument('action', choices=('init', 'port', 'db', 'traffic', 'layout'))
     parser.add_argument('--bundle')
     parser.add_argument('--password-file', help='Root-only JSON seed for initial provisioning; never supply a password argument.')
     parser.add_argument('--port', type=int, choices=(3000, 3001))
@@ -158,13 +162,13 @@ if __name__ == '__main__':
     if os.geteuid() != 0:
         raise SystemExit('Run with sudo.')
     if args.action == 'init':
-        initialise(args.bundle, args.port or 3001, args.password_file)
+        initialise(args.bundle, args.port or 3000, args.password_file)
     elif args.action == 'port':
         server(args.port)
     elif args.action == 'db':
         database(force=True)
-    elif args.action == 'home-conf':
-        tomcat_home_conf()
+    elif args.action == 'layout':
+        validate_layout()
     else:
         if not 20 <= args.interval <= 600:
             raise SystemExit('Traffic interval must be 20 to 600 seconds.')
