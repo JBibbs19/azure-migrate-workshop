@@ -1,0 +1,31 @@
+[Unit]
+Description=Contoso Order Desk - Tomcat 10.1 JSP application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=contoso-orderdesk
+Group=contoso-orderdesk
+Environment="JAVA_HOME=__JAVA_HOME__"
+Environment="CATALINA_HOME=/opt/tomcat"
+Environment="CATALINA_BASE=/opt/tomcat"
+Environment="CATALINA_TMPDIR=/opt/tomcat/temp"
+Environment="CATALINA_OPTS=-Xms64m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true"
+WorkingDirectory=/opt/tomcat
+ExecStartPre=/usr/bin/python3 /opt/contoso-orderdesk/scripts/tomcat_dist.py verify --destination /opt/tomcat
+ExecStart=/opt/tomcat/bin/catalina.sh run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+SuccessExitStatus=143
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/tomcat/work /opt/tomcat/logs /opt/tomcat/temp
+MemoryMax=900M
+TasksMax=150
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

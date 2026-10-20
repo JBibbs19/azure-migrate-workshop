@@ -1,0 +1,1 @@
+<%@ page contentType="application/json; charset=UTF-8" pageEncoding="UTF-8" session="false" trimDirectiveWhitespaces="true" isErrorPage="true" %><% response.setStatus(500); response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff"); %>{"error":"Application request could not complete. Contact the lab administrator."}

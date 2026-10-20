@@ -1,115 +1,98 @@
+**TD SYNNEX | Cloud Enablement Services**
+
 # Module 1: Discovery & Assessment — The Foundation of Every Successful Migration
 
-> **Cloud Adoption Framework Phase:** [Assess](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/strategy/) · **Estimated Duration:** 60–90 minutes
+> **Cloud Adoption Framework context:** Discovery and assessment support migration planning · **Prerequisite:** [Module 0: Setup](Module-0-Setup.md) completed
+>
+> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Use a fresh project and pristine source identities. [PILOT-README](../PILOT-README.md) defines the two-method scope, manual STOP gates, and unchanged automation boundary.
 
 ## Module Overview
 
-Discovery is the single greatest predictor of migration success or failure. Industry data consistently shows that **38–50% of failed cloud migrations cite inadequate assessment and planning** as the root cause. As a Cloud Solution Architect, I treat discovery not as a checkbox exercise but as the phase that determines the trajectory of everything that follows.
-
-A thorough discovery reveals:
-
-- **Workload inventory** — what you actually have (vs. what the CMDB says you have)
-- **Dependencies** — which systems talk to each other and cannot be separated
-- **Readiness blockers** — incompatible OS versions, unsupported configurations, licensing constraints
-- **Cost projections** — the business case that justifies the migration investment
-
-Skip this phase, underinvest in it, or rush through it, and you will pay for it in every subsequent module — with downtime, rework, and cost overruns.
+Discovery establishes what you have, how it is connected, and what must be addressed before migration. A proper discovery phase ensures that the trajectory of migration project goes according to plan. A common pitfall in cloud migration projects is the skill gap required to assess a proposed environment and whether it will be compatible with the current system’s architecture. Azure Migrate’s discovery tools can perform this assessment for you. By highlight systems that need to be modernized before a ‘lift-and-shift’ transfer can happen and checking if there is an Azure service that can perform the same duty as a current solution in use by your organization, it simplifies some of the more complicated aspects of cloud migration.
 
 This module walks you through discovery and assessment using Azure Migrate, but every step includes the "why" and "what you'd do differently at scale" context that separates a lab exercise from production readiness.
 
----
+In this module, you will manually create an Azure Migrate project, import and register the Migrate Discovery appliance, discover four workload VMs from Module 0, and create an **Azure VM assessment**. You will then examine application dependencies and establish a Migration Wave Plan.
+
+A thorough discovery reveals:
+
+- **Workload inventory** — server names, operating systems, resources, and installed software.
+- **Dependencies** — the connections that must remain available when workloads move.
+- **Readiness conditions** — configurations that need investigation before replication.
+- **Cost estimates** — target-region estimates whose assumptions you can explain.
+
+The Hyper-V Migrate appliance used here performs **discovery and assessment only**. Module 2 configures host-based replication for Web/Linux-Web; Module 3 configures a **separate modern replication appliance and guest Mobility Service** for SQL/App treated as physical servers. Replication architecture is verified separately from inventory identity; never protect the same VM through both methods.
+
+------------------------------------------------------------------------
 
 ## Learning Objectives
 
 By the end of this module, you will be able to:
 
-- Understand the Azure Migrate discovery architecture (appliance-based, agentless)
-- Deploy and configure the Azure Migrate appliance on Hyper-V
-- Discover on-premises VMs and interpret the collected inventory data
-- Configure and create Azure VM assessments with production-appropriate settings
-- Interpret assessment results for executive stakeholder communication
-- Identify migration blockers and understand common remediation strategies
-- Use dependency analysis to create **migration wave plans**
-- Estimate TCO and build a business case for migration funding
+- Explain the Azure Migrate project, discovery appliance, and Hyper-V host roles.
+- Create a project and distinguish metadata geography from migration target region.
+- Download, verify, import, and network the published Hyper-V appliance.
+- Confirm host access, register the appliance, add credentials, and start discovery.
+- Validate the four workload records rather than relying on an inventory count.
+- Create and interpret a four-server Azure VM assessment.
+- Explain collection limitations, readiness findings, and pricing assumptions.
+- Use observed and known dependencies to plan one coordinated four-VM cutover.
 
----
+------------------------------------------------------------------------
 
 ## Concepts — Azure Migrate Architecture
 
-Before touching the portal, you need a mental model of how Azure Migrate works. Too many engineers start clicking buttons without understanding the data flow, and then struggle to troubleshoot or explain the architecture to stakeholders.
-
 ### Azure Migrate Hub
 
-Azure Migrate is a **central orchestration point** — not a single tool. It integrates discovery, assessment, and migration capabilities across multiple workload types (VMs, databases, web apps, VDI). Think of it as the control plane for your entire migration program.
+Azure Migrate provides a project in which discovery, assessment, and migration information is organized. Portal navigation appears under **Explore / Decide / Execute.** The steps below name the operation to perform; the exact navigation text may differ in your portal.
 
 ### Discovery Appliance
 
-The appliance is a lightweight VM (Windows Server-based) deployed on-premises. For Hyper-V environments, it performs **agentless discovery** by querying the Hyper-V management APIs — no agents are installed on guest VMs during discovery. The appliance collects:
+The Windows-based appliance queries the **Hyper-V host** for VM configuration and performance information. With appropriate guest credentials, it can also connect to Windows guests through PowerShell remoting and Linux guests through SSH for supported software inventory and dependency features.
 
-- Server configuration metadata (CPU, memory, disk, network adapters)
-- Performance counters (utilization over time)
-- Software inventory (installed applications, roles, features)
-- SQL Server instance and database metadata
-- Web application inventory (IIS/Apache)
+| Component | Role in this module |
+|---|---|
+| Azure Migrate project | Holds discovery and assessment information in Azure |
+| HyperVHost, `192.168.0.1` | Supplies Hyper-V VM configuration and performance information |
+| Discovery appliance, `192.168.0.20` | Collects information and sends discovery metadata to Azure |
+| Four workload guests, `.10`–`.13` | Provide the applications being assessed |
+| Host replication provider | Separate migration component introduced in Module 2 |
 
 ### Data Flow
 
-Understanding the data flow is critical for security reviews and customer conversations:
+```text
+Four workload VMs (.10–.13)
+        | VM configuration and performance information
+        v
+HyperVHost (192.168.0.1)
+        ^
+        | WinRM / Hyper-V management queries
+        v
+Azure Migrate appliance (192.168.0.20)
+        | Outbound HTTPS 443: discovery metadata
+        v
+Azure Migrate project -> Azure VM assessment results
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  On-Premises Environment                                        │
-│                                                                 │
-│  ┌──────────────┐    WinRM/WMI     ┌──────────────────────┐    │
-│  │  Hyper-V Host │◄───────────────►│  Azure Migrate       │    │
-│  │  192.168.0.1  │                 │  Appliance           │    │
-│  │               │                 │  192.168.0.20        │    │
-│  │  ┌──────────┐ │                 │                      │    │
-│  │  │ Guest VMs│ │                 │  Collects metadata   │    │
-│  │  │ .10-.13  │ │                 │  only — no workload  │    │
-│  │  └──────────┘ │                 │  data leaves on-prem │    │
-│  └──────────────┘                  │  until replication    │    │
-│                                    └──────────┬───────────┘    │
-│                                               │                 │
-└───────────────────────────────────────────────┼─────────────────┘
-                                                │ HTTPS (443)
-                                                │ Metadata only
-                                                ▼
-                                    ┌───────────────────────┐
-                                    │  Azure Migrate Service │
-                                    │  (Azure Cloud)         │
-                                    │                        │
-                                    │  - Discovery metadata  │
-                                    │  - Assessment engine   │
-                                    │  - Dependency mapping  │
-                                    └───────────────────────┘
+Appliance -> Windows guests: PowerShell remoting for supported guest discovery
+Appliance -> Linux guests: SSH for supported guest discovery
 ```
 
-```mermaid
-graph TB
-    subgraph OnPrem["On-Premises / Hyper-V Host"]
-        Appliance["🔍 Azure Migrate<br/>Appliance VM"]
-        HyperVHost["Hyper-V Host<br/>192.168.0.1"]
-        VM1["OnPrem-Web"] & VM2["OnPrem-SQL"] & VM3["OnPrem-Linux-Web"] & VM4["OnPrem-Linux-App"]
-    end
-
-    subgraph AzureCloud["☁️ Azure"]
-        MigrateHub["Azure Migrate Hub"]
-        Assessment["📊 Assessment<br/>Results"]
-        DepMap["🔗 Dependency<br/>Map"]
-    end
-
-    Appliance -->|"Hyper-V WMI/CIM<br/>Agentless Discovery"| HyperVHost
-    HyperVHost --- VM1 & VM2 & VM3 & VM4
-    Appliance -->|"HTTPS 443<br/>Metadata Only"| MigrateHub
-    MigrateHub --> Assessment
-    MigrateHub --> DepMap
-
-    style Appliance fill:#0078D4,color:white
-    style MigrateHub fill:#0078D4,color:white
-```
+**Discovery does not replicate VM disks or move the application database into Azure.** Replication is a later, separately authorized action. The appliance needs outbound connectivity to Azure; it does not need an internet-facing management port.
 
 > **Key point for security-conscious customers:** Only metadata flows to Azure during discovery. No workload data, application data, or VM disks leave the on-premises environment until you explicitly begin replication in Module 2 or 3.
+
+### The Lab Environment
+
+The source is a Windows Server 2022 Hyper-V host: `Standard_E8s_v7`, Generation 2 with NVMe storage, eight vCPUs, and 64 GB RAM. Its internal switch, `intSwitch`, uses NAT for `192.168.0.0/24`; the host is `.1`. The appliance will use that same switch for host access and outbound internet connectivity.
+
+| Workload VM | Source OS | Application | Source address |
+|---|---|---|---|
+| OnPrem-Web | Windows Server 2022 | IIS, HTTP 80 | 192.168.0.10 |
+| OnPrem-SQL | Windows Server 2022 | SQL Server 2022 Express, `ContosoApp`, TCP 1433 | 192.168.0.11 |
+| OnPrem-Linux-Web | Ubuntu 24.04 | Nginx, HTTP 80 and order-desk proxy on 8080 | 192.168.0.12 |
+| OnPrem-Linux-App | Ubuntu 24.04 | Tomcat 10.1, Java 17, Contoso Order Desk on 3000 | 192.168.0.13 |
+
+The Azure source VNet uses `10.0.0.0/16`. The migration target VNet uses `10.1.0.0/16`, and the isolated test VNet uses `10.2.0.0/16`. The migration target region must be **different from the actual source host region** in this lab. (i.e. The default region for the lab is **East US**. A suitable target region would be **West US 2**)
 
 ### Assessment Types
 
@@ -122,685 +105,1031 @@ Azure Migrate supports multiple assessment targets — not just Azure VMs:
 | **Azure App Service** | Web apps → Azure App Service | .NET/Java web app modernization |
 | **Azure VMware Solution (AVS)** | VM → AVS node sizing | VMware-native migration path |
 
-### Dependency Analysis Approaches
-
-| Approach | How It Works | Pros | Cons |
-|---|---|---|---|
-| **Agentless** | Analyzes network connections from appliance data | No agents, fast to enable | Less granular, connection-level only |
-| **Agent-based** | MMA + Dependency Agent on each VM → Log Analytics | Process-level visibility, port/protocol detail | Requires agent installation on every VM |
-
-> **CSA Recommendation:** Start with agentless dependency analysis. Only deploy agents on VMs where you need process-level dependency detail — typically complex multi-tier applications.
-
----
+------------------------------------------------------------------------
 
 ## Step 1: Create an Azure Migrate Project
 
-### Hands-On Steps
+### 1.1 — Pre-Flight Check
 
-1. Sign in to the [Azure portal](https://portal.azure.com).
-2. In the search bar, type **Azure Migrate** and select it from the results.
-3. Click **Create project**.
-4. Configure the project:
+Before you create the project, confirm that the environment you built in Module 0 is still in the state this module expects. The project metadata geography, resource group location, source host region, and migration target region are distinct settings. A resource group's location does not establish where its VMs run.
 
-   | Setting | Value |
-   |---|---|
-   | Subscription | *Your subscription* |
-   | Resource group | `rg-migrate-workshop` |
-   | Project name | `MigrateWorkshop-Project` |
-   | Geography | *Select the geography closest to your region* |
+#### Hands-On Steps
 
-5. Under **Assessment tool**, select **Azure Migrate: Discovery and assessment**.
-6. Under **Migration tool**, select **Azure Migrate: Server Migration**.
-7. Click **Create**.
+**Local workstation — Azure portal:**
 
-![Azure Migrate project creation](../images/module-1-step-1.png)
+1.  Open the **HyperVHost** VM in the source resource group.
 
-**Expected Outcome:** The Azure Migrate project is created and you are redirected to the Azure Migrate dashboard showing the Discovery and Assessment and Server Migration tools.
+2.  Record its actual **Location** from the VM overview.
+
+3.  Confirm that the migration region you recorded in Module 0, Section 3.3, is different from this location.
+
+    You build the target network and its NSG in that region in Module 2; nothing needs to exist there yet.
+
+4.  Confirm that your quota is still sufficient, using the checks in Module 0, Section 3.2.
+
+**Local workstation — RDP client:**
+
+5.  Connect to HyperVHost using the lab deployment credentials.
+
+**HyperVHost — elevated PowerShell:**
+
+6.  Confirm that the four workload VMs are present and **Running**.
+
+    ```powershell
+    Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App |
+        Select-Object Name,State
+    ```
+
+7.  If a workload is stopped, start it; if it is paused, resume it.
+
+    ```powershell
+    Start-VM -Name '<stopped workload name>'
+    Resume-VM -Name '<paused workload name>'
+    ```
+
+    If a workload is missing, resolve the incomplete Module 0 setup before proceeding.
+
+8.  If you enabled optional network traffic in Module 0, Section 6, confirm it is running: read the orders twice, a minute or two apart.
+
+    ```powershell
+    Invoke-RestMethod http://192.168.0.13:3000/api/orders
+    ```
+
+    If you enabled network traffic and the number of orders does not increase, complete its checks in Module 0, Section 6, before continuing. If you declined it, skip this traffic check.
+
+**Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and any enabled optional network traffic is adding orders. No replication or cutover has started.
+
+### 1.2 — Create the Project in the Portal
+
+The project gives the appliance and assessment a common scope. Its geography controls discovery metadata residency; it does not choose the migration target region.
+
+#### Hands-On Steps
+
+**HyperVHost — Azure portal:**
+
+1.  Navigate to **Azure Migrate** using the search bar.
+
+2.  Select **Create Project** beneath the **Decide and Plan** section.
+
+3.  On the **Create Project** page, confirm the authorized pilot subscription.
+
+    1.  For **Resource group**, create/select your new pilot project group, separate from existing migration projects.
+    2.  Under **Project Details**, provide a unique pilot project name and record its resource ID.
+    3.  Leave the reviewed endpoint choice at **Public Endpoint** for this lab unless a separately approved design requires otherwise.
+
+    Do not reuse an existing protected lab, rebind its host, or clone its registered appliance. This pilot uses the fresh source identities recorded in Module 0 §3.6.
+
+4.  Create the project. It takes a few moments.
+
+    Check the **Notifications** bell to see the progress of the project creation.
+
+5.  Once complete, find the project in either of two places:
+
+    1.  Under the resource group, as an **Azure Migrate** resource type.
+    2.  On the **Azure Migrate** page, under **All Projects**.
+
+6.  Open the created project.
+
+7.  Select the **Start Discovery** dropdown on the project page.
+
+8.  Select **Using Appliance**, and **For Azure** as the destination setting.
+
+**Expected Result:** The project opens in the Azure portal and provides the Hyper-V discovery entry point.
 
 ### Why This Matters — CSA Context
 
-**Project geography is a metadata residency decision, not a migration target decision.** The geography you select determines where Azure Migrate stores discovery metadata (server names, IPs, performance data). It does not restrict which Azure region you migrate workloads to.
+A project is a migration scope, not permission to move every machine it discovers. Keeping source identity, metadata residency, and target location separate prevents an assessment from being priced for one region while migration is configured for another.
 
-This distinction matters for regulated industries:
-
-- **EU customers** should select a European geography to keep discovery metadata within EU boundaries
-- **Government customers** should ensure they use Azure Government regions if required by compliance
-- **Data sovereignty** requirements may dictate metadata residency even when the migration target region is different
-
-**Best practice for production:** One Azure Migrate project per migration scope — typically per datacenter or business unit. Mixing thousands of VMs from multiple datacenters into a single project creates noise and makes assessment results hard to act on.
-
-**Naming convention recommendation:** Use a pattern like `migrate-<datacenter>-<year>` (e.g., `migrate-dc-east-2024`) so projects are self-documenting and easy to find months later.
-
----
+------------------------------------------------------------------------
 
 ## Step 2: Deploy the Azure Migrate Appliance
 
-The Azure Migrate appliance is a lightweight Windows Server VM that performs agentless discovery of your Hyper-V environment.
+### 2.1 — Download and Verify the Appliance Archive
 
-### 2.1 — Download the Appliance VHD
+Import the published Hyper-V appliance export, rather than creating an empty Windows VM. The lab's **ApplianceStore** is a dedicated partition on the host OS disk, normally `E:`, not a separate managed data disk or the appliance's guest `C:` drive.
 
-1. In the Azure Migrate dashboard, under **Azure Migrate: Discovery and assessment**, click **Discover**.
-2. Select **Are your servers virtualized?** → **Yes, with Hyper-V**.
-3. In the **1: Generate project key** section, enter the appliance name: `AzMigrateAppliance`.
-4. Click **Generate key** and **copy the project key** — you will need it later.
-5. Click **Download** to download the appliance VHD (`.zip` file, ~10 GB).
+#### Hands-On Steps
 
-![Download appliance VHD](../images/module-1-step-2a.png)
+**HyperVHost — Azure portal:**
 
-> **Tip:** You can download the VHD directly onto the Hyper-V host to avoid having to transfer it. Use the Edge browser on the host VM, or copy the download URL and use `Invoke-WebRequest` in PowerShell.
+1.  From the open project page, you should now be on a **Discover** page.
 
-### 2.2 — Import the Appliance on the Hyper-V Host
+2.  Select **Hyper-V** as the virtualization source.
 
-1. RDP into the Hyper-V host (if not already connected).
-2. Extract the downloaded `.zip` file to a local folder (e.g., `C:\AzMigrateAppliance`).
-3. Open **Hyper-V Manager**.
-4. Click **Import Virtual Machine** and browse to the extracted folder.
-5. Select **Register the virtual machine in-place** and complete the import wizard.
+3.  Select the **.VHD** file as the download option.
 
-Alternatively, create a new VM manually:
+4.  While waiting for the download to complete, enter an appliance registration name, such as `MigrateAppl`.
 
-```powershell
-# Create the appliance VM using the downloaded VHD
-$VMName = "AzMigrateAppliance"
-$VHDPath = "C:\AzMigrateAppliance\AzureMigrateAppliance.vhd"
+    Use an alphanumeric name of no more than 14 characters.
 
-New-VM -Name $VMName `
-       -MemoryStartupBytes 8GB `
-       -Generation 1 `
-       -VHDPath $VHDPath `
-       -SwitchName "intSwitch"
-```
+5.  Select **Generate key** to generate the project key.
 
-### 2.3 — Configure Networking
+6.  Copy the key into an approved private location for Step 3.
 
-The appliance needs two network connections:
+    Keep it out of screenshots, shared notes, source control, and command output.
 
-- **Internal network** (`intSwitch`) — to discover guest VMs on `192.168.0.0/24`
-- **External network** — to communicate with Azure services
+**HyperVHost — File Explorer or PowerShell:**
 
-```powershell
-# Add a second network adapter for external connectivity
-Add-VMNetworkAdapter -VMName "AzMigrateAppliance" -SwitchName "Default Switch"
-```
+7.  Identify the volume labelled **ApplianceStore** and its drive letter (normally `E:\`).
 
-Configure a static IP on the internal adapter so the appliance is reachable from the host:
+    Use its `Appliance` folder for the archive, extraction, and imported VM files.
 
-| Setting | Value |
+8.  Extract the ZIP into a new folder under the appliance store, `E:\Appliance\Extracted`.
+
+    Keep the published folder structure intact and do not overwrite an existing VM's files.
+
+**Expected Result:** The project key is stored privately, and the appliance package is extracted to `E:\Appliance\Extracted` on the appliance store.
+
+### 2.2 — Prepare the Hyper-V Host
+
+Azure Migrate does not reach into a Hyper-V guest to discover it. It talks to the **host**, and the host reports on the virtual machines it runs. So before anything is discovered, the host has to be willing to answer — and in most organisations it is not, because nothing has ever needed to ask it.
+
+Whatever your organisation runs Hyper-V for — a few line-of-business servers in a branch office, a consolidated rack in a datacentre, a lab that quietly became production — the appliance needs the same things to be true of every host holding workloads you intend to migrate. Microsoft publishes a host-preparation script that configures them, described in its [Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v). The script is signed; verify its signature or published hash before running it anywhere.
+
+#### What the Script Configures, and Why the Appliance Needs It
+
+| Step | What it does, and what fails without it |
 |---|---|
-| IP Address | 192.168.0.20 |
-| Subnet Mask | 255.255.255.0 |
-| Default Gateway | 192.168.0.1 |
+| **WinRM service, ports 5985/5986** | Starts WinRM and opens its ports. The appliance collects each guest's configuration and performance metadata over a **CIM session** to the host. This is the channel that carries it — closed, nothing is discovered at all. |
+| **PowerShell version check** | Confirms PowerShell 4.0 or later. The appliance issues PowerShell to the host, and older versions lack the cmdlets it calls. A check, not a change. |
+| **Discovery account** | The appliance signs in to the host as this account. It must be a host administrator, or belong to **Remote Management Users** (permits the WinRM connection), **Hyper-V Administrators** (permits reading VM inventory and configuration) and **Performance Monitor Users** (permits reading the counters that drive right-sizing). In a domain environment this is usually the account you will be asked to justify to whoever owns the host. |
+| **PowerShell remoting** | Runs `Enable-PSRemoting`. WinRM being open is not enough on its own — remoting is what lets the appliance *execute* on the host rather than merely connect to it. |
+| **Hyper-V Integration Services** | Checks they are enabled on every guest. They supply each guest's **OS detail and IP address** to the host. Without them a guest is still discovered, but its operating system column stays blank and the assessment cannot size it properly. |
+| **CredSSP delegation** | Needed only where guest disks sit on **remote SMB shares**, because the host must then pass your credentials onward to the file server. It is the one item on this list that is not a default, and it relays credentials — so it is worth knowing whether your estate actually requires it before enabling it anywhere. |
 
-> **Note:** The external adapter (connected to the Default Switch) will receive an IP via DHCP and provide internet connectivity for Azure registration.
+Run against a real estate, this script is often the point where a migration stalls: the host is someone else's responsibility, the changes need a change record, and the discovery account needs an owner. Budget for that conversation.
 
-### 2.4 — Start the Appliance VM
+#### In This Environment
 
-```powershell
-Start-VM -Name "AzMigrateAppliance"
-```
+You do **not** run Microsoft's script in this lab. The Module 0 deployment already prepared HyperVHost for discovery and recorded the result. Two details differ from what the Microsoft script would have done:
 
-Wait for the appliance to boot completely (~3–5 minutes).
+1.  **WinRM is open to the nested lab subnet only.** The script opens 5985 and 5986 without a scope. Here they are restricted to `192.168.0.0/24`, which is the only network the appliance ever connects from. Narrower is better, and it is worth carrying that habit into a real engagement.
+2.  **The lab user is already a host administrator**, which satisfies the account requirement on its own. It is also a member of the three groups above, so the least-privilege path can be examined without rebuilding anything.
 
-![Appliance VM running in Hyper-V Manager](../images/module-1-step-2b.png)
+CredSSP is not enabled, because the workload disks are local to HyperVHost. Step 3.1 shows how to confirm and, if needed, configure host access manually.
 
-**Expected Outcome:** The `AzMigrateAppliance` VM is running in Hyper-V Manager alongside the four on-premises guest VMs.
+#### Hands-On Steps
+
+**HyperVHost — elevated PowerShell:**
+
+1.  Read the host-preparation summary that deployment recorded.
+
+    ```powershell
+    Get-Content C:\AzMigrateLab\hyperv-prep.json | ConvertFrom-Json
+    ```
+
+2.  Review each item against the table above.
+
+    Anything showing `Failed` or `NOT FOUND` is applied by hand in Step 3.1 before discovery.
+
+**Expected Result:** The summary shows PowerShell remoting enabled, WinRM allowed from `192.168.0.0/24` only, the discovery account prepared, and CredSSP not enabled. This is a recorded summary, not a live check; Step 3.1 confirms host access directly.
+
+### 2.3 — Import the Published Appliance Configuration
+
+The export contains the appliance VM configuration and its disk. Copy-import creates a new VM identity while preserving that configuration. The source host's Generation 2 setting does not change this **Generation 1 appliance**.
+
+Choose **one** of the two options below. Option A uses the Hyper-V Manager import wizard, then a PowerShell command to apply this lab's appliance settings. Option B imports the appliance and applies the same settings entirely in PowerShell. Both options give the appliance eight vCPUs, 16 GB of static memory, a connection to `intSwitch`, a fixed MAC address, and a DHCP reservation for `192.168.0.20`.
+
+#### Hands-On Steps — Option A: Import with Hyper-V Manager
+
+**HyperVHost — Hyper-V Manager:**
+
+1.  Select **Import Virtual Machine**.
+
+2.  Select the folder that you extracted (usually named `AzureMigrateAppliance_v***`).
+
+3.  Confirm that the wizard identifies the Azure Migrate appliance.
+
+    If the wizard cannot find the exported configuration, stop and check the extracted package; do not substitute a newly created empty VM or guess a disk.
+
+4.  Choose **Copy the virtual machine (create a new unique ID)**, not register in place.
+
+5.  Set the configuration, checkpoint, smart-paging, and virtual-disk destinations under the actual appliance store, for example `E:\Appliance\VMs`.
+
+    Check that there is enough free space for the physical source files before the copy.
+
+    Do not accept the default destinations on host `C:\`.
+
+6.  Leave all other settings as they are and complete the import.
+
+    If the wizard asks you to choose a network connection, select **intSwitch**.
+
+7.  Note the imported VM's display name in Hyper-V Manager.
+
+    Optionally rename it to `MigrateAppl` so it is easy to identify; the display name is separate from project registration.
+
+**HyperVHost — elevated PowerShell:**
+
+8.  Before first boot, run the configuration command below.
+
+    If your VM's display name is not `MigrateAppl`, change `$name` to match it.
+
+    ```powershell
+    $name = 'MigrateAppl'
+
+    Set-VM -Name $name -ProcessorCount 8 -MemoryStartupBytes 16GB -StaticMemory `
+        -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
+    Connect-VMNetworkAdapter -VMName $name -SwitchName intSwitch
+    Set-VMNetworkAdapter -VMName $name -StaticMacAddress '00155D000014'
+    Enable-VMIntegrationService -VMName $name -Name 'Time Synchronization'
+
+    Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 `
+        -ClientId '00-15-5D-00-00-14' -Name $name
+    ```
+
+    The MAC address `00-15-5D-00-00-14` follows the lab's addressing pattern (`14` is hexadecimal for `.20`) and is not used by the four workloads. If the reservation command reports that `192.168.0.20` is already reserved, stop and check the existing reservation rather than overwriting it.
+
+**HyperVHost — Hyper-V Manager:**
+
+9.  Confirm that the VM configuration and attached disks are on ApplianceStore, not among the four workload disks on host `C:\`.
+
+#### Hands-On Steps — Option B: Import and Configure with PowerShell
+
+**HyperVHost — elevated PowerShell:**
+
+1.  Set the appliance name and store location, and find the exported configuration file.
+
+    ```powershell
+    $name  = 'MigrateAppl'
+    $store = 'E:\Appliance'
+    $vmcx  = @(Get-ChildItem "$store\Extracted" -Recurse -Filter *.vmcx)
+    $vmcx | Select-Object FullName
+    ```
+
+    Exactly one `.vmcx` file should be listed. If none or more than one is listed, stop and use Option A.
+
+2.  Check the import for problems, copying the VM into the appliance store with a new ID.
+
+    ```powershell
+    $report = Compare-VM -Path $vmcx[0].FullName -Copy -GenerateNewId `
+        -VirtualMachinePath "$store\VMs" -SnapshotFilePath "$store\VMs" `
+        -SmartPagingFilePath "$store\VMs" -VhdDestinationPath "$store\VMs\Virtual Hard Disks"
+    $report.Incompatibilities | Select-Object MessageId, Message
+    ```
+
+3.  If the only problem listed is a missing network switch, connect the adapter to `intSwitch`.
+
+    ```powershell
+    $report.Incompatibilities | Where-Object MessageId -eq 33012 |
+        ForEach-Object { $_.Source | Connect-VMNetworkAdapter -SwitchName intSwitch }
+    ```
+
+    If any other problem is listed, stop and use Option A.
+
+4.  Import the appliance and give it the lab display name.
+
+    ```powershell
+    Import-VM -CompatibilityReport $report | Rename-VM -NewName $name
+    ```
+
+5.  Apply the lab's appliance settings and reserve its address. This is the same command as Option A, step 8.
+
+    ```powershell
+    Set-VM -Name $name -ProcessorCount 8 -MemoryStartupBytes 16GB -StaticMemory `
+        -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing
+    Connect-VMNetworkAdapter -VMName $name -SwitchName intSwitch
+    Set-VMNetworkAdapter -VMName $name -StaticMacAddress '00155D000014'
+    Enable-VMIntegrationService -VMName $name -Name 'Time Synchronization'
+
+    Add-DhcpServerv4Reservation -ScopeId 192.168.0.0 -IPAddress 192.168.0.20 `
+        -ClientId '00-15-5D-00-00-14' -Name $name
+    ```
+
+6.  Confirm the VM settings and that every disk is on the appliance store.
+
+    ```powershell
+    Get-VM -Name $name | Select-Object Name, State, ProcessorCount, MemoryStartup, DynamicMemoryEnabled
+    Get-VMHardDiskDrive -VMName $name | Select-Object Path
+    ```
+
+**Expected Result:** A new, still-off appliance VM appears in Hyper-V Manager with the published configuration, eight vCPUs, 16 GB static memory, a fixed MAC on `intSwitch`, a DHCP reservation for `192.168.0.20`, and its files on ApplianceStore. The four workload VMs are unchanged.
+
+### 2.4 — Configure Networking and Reserve the Appliance Address (Optional Manual Method)
+
+This lab uses one appliance NIC on **intSwitch**. The internal switch provides host/guest access, DHCP, and outbound internet through host NAT. Do not add an external or Default Switch NIC for this lab.
+
+The PowerShell command in Step 2.3 already completes this step. Use the steps below only if you want to see or perform the same configuration manually instead of running that command, or to confirm what it did.
+
+#### Hands-On Steps — Optional
+
+**HyperVHost — Hyper-V Manager:**
+
+1.  Open the imported appliance's **Settings > Network Adapter**.
+
+2.  Confirm that it connects to **intSwitch**.
+
+3.  Open the adapter's **Advanced Features** and record its actual MAC address.
+
+    1.  If none is assigned yet, start this appliance to let Hyper-V allocate one.
+    2.  Complete only the console first-boot prompts described in Step 2.5.
+    3.  Shut it down cleanly and return here.
+
+4.  Confirm no other VM uses that MAC.
+
+5.  Select **Static** and retain the actual address.
+
+    That way, it will not change after reservation.
+
+    Do not copy another VM's MAC or invent a shared value.
+
+**HyperVHost — DHCP console:**
+
+6.  Open **Server Manager > Tools > DHCP**, expand the host, then **IPv4 > Scope 192.168.0.0**.
+
+7.  Inspect **Address Leases** and **Reservations**.
+
+    Confirm `192.168.0.20` is not already allocated or reserved to a different client, and that the appliance MAC is not assigned to another reservation.
+
+    Resolve a conflict before continuing; do not overwrite another client.
+
+8.  Under **Reservations**, choose **New Reservation**.
+
+9.  Enter the appliance display name, IP address **192.168.0.20**, and the actual appliance NIC MAC from the previous step.
+
+10. Select **DHCP** as the supported client type.
+
+11. Save the reservation.
+
+12. Confirm the scope is active and its options provide gateway **192.168.0.1** and the lab's working DNS settings.
+
+13. Leave the appliance guest NIC configured to obtain its address through DHCP.
+
+**Expected Result:** The appliance NIC is attached to intSwitch with a stable, unique MAC, and the host DHCP scope reserves `192.168.0.20` for that exact NIC.
+
+### 2.5 — Start the Appliance and Complete First Boot
+
+First boot establishes the appliance's local administrator password and network configuration. Accurate time and outbound connectivity are needed for Azure authentication and registration.
+
+#### Hands-On Steps
+
+**HyperVHost — Hyper-V Manager:**
+
+1.  Start the Migrate Appliance VM.
+
+2.  Select **Connect** to open its console.
+
+**Appliance — console:**
+
+3.  Complete the first-boot prompts and set its local administrator password.
+
+    It is best to use the lab password you established previously to make it easier to remember. If you choose a different password, be sure to record it.
+
+4.  Sign in to the appliance VM.
+
+**Appliance — PowerShell:**
+
+5.  Inspect the NIC configuration.
+
+    ```powershell
+    ipconfig /all
+    ```
+
+    Confirm address **192.168.0.20**, subnet mask **255.255.255.0**, gateway **192.168.0.1**, and working DNS servers.
+
+    If it received another address, correct the reservation/MAC match before continuing.
+
+6.  Check the host WinRM path.
+
+    ```powershell
+    Test-NetConnection 192.168.0.1 -Port 5985
+    ```
+
+**Appliance — browser:**
+
+7.  Wait for the Azure Migrate Configuration Manager to start automatically once the machine finishes setting up.
+
+    Alternatively, open [**https://localhost:44368**](https://localhost:44368) in the appliance's browser, or open [**https://192.168.0.20:44368**](https://192.168.0.20:44368) from a browser on HyperVHost.
+
+8.  Confirm the destination is your own appliance before accepting its local certificate warning.
+
+**Expected Result:** The appliance is Running, you can sign in, and the configuration manager opens over HTTPS on port 44368. The host connectivity check should return `TcpTestSucceeded: True`; if it does not, complete the host configuration in Step 3.1 before discovery.
 
 ### Why This Matters — CSA Context
 
-**Security model.** The appliance is a locked-down Windows Server VM managed by Microsoft. It auto-updates, runs with minimal attack surface, and communicates with Azure exclusively over outbound HTTPS (port 443). It does not require inbound ports from the internet. In customer security reviews, I emphasize that:
+Verifying the archive is a stop/go security check, not an optional warning. Importing the published export also avoids silently changing the appliance generation or storage layout. DHCP reservation gives the lab a predictable source address while keeping the guest network configuration DHCP-based.
 
-- The appliance stores credentials locally in an encrypted credential store (DPAPI)
-- No workload data (application data, file contents, database records) is collected
-- All communication is encrypted in transit with TLS 1.2+
-- The appliance can be deleted after migration without any impact on migrated workloads
-
-**Network requirements in production:**
-
-| Endpoint | Protocol | Purpose |
-|---|---|---|
-| `*.azure.com` | HTTPS 443 | Azure Migrate service APIs |
-| `*.microsoftonline.com` | HTTPS 443 | Azure AD authentication |
-| `*.windows.net` | HTTPS 443 | Azure Storage (for uploads) |
-| `aka.ms` | HTTPS 443 | Appliance auto-update |
-
-**Appliance sizing at scale:** A single appliance supports discovery of up to **5,000 VMs** on Hyper-V. For environments with more than 5,000 VMs, deploy additional appliances — each registered to the same Azure Migrate project. In large enterprise migrations (10,000+ VMs), plan for 2–3 appliances and stagger discovery to avoid overwhelming management infrastructure.
-
----
+------------------------------------------------------------------------
 
 ## Step 3: Configure the Appliance and Start Discovery
 
-### 3.1 — Connect to the Appliance Configuration Manager
+### 3.1 — Confirm and Configure Hyper-V Host Access
 
-1. From the Hyper-V host, open a web browser.
-2. Navigate to **https://192.168.0.20:44368**.
-3. Accept the self-signed certificate warning and proceed.
+The appliance must be able to query the host over WinRM and read Hyper-V inventory and performance counters. Module 0 prepares this access, but you still need to confirm it and know how to configure it manually.
 
-> **Warning:** Use HTTPS (port 44368). The appliance configuration manager will not respond on HTTP.
+#### Hands-On Steps
 
-![Appliance configuration manager](../images/module-1-step-3a.png)
+**HyperVHost — elevated PowerShell:**
 
-### 3.2 — Set Up Prerequisites
+1.  Check the WinRM service.
 
-The appliance configuration manager will run prerequisite checks:
+    ```powershell
+    Get-Service WinRM
+    ```
 
-1. **Internet connectivity** — Verifies the appliance can reach Azure endpoints.
-2. **Time sync** — Ensures the appliance clock is synchronized.
-3. **Appliance updates** — Installs any available updates.
+2.  If PowerShell remoting is not configured, confirm that **vEthernet (intSwitch)** is the trusted private lab connection.
 
-Wait for all prerequisite checks to pass before proceeding.
+3.  Configure remoting locally.
 
-> **Note:** If internet connectivity fails, verify that the external network adapter is connected and has a valid IP address. You may need to configure DNS settings.
+    ```powershell
+    Enable-PSRemoting -Force
+    ```
+
+**HyperVHost — Windows Defender Firewall with Advanced Security:**
+
+4.  Inspect the inbound lab WinRM rule.
+
+    Confirm it allows the appliance's nested subnet **192.168.0.0/24** to reach host TCP **5985**.
+
+5.  If the rule is missing, create an inbound TCP 5985 allow rule for the private lab connection with that remote-address scope.
+
+6.  Review any remoting rules created by the preceding command and narrow overlapping broad access to the same trusted lab range.
+
+    Do not disable the firewall or expose WinRM to the internet; opening a port does not create an HTTPS listener.
+
+**HyperVHost — Computer Management > Local Users and Groups:**
+
+7.  Confirm that the host discovery account supplied by the lab deployment is a local administrator.
+
+    Use the host-local lab administrator credential, not your personal Azure sign-in. A separate non-administrator discovery account would need **Remote Management Users**, **Hyper-V Administrators**, and **Performance Monitor Users** membership; do not add those memberships to unrelated accounts.
+
+**Appliance — PowerShell:**
+
+8.  If the earlier check failed, repeat it.
+
+    ```powershell
+    Test-NetConnection 192.168.0.1 -Port 5985
+    ```
+
+    Resolve host reachability before adding the discovery source.
+
+**Expected Result:** WinRM is Running, remoting is configured, the discovery account has the required host permissions, and the appliance can reach host TCP 5985 through a scoped private lab rule.
+
+> **Safety:** The workload disks are local to HyperVHost, not remote SMB shares. Do not enable CredSSP for this lab or set a wildcard TrustedHosts entry to bypass connection validation.
+
+### 3.2 — Complete Appliance Prerequisites
+
+The configuration manager checks the appliance's own connectivity, clock, and components before registration. Host connectivity and Azure connectivity are separate paths.
+
+#### Hands-On Steps
+
+**Appliance — Appliance configuration manager (browser):**
+
+1.  Review and accept the appliance setup terms as prompted.
+
+2.  Run the prerequisite checks.
+
+3.  Confirm the appliance can reach the required Azure services through the lab NAT and DNS configuration.
+
+    The lab should not require a proxy. Configure one only if your lab network requires it.
+
+4.  Check that the appliance's UTC time is accurate.
+
+    Correct its time synchronization if required; changing only the display time zone does not correct clock skew.
+
+5.  Allow the appliance to check for and apply its updates.
+
+6.  Refresh or reopen the configuration manager if prompted.
+
+7.  Rerun any failed prerequisite check.
+
+**Expected Result:** The configuration manager shows successful prerequisite checks and allows Azure registration to proceed. Do not continue past an unresolved connectivity, time, or update failure.
 
 ### 3.3 — Register with Azure
 
-1. Click **Login** to authenticate with your Azure credentials.
-2. In the **Register with Azure Migrate** section, paste the **project key** you copied in Step 2.1.
-3. Click **Register**.
+The generated project key associates this appliance with your project. Browser authentication authorizes registration; it is not a host or guest credential.
 
-**Expected Outcome:** The appliance displays a confirmation that it has been successfully registered with your Azure Migrate project.
+#### Hands-On Steps
 
-![Appliance registered with Azure Migrate](../images/module-1-step-3b.png)
+**Appliance — Appliance configuration manager (browser):**
 
-### 3.4 — Add Hyper-V Host Credentials
+1.  In the project registration area, enter the project key you saved in Step 2.1.
 
-1. In the **Manage credentials** section, click **Add credentials**.
-2. Enter the credentials for the Hyper-V host:
+2.  Select the Azure sign-in action when prompted.
 
-   | Setting | Value |
-   |---|---|
-   | Friendly name | `HyperVHostCreds` |
-   | Username | `azureuser` |
-   | Password | *The password you set during deployment* |
+3.  Complete browser authentication with an account authorized for the lab project.
 
-3. Click **Save**.
+    Check the tenant and subscription rather than accepting an unrelated signed-in account.
 
-### 3.5 — Add the Hyper-V Host for Discovery
+4.  Return to the configuration manager and review the identified project and appliance name.
 
-1. In the **Provide Hyper-V host details** section, click **Add discovery source**.
-2. Select **Hyper-V Host/Cluster**.
-3. Enter the Hyper-V host IP address: `192.168.0.1`.
-4. Select the credentials you created (`HyperVHostCreds`).
-5. Click **Save**.
+5.  Select **Register** when available.
 
-### 3.6 — Start Discovery
+6.  Wait for the registration confirmation.
 
-1. Click **Start discovery**.
-2. The appliance begins connecting to the Hyper-V host and inventorying all guest VMs.
+    Keep the project key and authentication details private; do not copy them into your results notes.
 
-![Discovery started](../images/module-1-step-3c.png)
+**Expected Result:** The appliance reports successful registration to your intended Azure Migrate project. An appliance already registered to another project is not reused for this exercise.
 
-**Expected Outcome:** The appliance confirms that discovery has been initiated and shows the Hyper-V host as connected.
+### 3.4 — Add Host and Guest Credentials
+
+Host credentials supply VM-level inventory. Guest credentials allow supported software and dependency discovery. One does not replace the other.
+
+#### Hands-On Steps
+
+**Appliance — Appliance configuration manager (browser):**
+
+1.  Open the credential management area.
+
+2.  Add a clearly named host credential, such as `HyperVHostCreds`.
+
+3.  Select the Windows credential type appropriate for a non-domain host.
+
+4.  Enter the deployment-provided local administrator account and password.
+
+    Use the host-qualified account, such as `HyperVHost\labadmin` when the deployed account is `labadmin`; if deployment supplied a different local administrator name, use that exact name. Do not substitute your workstation or Azure username.
+
+5.  Add a **Windows guest** credential using the guests' built-in `Administrator` account and the lab deployment password, separate from the host credential.
+
+6.  Add a **Linux guest** credential, selecting the Linux credential type.
+
+    Use the actual Linux username and password supplied at deployment. This account uses SSH and has the lab's configured sudo access for privileged inventory/dependency operations. Do not guess a default username or change the protected application configuration.
+
+7.  Save the credentials.
+
+8.  Use the available validation actions for the intended source or guests.
+
+    If optional SQL database discovery requests a separate credential, use an approved discovery credential with the required SQL metadata permissions from the lab setup guidance; the application's limited database login is not a substitute. SQL database discovery is not required to create the server assessment.
+
+**Expected Result:** Distinct host, Windows guest, and Linux guest credential entries are saved for their intended purposes, with validation completed where offered. No passwords appear in your notes or screenshots.
+
+### 3.5 — Add the Hyper-V Host and Start Discovery
+
+The discovery source is the host, **HyperVHost / 192.168.0.1**, not one of the four guests and not the appliance itself.
+
+#### Hands-On Steps
+
+**Appliance — Appliance configuration manager (browser):**
+
+1.  In the Hyper-V discovery-source area, select the action to add a host or cluster.
+
+2.  Enter **192.168.0.1** as the host address, or the actual resolvable HyperVHost name.
+
+3.  Select the host credential created in Step 3.4.
+
+4.  Save the source.
+
+5.  Run its connection/credential validation.
+
+    Resolve any reported address, account, permission, or network failure before starting discovery.
+
+6.  Confirm the saved guest credentials are available for the supported guest discovery features.
+
+7.  Select **Start discovery**.
+
+8.  Check that the appliance reports discovery as started and the Hyper-V source as connected or successfully validated.
+
+**Expected Result:** The registered appliance is discovering VMs from the intended host. This starts inventory collection, not replication.
 
 ### Why This Matters — CSA Context
 
-**Credential best practices for production:**
+The host and guest credential paths explain why VM records can appear before software inventory. A successful host connection does not prove that guest SSH or Windows remoting has succeeded. Resolving the reported connection at its source is more useful than repeatedly waiting for an inventory count to change.
 
-- **Never use domain admin credentials.** Create a dedicated service account with the minimum required permissions (Hyper-V Administrators group membership for Hyper-V discovery)
-- For guest VM software inventory, the appliance needs guest credentials — use a least-privilege local account, not a domain admin
-- Rotate credentials after the discovery phase; the appliance does not need ongoing access after migration completes
-- Document all service accounts in your migration runbook for audit trail
-
-**Discovery scope decisions.** In this workshop we discover all VMs on the host, but in production you may want to limit discovery to specific hosts or clusters. Reasons include:
-
-- **Phased migration** — discover only the datacenter wing being migrated this quarter
-- **Security boundaries** — different teams own different clusters and have different approval timelines
-- **Performance** — discovering 10,000 VMs simultaneously can generate significant WinRM traffic
-
-**Discovery frequency.** The appliance performs continuous discovery after initial startup, collecting delta updates every 5 minutes for metadata and performance counters. Performance-based assessments benefit from longer collection periods — **Microsoft recommends at least 1 day, ideally 30 days** of performance data for accurate right-sizing.
-
----
+------------------------------------------------------------------------
 
 ## Step 4: Wait for Discovery and Validate Results
 
-Discovery typically takes **15–30 minutes** to complete the initial inventory. During this time, the appliance:
-
-- Connects to the Hyper-V host via WinRM
-- Enumerates all guest VMs and their configurations
-- Collects metadata (CPU, memory, disk, network adapters)
-- Begins performance data collection (ongoing — runs continuously)
-- Initiates software inventory discovery (installed applications, roles)
-- Discovers SQL Server instances and databases (if SQL credential is configured)
-
 ### Verify Discovery in the Azure Portal
 
-1. Go to the [Azure portal](https://portal.azure.com).
-2. Navigate to **Azure Migrate** → **Servers, databases and web apps**.
-3. Under **Azure Migrate: Discovery and assessment**, check the **Discovered servers** count.
+VM inventory, software inventory, and performance collection progress separately. Initial records may appear before guest inventory is complete. A short idle-lab collection period is not representative production telemetry.
 
-You should see **4 discovered servers**:
+#### Hands-On Steps
 
-| Server Name | OS | IP Address |
+**Local workstation or HyperVHost — Azure portal:**
+
+1.  Open your Azure Migrate project and its **Discovered servers** view in the discovery and assessment area.
+
+2.  Refresh after the appliance has had time to upload inventory.
+
+3.  Find the four workload names individually.
+
+    Do not treat the headline server count as proof of scope. The appliance itself may also appear.
+
+4.  Open each workload record and compare its name, source host, OS, address, CPU, and memory with the lab inventory and Hyper-V Manager.
+
+5.  Confirm both Linux records identify **Ubuntu 24.04**, and both Windows records identify **Windows Server 2022**.
+
+6.  Inspect the available **Discovery status**, latest discovery information, or appliance status for fresh successful collection from your connected host.
+
+    If a record is missing or its OS information is incomplete, return to the appliance's source/credential validation and resolve the reported issue before assessing it. Do not substitute the appliance record for a missing workload.
+
+7.  Open **Software inventory** where available.
+
+8.  Look for IIS, SQL Server, Nginx, and Tomcat/Java on their respective servers as guest discovery becomes available.
+
+    Record pending or missing guest inventory honestly; it is not evidence that no application is installed.
+
+**Local workstation — lab notes:**
+
+9.  Record the four server names, OS values, source host, and discovery status.
+
+    Keep the appliance out of your workload assessment selection.
+
+**Expected Result:** The portal contains fresh records for all four named workloads from the correct Hyper-V host, with the expected operating systems and configuration. Any additional appliance record remains outside the workload scope.
+
+| Server name | Expected OS | Expected source address |
 |---|---|---|
 | OnPrem-Web | Windows Server 2022 | 192.168.0.10 |
 | OnPrem-SQL | Windows Server 2022 | 192.168.0.11 |
-| OnPrem-Linux-Web | Ubuntu 22.04 | 192.168.0.12 |
-| OnPrem-Linux-App | Ubuntu 22.04 | 192.168.0.13 |
+| OnPrem-Linux-Web | Ubuntu 24.04 | 192.168.0.12 |
+| OnPrem-Linux-App | Ubuntu 24.04 | 192.168.0.13 |
 
-![Discovered servers in Azure portal](../images/module-1-step-4.png)
+> **Note:** Tomcat 10.1 appearing in software inventory does not guarantee a separately discovered web-application asset. Neither that asset nor a SQL assessment is a prerequisite for this module's four-server Azure VM assessment.
 
-> **Tip:** If fewer than 4 servers appear, wait a few more minutes and refresh the portal. Discovery happens in phases — VM inventory appears first, followed by software inventory and performance data.
+### Why This Matters — CSA Context
 
-### What to Expect in Real Environments
+An assessment of the wrong four records can look complete while omitting a workload. Server identity and source details establish scope; software assets and raw inventory totals do not.
 
-| Environment Size | Initial Discovery Time | Full Inventory (with software) |
-|---|---|---|
-| Small (< 100 VMs) | 15–30 minutes | 2–4 hours |
-| Medium (100–1,000 VMs) | 30–60 minutes | 6–12 hours |
-| Large (1,000–5,000 VMs) | 1–2 hours | 24–48 hours |
-
-> **CSA Tip:** Do not wait for full software inventory before creating your first assessment. Start with the VM-level assessment as soon as servers appear. Run the software/SQL assessment later when that data is fully populated.
-
----
+------------------------------------------------------------------------
 
 ## Step 5: Create and Interpret an Assessment
 
-This is the most critical section of Module 1. The assessment is where discovery data transforms into actionable migration intelligence. Every configuration choice here has cost and risk implications.
-
 ### 5.1 — Start the Assessment Wizard
 
-1. In the Azure Migrate dashboard, under **Azure Migrate: Discovery and assessment**, click **Assess** → **Azure VM**.
+The required exercise is the **Classic Azure VM server assessment**, which evaluates IaaS readiness, sizing, and cost for four servers. It is not an application or PaaS assessment. The 2026-09-30 retirement of the **classic agent-based appliance** is a different lifecycle change; it does not mean this grouped server assessment was retired.
 
-![Start assessment](../images/module-1-step-5a.png)
+#### Hands-On Steps
 
-### 5.2 — Configure Assessment Settings (Deep Dive)
+**Local workstation or HyperVHost — Azure portal:**
 
-1. **Assessment name:** `Workshop-Assessment`
-2. Click **Edit** next to assessment properties and configure:
+1.  In your Azure Migrate project, open **Use Classic assessment tools > Assess > Azure VM** where that route is shown.
 
-   | Setting | Recommended Value | CSA Rationale |
-   |---|---|---|
-   | Target location | *Your target Azure region (e.g., East US)* | See target region guidance below |
-   | Storage type | Automatic | Let Azure Migrate recommend Premium vs Standard |
-   | Reserved instances | No reserved instances | For workshop; use RI/Savings Plans for production |
-   | Sizing criteria | **Performance-based** | **Critical — see below** |
-   | Performance history | 1 month (or available data) | Longer = more accurate right-sizing |
-   | Percentile utilization | 95th percentile | Captures peak usage without outlier spikes |
-   | Comfort factor | **1.3** | Default buffer for growth — see guidance below |
-   | VM series | Select general purpose (Dsv5, Ddsv5) | Exclude exotic/GPU series unless needed |
-   | Pricing | Pay-As-You-Go | Start here; layer in RI/SP savings afterward |
-   | Currency | *Your preferred currency* | |
-   | OS licensing | *Windows Server with Software Assurance or Linux* | SA = Azure Hybrid Benefit savings |
+    If the portal places server assessments elsewhere, use the current **Azure VM assessment** entry for discovered servers.
 
-3. Click **Save**.
+2.  Choose appliance-discovered server data if asked for the discovery source.
 
-#### Target Region Selection
+3.  Enter a learner-chosen assessment name, such as `WorkshopAzureVM`.
 
-Target region is not just about proximity. Consider:
+4.  Open the assessment properties/settings.
 
-- **Latency** — where are your users? Use [Azure Speed Test](https://www.azurespeed.com/) to measure
-- **Compliance** — does data need to remain in a specific country/region?
-- **Service availability** — not all VM series are available in all regions
-- **Cost** — pricing varies by region (East US is typically cheapest in North America)
-- **Disaster recovery** — choose a region that pairs well with your DR strategy
+**Expected Result:** You are configuring an Azure VM server assessment using the appliance's discovered inventory, not selecting SQL instances, IIS sites, or other application assets.
 
-#### Sizing Criteria: As On-Premises vs Performance-Based
+### 5.2 — Configure Assessment Settings
 
-This is the **single most impactful configuration decision** in the assessment:
+**As on-premises** sizing maps the allocated source resources to Azure. **Performance-based** sizing uses collected utilization and requires sufficient representative data. Start with as-on-premises for a newly discovered lab; compare performance-based sizing later if useful.
 
-| Criteria | How It Works | Best For |
-|---|---|---|
-| **As on-premises** | Maps current vCPU/RAM to equivalent Azure VM | Quick estimates, lift-and-shift without optimization |
-| **Performance-based** | Analyzes actual CPU/RAM/disk utilization and recommends the smallest VM that meets demand | Right-sized migrations, cost optimization |
+#### Hands-On Steps
 
-**Performance-based sizing typically saves 30–50% compared to as-on-premises.** Most on-premises VMs are over-provisioned. A VM allocated 8 vCPUs but consistently using 2 will be recommended for a 2-vCPU Azure VM with performance-based sizing.
+**Local workstation or HyperVHost — Azure portal (assessment settings):**
 
-> **CSA Recommendation:** Always use performance-based sizing for production assessments. Use as-on-premises only for quick initial estimates or when performance data is not yet available.
+1.  Set the target location to the migration target region recorded in Step 1.
 
-```mermaid
-flowchart TD
-    Start{Sizing<br/>Strategy?} -->|"Match current specs"| AsOnPrem["As On-Premises<br/>Same CPU/RAM"]
-    Start -->|"Optimize for cloud"| PerfBased["Performance-Based<br/>Based on actual usage"]
+    Confirm it is not the source host region, the resource group location by assumption, or the project metadata geography by default.
 
-    AsOnPrem --> Risk1["⚠️ Risk: Over-provisioned<br/>30-50% higher cost"]
-    PerfBased --> Comfort{Comfort<br/>Factor?}
+2.  Review and apply the following baseline settings, using the equivalent controls in your portal.
 
-    Comfort -->|"1.0x"| Tight["Tight fit<br/>Risk: peaks may cause issues"]
-    Comfort -->|"1.3x (default)"| Balanced["✅ Balanced<br/>Recommended for most"]
-    Comfort -->|"2.0x"| Safe["Conservative<br/>Higher cost, more headroom"]
+| Setting | Baseline for this lab |
+|---|---|
+| Sizing criteria | **As on-premises** |
+| Target location | Your reviewed migration target region |
+| Currency | **USD** |
+| Pricing | **Pay-as-you-go** |
+| Reserved instances / commitment discounts | **None** |
+| Azure Hybrid Benefit | **No**, unless you have confirmed eligible entitlement |
+| Storage type | Automatic, or the lab's reviewed supported choice |
+| VM families | Suitable supported families available in the target subscription/region |
 
-    Balanced --> Recommend["📋 Review Azure Advisor<br/>after migration for<br/>right-sizing"]
+3.  Save the settings.
 
-    style PerfBased fill:#4CAF50,color:white
-    style Balanced fill:#4CAF50,color:white
-    style Risk1 fill:#f44336,color:white
-```
+**Local workstation — lab notes:**
 
-#### Comfort Factor
+4.  Record the selected settings.
 
-The comfort factor is a multiplier applied on top of performance-based sizing to accommodate:
+    If the available pricing agreement differs, record the actual agreement rather than presenting its estimate as the baseline above.
 
-- Traffic growth after migration
-- Seasonal spikes not captured in the performance window
-- Application behavior changes in the cloud
-
-| Factor | Meaning | When to Use |
-|---|---|---|
-| 1.0x | No buffer — size exactly to observed performance | Dev/test environments, known stable workloads |
-| **1.3x (default)** | 30% headroom | Most production workloads |
-| 1.5x–2.0x | 50–100% headroom | Rapidly growing workloads, seasonal peaks |
-
-#### VM Series Exclusions
-
-Limit target VM families to avoid the assessment recommending exotic or expensive series:
-
-- **Include:** General purpose (D-series), Memory-optimized (E-series) for database servers
-- **Exclude:** GPU (N-series), HPC (H-series), Confidential (DC-series) — unless you specifically need them
-- This prevents a SQL Server from being recommended to a GPU VM just because the memory fits
+**Expected Result:** The assessment uses documented as-on-premises settings, the intended migration target region, and explicit pricing/licensing assumptions. No entitlement or commitment discount has been assumed.
 
 ### 5.3 — Select Servers to Assess
 
-1. Click **Select servers to assess**.
-2. Create or select a group name: `AllServers`.
-3. Select all 4 discovered VMs:
-   - ☑ OnPrem-Web
-   - ☑ OnPrem-SQL
-   - ☑ OnPrem-Linux-Web
-   - ☑ OnPrem-Linux-App
-4. Click **Next: Review + create assessment**.
-5. Review the configuration and click **Create assessment**.
+The assessment group must contain exactly the four workload **server records**. Additional software, SQL, web-application, or appliance records are outside this selection.
+
+#### Hands-On Steps
+
+**Local workstation or HyperVHost — Azure portal (server selection):**
+
+1.  Create a group with a learner-chosen name, such as `WorkshopFourServers`.
+
+    Select an existing group only after checking its membership.
+
+2.  Select only **OnPrem-Web**, **OnPrem-SQL**, **OnPrem-Linux-Web**, and **OnPrem-Linux-App**, using the source details validated in Step 4.
+
+3.  Verify that the selection contains exactly those four servers and excludes `MigrateAppl` or any other appliance display name.
+
+4.  Continue to the review page.
+
+5.  Check the group, four members, region, sizing method, and pricing settings.
+
+6.  Select **Create assessment**.
+
+**Expected Result:** An Azure VM assessment is created for a group containing exactly the four named workload servers. Creating an assessment has not started VM replication.
 
 ### 5.4 — Review Assessment Results
 
-After the assessment completes (typically within a few minutes):
+Creating an assessment is not the same as reviewing its results. Readiness is an assessment finding, not proof that the application has been tested or that migration capacity is reserved.
 
-1. Navigate to **Azure Migrate** → **Servers, databases and web apps**.
-2. Click the number next to **Assessments** under the Discovery and assessment tool.
-3. Click on **Workshop-Assessment** to view the results.
+#### Hands-On Steps
 
-![Assessment results](../images/module-1-step-5b.png)
+**Local workstation or HyperVHost — Azure portal:**
 
-| Server | Readiness | Recommended Size | Est. Monthly Cost |
-|---|---|---|---|
-| OnPrem-Web | Ready | Standard_D2s_v5 | *Varies* |
-| OnPrem-SQL | Ready | Standard_D2s_v5 | *Varies* |
-| OnPrem-Linux-Web | Ready | Standard_D2s_v5 | *Varies* |
-| OnPrem-Linux-App | Ready | Standard_D2s_v5 | *Varies* |
+1.  Open the project's Azure VM assessments list and select your assessment.
 
-> **Note:** Actual sizing recommendations and cost estimates depend on the guest VM configurations in your lab. The values shown here are approximate.
+2.  Refresh until the portal reports **Completed**.
+
+    If it fails, inspect the reported reason rather than proceeding on the basis that an assessment name exists.
+
+3.  Open the results.
+
+4.  Open the readiness summary and drill into each of the four servers.
+
+5.  Read the actual readiness result and any explanation or recommended action.
+
+    Do not assume all four will be Ready.
+
+6.  Review each proposed Azure VM size, disk recommendation, and compute/storage estimate.
+
+7.  Check whether the recommended sizes are available and within quota in the target region before planning replication.
+
+**Local workstation — lab notes:**
+
+8.  Record your actual findings in a table like this, including the assessment settings and collection period beside it.
+
+| Server | Actual readiness and conditions | Recommended Azure size | Estimated monthly compute / storage | Collection period / confidence, if shown |
+|---|---|---|---|---|
+| OnPrem-Web | Record portal result | Record portal result | Record portal estimate | Record available evidence |
+| OnPrem-SQL | Record portal result | Record portal result | Record portal estimate | Record available evidence |
+| OnPrem-Linux-Web | Record portal result | Record portal result | Record portal estimate | Record available evidence |
+| OnPrem-Linux-App | Record portal result | Record portal result | Record portal estimate | Record available evidence |
+
+**Local workstation or HyperVHost — Azure portal:**
+
+9.  Optionally, select the portal's **Export** action to download the assessment workbook (`.xlsx`) to your own lab storage.
+
+    Export is optional; the reviewed results and settings are the required evidence.
+
+**Expected Result:** You have opened the completed assessment and reviewed readiness, recommended sizes, and cost estimates for all four workloads. Any unresolved condition is recorded with its required follow-up; no fixed readiness or price is assumed.
 
 ### 5.5 — Interpreting Readiness Categories
 
-The assessment classifies each VM into one of four readiness categories:
+Use the wording and details shown in your portal. Typical categories distinguish ready servers, servers needing attention, unsupported configurations, and incomplete evidence.
 
-| Category | Meaning | Action Required |
-|---|---|---|
-| **Ready** | VM can be migrated as-is to Azure | Proceed with migration |
-| **Conditionally Ready** | VM can migrate but may need changes (e.g., boot type, OS version, NIC count) | Review conditions and remediate |
-| **Not Ready** | VM cannot be migrated to Azure IaaS (e.g., unsupported OS, >128 disks) | Consider modernization or alternative targets |
-| **Readiness Unknown** | Insufficient data to determine readiness | Re-run discovery, check appliance connectivity |
-
-**"Conditionally Ready" is not a failure.** Common conditions and remediations:
-
-| Condition | Remediation |
+| Readiness finding | Meaning for your plan |
 |---|---|
-| Boot type not supported (BIOS → UEFI) | Azure supports both; no action needed for most VMs |
-| OS version approaching end of support | Plan Extended Security Updates (ESU) or OS upgrade |
-| Network adapter count exceeds target VM limit | Reduce NICs or select a larger VM size |
-| Disk count or size exceeds limits | Consolidate disks or use Azure managed disk tiers |
+| Ready | Assessment found no blocking configuration in the collected evidence; application testing is still required |
+| Ready with conditions / Conditionally ready | Review each condition and resolve or explicitly account for it before proceeding |
+| Not ready | Investigate the stated unsupported configuration or target limitation before replication |
+| Unknown / Insufficient data | Obtain the missing discovery information and reassess rather than assuming readiness |
 
-```mermaid
-pie title VM Assessment Readiness Distribution
-    "Ready" : 2
-    "Conditionally Ready" : 1
-    "Ready with Conditions" : 1
-```
+A readiness result is specific to its settings and evidence. It does not authorize source shutdown, guarantee a recommended SKU will be allocatable, or remove the need for isolated migration tests.
 
-### 5.6 — Building the Business Case
+### 5.6 — Optional Performance Comparison and Business Case
 
-Assessment results are the foundation of your migration business case. Here's how to translate technical data into executive language:
+Performance-based sizing can inform a comparison, but an idle lab does not establish production demand. Assessment estimates are not a complete total cost of ownership calculation.
 
-**What to include in a stakeholder summary:**
+#### Hands-On Steps — Optional
 
-1. **Total estate:** "We assessed 4 servers currently running on-premises"
-2. **Readiness:** "100% of workloads are Ready for Azure migration with no blockers"
-3. **Monthly cost projection:** "Estimated Azure monthly spend is $X (Pay-as-You-Go)" — then show savings with Reserved Instances
-4. **TCO comparison:** Current on-prem costs (hardware amortization + power + cooling + labor) vs. projected Azure spend
-5. **Risk summary:** "Zero Not Ready workloads. No remediation required before migration"
+**Local workstation or HyperVHost — Azure portal:**
 
-**How to present "Conditionally Ready" to leadership:**
+1.  After more performance data has accumulated, create a second Azure VM assessment of the **same four servers** using **performance-based** sizing.
 
-> ❌ "5 of our servers have migration issues"
->
-> ✅ "5 servers need minor configuration adjustments before migration — all have straightforward remediations that we've documented. None are blockers."
+    Keep the target region and pricing assumptions the same for comparison.
 
-**Cost optimization layers to present:**
+2.  Review its available history, percentile, comfort factor, and confidence/data coverage.
 
-| Strategy | Typical Savings | Commitment |
+3.  Record the actual collection window.
+
+    Do not describe a short idle sample as representative business usage.
+
+4.  Compare the two assessments' sizes and estimates.
+
+**Local workstation — lab notes:**
+
+5.  Write a short summary of the four-server scope, actual readiness, outstanding conditions, monthly estimate, pricing assumptions, and limitations.
+
+    Treat any reserved-capacity or licensing comparison as optional and dependent on real eligibility.
+
+**Expected Result:** If you complete the comparison, you can explain why its recommendations differ and how limited collection affects confidence. Your summary distinguishes an Azure VM estimate from a full business case.
+
+### 5.7 — Read the Supplied Assessment Examples Without Changing Scope
+
+The reviewed supplied exports illustrate **recommendations**, not a different hands-on migration target. The pilot remains **four Azure IaaS VM rehosts**. Do not run a PaaS migration or change the manual source choice based on a workbook name.
+
+| Export path | Actual recommendation pattern in the reviewed export | Pilot interpretation |
 |---|---|---|
-| Pay-as-You-Go (baseline) | — | None |
-| Azure Hybrid Benefit (Windows SA / Linux) | 40–55% on compute | Existing SA licenses |
-| 1-year Reserved Instances | 30–40% on compute | 1-year commitment |
-| 3-year Reserved Instances | 55–65% on compute | 3-year commitment |
-| Azure Savings Plans | 25–35% on compute | Flexible commitment |
-| Dev/Test pricing | 40–60% | Dev/Test subscription |
+| IaaS | Four VMs, `Standard_D2als_v6` recommendation | Validate current size support, quota, price and allocation; not a fixed lab default |
+| PaaS Preferred | Two Linux IaaS VMs + IIS to App Service + SQL to Managed Instance | Conceptual modernization comparison only |
+| PaaS Only | Two Linux IaaS VMs + IIS to AKS + SQL to Managed Instance | The label does not mean the export eliminated every IaaS VM |
 
-> **CSA Tip:** Present the PAYG number first (worst case), then layer in optimization strategies. This lets stakeholders see the "ceiling" cost and understand that actual spend will be significantly lower.
+No separately assessed Tomcat, Nginx or Contoso Order Desk web-application asset was present in these exports. That is **not proof the software is absent**. IIS/Tomcat discovery support is not a promise that every generic Java app or Nginx reverse proxy appears as a first-class assessed web-app asset; do not fail the pilot merely because Nginx has no such asset.
 
----
+#### Hands-On Steps
+
+**Local workstation — assessment workbook / lab notes:**
+
+1.  Compare the four server identities, assessment settings, collection period and actual recommended target values in your available export/results. Manually inventory and record Nginx's actual static document root/files, reverse-proxy configuration/upstream, service, ports and dependencies while retaining its full-VM IaaS scope; a missing first-class web-app asset does not waive this inventory requirement.
+
+2.  Record the IaaS/PaaS difference without creating App Service, AKS, SQL Managed Instance, or SQL Database resources.
+
+3.  If the SQL readiness detail reports **trace flag 8017**, retain the exact warning and route it for manual SQL/support review.
+
+    Its remediation is **unverified here**. Do not enable/disable a trace flag or change SQL configuration based on the warning alone.
+
+4.  Mark unresolved readiness findings as follow-up items; a Ready VM assessment does not clear Module 3's kernel/Mobility/storage gates.
+
+**Expected Result:** Your notes accurately describe the exported recommendations and limitations while keeping the pilot's four-VM IaaS scope unchanged.
+
+### Why This Matters — CSA Context
+
+Assessment settings are business assumptions as well as technical inputs. A useful stakeholder summary explains what was assessed, what is ready, what remains unresolved, and how region, utilization evidence, and licensing affect the estimate. Unsupported savings percentages or guaranteed readiness weaken that summary.
+
+------------------------------------------------------------------------
 
 ## Step 6: Dependency Analysis
 
-Dependency analysis answers the question every migration architect must answer: **"What talks to what?"**
+Dependency analysis answers **"What talks to what?"** An assessment can size a VM without identifying every connection needed for a working application.
 
-Migrating a web server without its database server means downtime. Migrating a database without the applications that connect to it means broken connections. Dependency analysis prevents these failures.
+### 6.1 — Check the Available Dependency Experience
 
-> **Note:** Agent-based dependency analysis requires additional agent installation. If you want to proceed directly to migration, you can use the agentless dependency data visible in the Azure Migrate portal under each discovered server.
+Dependency visualization depends on the current feature, supported source, guest access, and observed connections. It is not guaranteed for every project or portal experience, and the core Azure VM assessment does not depend on a map being available.
 
-### Agentless vs Agent-Based — When to Use Each
+#### Hands-On Steps
 
-| Consideration | Agentless | Agent-Based |
+**Local workstation or HyperVHost — Azure portal:**
+
+1.  Open one of the four discovered servers.
+
+2.  Look for the available **Dependencies** or **Dependency analysis** experience.
+
+3.  Review its prerequisites and collection status before enabling an offered appliance-based option.
+
+**Appliance — Appliance configuration manager (browser):**
+
+4.  If that experience requests guest access, confirm the Windows guest administrator and Linux SSH/sudo credentials saved in Step 3.4.
+
+5.  Validate them using the available controls.
+
+    Host credentials alone do not provide guest dependency collection.
+
+**Local workstation or HyperVHost — Azure portal:**
+
+6.  Enable or configure the available supported collection option if offered.
+
+7.  Note its observation period.
+
+    If no supported map is available for your source, record that limitation and continue with the known architecture and application observations in the following sections. **Do not install retired MMA/OMS or legacy Dependency Agent packages to make a map appear.**
+
+**Expected Result:** You know whether supported dependency collection is available and configured, or have explicitly recorded its absence. You can continue the dependency exercise without installing retired monitoring agents.
+
+### 6.2 — Generate Manual Application Activity
+
+A dependency collector samples activity; it cannot reliably show an idle or brief HTTP connection. The sample traffic you started in Module 0, Section 6, provides steady background activity. This step adds one order you create yourself, so you can follow it through the application.
+
+#### Hands-On Steps
+
+**HyperVHost — browser:**
+
+1.  Open [**http://192.168.0.12:8080**](http://192.168.0.12:8080) to use Contoso Order Desk through the Nginx proxy.
+
+2.  Inspect the existing customer/order data.
+
+3.  Select an **existing customer**.
+
+4.  Create **one clearly identifiable sample order** using the application's order-entry controls.
+
+    Do not delete seeded records, modify the database directly, or submit repeated orders for load.
+
+5.  Record its identifier and confirm it appears in the order list.
+
+6.  Open [**http://192.168.0.13:3000**](http://192.168.0.13:3000) to view the same application directly on Tomcat.
+
+7.  Confirm the order remains visible.
+
+8.  Return to the proxy page and perform a few normal page views as needed.
+
+9.  If the order cannot be created or read, record the application failure and stop further writes.
+
+    Do not alter SQL credentials, permissions, or application files as part of this exercise.
+
+**Expected Result:** One sample order is stored and visible through the proxy and direct application paths, or an application issue is explicitly recorded without further writes. This activity exercises the source application; it is not a load or migration test.
+
+### 6.3 — View and Interpret the Dependency Map
+
+The application has proxy, callback, and shared-database dependencies. A partial observed map does not establish that the missing connections are unnecessary.
+
+#### Hands-On Steps
+
+**Local workstation or HyperVHost — Azure portal:**
+
+1.  If dependency collection is available, reopen the dependency view after collection has had time to observe the activity.
+
+2.  Select a time range that includes it.
+
+3.  Inspect the Linux web and application servers and the SQL server.
+
+**Local workstation — lab notes:**
+
+4.  Record observed source, destination, port, and process details where the feature provides them.
+
+5.  Compare the observations with the known application connections below.
+
+    The Windows-to-SQL reporting connections come from the sample traffic started in Module 0, Section 6.
+
+6.  Record connections as **observed** or **known from architecture/application behavior**.
+
+    If the map is unavailable or incomplete, use the lab architecture and the proxy/direct order responses as evidence, stating what was not observed. A successful response alone does not prove every edge was sampled.
+
+**Expected Result:** Your dependency notes distinguish observed connections from known architectural dependencies and retain the application group even when the map is partial or unavailable.
+
+| Connection | Port | Planning significance |
 |---|---|---|
-| Setup effort | None (built into appliance) | Install 2 agents per VM |
-| Visibility level | Network connections (IP + port) | Process-level (which executable opened which port) |
-| Data source | Appliance network analysis | Log Analytics workspace |
-| Time to value | Available within hours of discovery | 10–15 minutes after agent installation |
-| Cost | Included | Log Analytics ingestion costs |
-| Best for | Initial dependency mapping, small environments | Complex multi-tier apps, compliance requirements |
+| OnPrem-Linux-Web (Nginx) → OnPrem-Linux-App (Tomcat) | TCP 3000 | The order-desk proxy needs the application backend |
+| OnPrem-Linux-App → OnPrem-SQL | TCP 1433 | Tomcat reads and writes `ContosoApp` |
+| OnPrem-Linux-App → OnPrem-Linux-Web | TCP 8080 | The application also uses the Nginx proxy path; web/app dependencies are not one-way |
+| OnPrem-Web → OnPrem-SQL, where existing reporting activity is active | TCP 1433 | Windows reporting shares the SQL dependency; an idle map can omit it |
+| OnPrem-Web → OnPrem-Linux-App, where existing health-check activity is active | TCP 3000 | Windows HTTP checks depend on App; keep this fifth edge even when unsampled |
 
-> **CSA Recommendation:** Use agentless dependency analysis for initial wave planning. Deploy agents only on complex multi-tier application groups where you need process-level visibility to understand dependencies.
+### Why This Matters — CSA Context
 
-### 6.1 — Enable Agent-Based Dependency Visualization
+A live map is evidence about a collection window, not a complete application contract. The reverse proxy and application have cyclic connectivity, and SQL is stateful and shared. Splitting the servers into apparently independent cutover waves would risk connectivity failures and inconsistent application state.
 
-1. In the Azure Migrate dashboard, click on the **AllServers** group.
-2. Click **Dependency analysis** → **Agent-based**.
-3. Configure a **Log Analytics workspace**:
-
-```powershell
-# Create a Log Analytics workspace (run on your local machine)
-New-AzOperationalInsightsWorkspace `
-    -ResourceGroupName "rg-migrate-workshop" `
-    -Name "law-migrate-workshop" `
-    -Location "eastus" `
-    -Sku PerGB2018
-```
-
-4. Copy the **Workspace ID** and **Workspace Key** from the Log Analytics workspace.
-
-### 6.2 — Install Agents on Windows VMs
-
-Connect to each Windows guest VM (OnPrem-Web, OnPrem-SQL) and install:
-
-1. **Microsoft Monitoring Agent (MMA):**
-
-```powershell
-# Download and install MMA (run on each Windows guest VM)
-$MMAUrl = "https://go.microsoft.com/fwlink/?LinkId=828603"
-Invoke-WebRequest -Uri $MMAUrl -OutFile "C:\MMASetup.exe"
-Start-Process -FilePath "C:\MMASetup.exe" -ArgumentList '/C:"setup.exe /qn ADD_OPINSIGHTS_WORKSPACE=1 OPINSIGHTS_WORKSPACE_ID=<WorkspaceID> OPINSIGHTS_WORKSPACE_KEY=<WorkspaceKey> AcceptEndUserLicenseAgreement=1"' -Wait
-```
-
-2. **Dependency Agent:**
-
-```powershell
-# Download and install Dependency Agent
-$DAUrl = "https://aka.ms/dependencyagentwindows"
-Invoke-WebRequest -Uri $DAUrl -OutFile "C:\DASetup.exe"
-Start-Process -FilePath "C:\DASetup.exe" -ArgumentList '/S' -Wait
-```
-
-### 6.3 — Install Agents on Linux VMs
-
-SSH into each Linux guest VM (OnPrem-Linux-Web, OnPrem-Linux-App) and install:
-
-```bash
-# Download and install MMA (run on each Linux guest VM)
-wget https://raw.githubusercontent.com/Microsoft/OMS-Agent-for-Linux/master/installer/scripts/onboard_agent.sh
-sh onboard_agent.sh -w <WorkspaceID> -s <WorkspaceKey> -d opinsights.azure.com
-
-# Download and install Dependency Agent
-wget --content-disposition https://aka.ms/dependencyagentlinux -O DASetup
-chmod +x DASetup
-sudo ./DASetup -s
-```
-
-> **Warning:** Replace `<WorkspaceID>` and `<WorkspaceKey>` with the actual values from your Log Analytics workspace.
-
-### 6.4 — View and Interpret the Dependency Map
-
-After agents report in (~10–15 minutes):
-
-1. Go to **Azure Migrate** → **Discovered servers**.
-2. Click on a server (e.g., **OnPrem-Web**).
-3. Click **Dependency analysis** to view the map.
-
-The dependency map shows:
-
-- Inbound and outbound connections for each server
-- Ports and protocols used
-- Connected processes and the servers they communicate with
-
-![Dependency analysis map](../images/module-1-step-6.png)
-
-**Expected Outcome:** The dependency map reveals that OnPrem-Web communicates with OnPrem-SQL (port 1433) and that OnPrem-Linux-Web communicates with OnPrem-Linux-App (port 3000), helping you identify migration groups.
-
-```mermaid
-graph LR
-    Web["🌐 OnPrem-Web<br/>IIS"] -->|"SQL Connection<br/>Port 1433"| SQL["🗄️ OnPrem-SQL<br/>SQL Server"]
-    Web -->|"API Call<br/>Port 3000"| App["🐧 OnPrem-Linux-App<br/>Node.js"]
-    Nginx["🐧 OnPrem-Linux-Web<br/>Nginx"] -->|"Reverse Proxy<br/>Port 3000"| App
-
-    style Web fill:#0078D4,color:white
-    style SQL fill:#E81123,color:white
-    style Nginx fill:#4CAF50,color:white
-    style App fill:#FF9800,color:white
-```
-
-### How to Read the Dependency Map for Wave Planning
-
-Dependencies tell you which VMs **must** migrate together. In our environment:
-
-- **OnPrem-Web → OnPrem-SQL (port 1433):** The web server depends on the SQL database. These are a dependency group — migrate together or accept connectivity changes.
-- **OnPrem-Linux-Web → OnPrem-Linux-App (port 3000):** The Linux web frontend calls the backend API. Another dependency group.
-- **No cross-group dependencies** between the Windows and Linux pairs — they can migrate independently.
-
----
+------------------------------------------------------------------------
 
 ## Migration Wave Planning
 
-This is where assessment and dependency analysis converge into an actionable migration plan. A CSA doesn't just migrate VMs — they orchestrate migration in **waves** that minimize risk and maximize business continuity.
+### Concepts — Plan the Connected Application, Not Just the Teaching Pairs
 
-### Wave Planning Criteria
+The four workload VMs form **one application migration boundary**. Modules 2 and 3 are two hands-on replication exercises, **not independent application waves**: Web/Linux-Web use the Hyper-V host provider; SQL/App are treated **as physical servers** with the separate modern simplified replication appliance and guest Mobility Service. Both methods can replicate active, stateful disk writes; statefulness does not mandate Mobility. Never enable both methods for the same source VM.
 
-Assign VMs to waves based on:
-
-| Criterion | Low Complexity (Early Waves) | High Complexity (Later Waves) |
+| Planning stage | Scope | Boundary |
 |---|---|---|
-| Dependencies | Standalone, no dependencies | Multiple interconnected systems |
-| Business criticality | Dev/test, non-production | Revenue-generating, customer-facing |
-| Technical complexity | Standard OS, simple apps | Custom apps, legacy frameworks |
-| Risk tolerance | Easy rollback, low impact | Requires extensive testing |
-| Stakeholder readiness | Team is ready and trained | Requires change management |
+| Module 2 teaching pair | OnPrem-Web + OnPrem-Linux-Web | Prepare replication and isolated testing; hold frontend cutover |
+| Module 3 teaching pair | OnPrem-SQL + OnPrem-Linux-App | Prepare replication and stateful application/database tests |
+| Coordinated cutover group | All four workload VMs | Cut over only after all four and their connected application have been tested |
 
-### Example Wave Plan for This Workshop
+#### Hands-On Steps — Record Your Plan
 
-Based on our assessment results and dependency analysis:
+**Local workstation — lab notes:**
 
-| Wave | VMs | Rationale | Rollback Strategy |
-|---|---|---|---|
-| **Wave 1** | OnPrem-Linux-Web | Standalone (if Linux-App is not required in sync), lowest risk, good confidence builder | Revert DNS, keep on-prem VM running during validation |
-| **Wave 2** | OnPrem-Web + OnPrem-SQL | Dependency group — web depends on DB (port 1433), must migrate together | Maintain on-prem DB replica during cutover window |
-| **Wave 3** | OnPrem-Linux-App | Custom application, needs functional testing post-migration | Keep on-prem instance for A/B validation |
+1.  List all four workloads as **one coordinated cutover group**.
 
-> **Alternative grouping:** If OnPrem-Linux-Web and OnPrem-Linux-App have a hard dependency (port 3000), move them into the same wave. Dependency analysis tells you whether this is a hard requirement or a soft preference.
+    Exclude the discovery appliance.
 
-```mermaid
-gantt
-    title Migration Wave Plan
-    dateFormat  YYYY-MM-DD
-    section Wave 1 - Quick Wins
-    OnPrem-Linux-Web (Nginx)    :w1a, 2026-01-01, 3d
-    section Wave 2 - Dependent Group
-    OnPrem-Web (IIS)            :w2a, after w1a, 3d
-    OnPrem-SQL (Database)       :w2b, after w1a, 3d
-    section Wave 3 - Custom Apps
-    OnPrem-Linux-App (Node.js)  :w3a, after w2b, 3d
-    section Validation
-    Post-Migration Validation   :milestone, after w3a, 0d
-```
+2.  Attach the assessment's actual readiness conditions and the dependency notes.
 
-### Wave Execution Pattern
+3.  Identify any unresolved item that must be cleared before migration testing or cutover.
 
-For each wave:
+4.  Record the reviewed target region, target VNet `10.1.0.0/16`, and isolated test VNet `10.2.0.0/16`.
 
-1. **Pre-migration validation:** Confirm assessment readiness, test network paths, verify credentials
-2. **Replication:** Start replication (Module 2 or 3) — data sync runs continuously
-3. **Test migration:** Perform a test failover to an isolated Azure VNet — validate application functionality
-4. **Cutover:** Coordinate with stakeholders, perform final sync, switch DNS/load balancer
-5. **Post-migration validation:** Verify application health, performance, monitoring
-6. **Decommission on-prem (after soak period):** Keep on-prem VMs powered off (not deleted) for 2–4 weeks as rollback insurance
+5.  Plan validation of the proxy, direct Tomcat application, database-backed order read/write, and any active Windows reporting path in the test environment before production traffic changes.
 
----
+6.  State that frontend cutover is held until the stateful application/database tests and the complete four-VM test are successful.
+
+    Keep the source serving the lab during preparation; do not split application writes between source and target databases.
+
+7.  Record the need for one coordinated window with separate engine-specific final synchronization/source shutdown jobs and a shared traffic-switch decision in the later migration modules, plus a rollback decision before target writes are accepted.
+
+    Do not shut down, delete, or cut over any source VM in this module.
+
+**Expected Result:** Your notes identify one connected four-VM cutover group, its readiness conditions, test coverage, and source/target write boundary. Teaching-pair sequencing has not been mistaken for independent migration waves.
+
+### Optional — Preview Wave Planning Overview (Not a Prerequisite)
+
+The [wave execution experience](https://learn.microsoft.com/azure/migrate/how-to-execute-track-waves?view=migrate), updated 2025-11-07, is **preview**. The [direct server execution route](https://learn.microsoft.com/azure/migrate/execute-server-migrations?view=migrate), updated 2026-07-02, already supports inventory/assessment/replication sources without a wave prerequisite.
+
+#### Hands-On Steps — Optional
+
+**Local workstation — Azure portal:**
+
+1.  If offered in this project, open **Wave Planning** once and review the displayed application/wave scope and preview status.
+
+2.  Discuss the shown **Execute wave → application → Review and Execute** route without starting it.
+
+3.  If it is absent, record **not available** and continue using the mandatory manual application-boundary record above.
+
+    Do not search menus repeatedly until something works, edit/import wave CSVs, or override service membership. Do not create independent Web versus SQL/App waves. No API/automation change is needed.
+
+**Expected Result:** You understand the optional preview without making it a dependency for the four-VM manual course or starting replication.
+
+### Discussion Questions
+
+- Which dependency would be missed if you looked only at an idle HTTP map?
+- Why does a Ready VM assessment not prove the order desk can be cut over independently?
+- Which assessment assumptions would you revisit after observing representative business usage?
+- What must be true of SQL data and application writes before switching the frontend?
+
+------------------------------------------------------------------------
 
 ## Key Takeaways
 
-- **Discovery is not optional — it's the foundation.** Every minute invested in thorough discovery saves hours of troubleshooting during migration. Rushed discovery leads to missed dependencies, incorrect sizing, and cost overruns.
+- **Discovery establishes identity and scope.** Validate the four named workloads and their source details, not just a count.
+- **The Hyper-V discovery appliance does not replicate workloads.** Web/Linux-Web host replication is set up in Module 2; SQL/App use the separate modern appliance and guest Mobility Service in Module 3.
+- **Manual deployment has security boundaries.** Verify the published archive, preserve the exported configuration, scope host access, and keep project keys and credentials private.
+- **Assessment results need interpretation.** Review completed results for all four servers and record region, readiness, sizing, pricing, and collection limitations.
+- **Missing map edges are not proof of independence.** Combine current observations with known application behavior and architecture.
+- **Coordinate the connected cutover.** The teaching pairs prepare one four-VM migration group; the frontends wait for successful stateful and full-application testing.
 
-- **Performance-based sizing saves 30–50% vs as-on-premises.** Most on-premises VMs are significantly over-provisioned. Let actual utilization data drive your Azure VM sizing, not legacy allocations.
-
-- **Dependency analysis prevents migration failures.** Migrating a web server without its database is a guaranteed outage. Map dependencies before you move anything.
-
-- **Assessment results drive the business case.** Translate readiness data and cost projections into executive language. Lead with PAYG costs (ceiling), then show optimization paths (RI, AHB, Savings Plans) to demonstrate cost maturity.
-
-- **Wave planning reduces risk.** Never migrate everything at once. Start with low-risk, independent workloads. Build confidence and process maturity before tackling complex dependency groups.
-
----
-
-## Real-World Considerations
-
-When you move beyond this workshop into production migrations, keep these additional factors in mind:
-
-### Large-Scale Discovery (10,000+ VMs)
-
-- Deploy **multiple appliances** (each handles up to 5,000 VMs on Hyper-V) registered to the same Azure Migrate project
-- Stagger discovery start times to avoid WinRM connection storms on management infrastructure
-- Use discovery scoping to phase by datacenter wing, cluster, or business unit
-- Allow 30+ days of performance data collection for accurate right-sizing across seasonal patterns
-
-### SQL-Specific Assessment
-
-- Run a dedicated **Azure SQL assessment** for all discovered SQL Server instances
-- Azure Migrate recommends the best target: Azure SQL Database, Managed Instance, or SQL Server on Azure VM
-- Consider SQL Server version, features used (CLR, linked servers, SSIS), and data size for target selection
-- Azure SQL MI is typically the "sweet spot" — full SQL Server compatibility with PaaS management
-
-### Web Application Assessment
-
-- Use **Azure Migrate for web apps** to assess IIS and Apache/Tomcat workloads
-- Identifies candidates for Azure App Service (PaaS) vs staying on IaaS
-- App Service migration can reduce operational overhead by 60–70% compared to VM-based hosting
-
-### Legacy and Unsupported OS Versions
-
-- Windows Server 2012/2012 R2 and older require **Extended Security Updates (ESU)** — free on Azure, paid on-premises
-- Linux distributions past end-of-life may show as "Conditionally Ready" — plan OS upgrades pre- or post-migration
-- 32-bit operating systems are not supported for Azure IaaS — identify these early and plan modernization
-
----
+------------------------------------------------------------------------
 
 ## Next Steps
 
-With discovery and assessment complete, you have the data-driven foundation to begin migrating. Choose your migration method:
+You have created and registered the discovery appliance, validated the four-server inventory, reviewed an Azure VM assessment, and recorded a dependency-aware migration plan. Keep the appliance and source workloads running for continued collection and the next module.
 
-➡️ **Module 2: Agentless Migration** — Migrate Hyper-V VMs to Azure using agentless replication *(recommended for this workshop)*
-
-➡️ **Module 3: Agent-Based Migration** — Migrate using the Azure Migrate replication agent for more control and flexibility
+➡️ Continue to [**Module 2: Hyper-V Migration**](Module-2-Agentless-Migration.md) to configure the separate host replication components and begin migration preparation. Keep the frontend cutover on hold until the later stateful and coordinated application tests are complete.

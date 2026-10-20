@@ -1,939 +1,1694 @@
-# Module 3: Agent-Based Migration — Continuous Replication for Mission-Critical Workloads
+# Module 3: Agent-Based Migration — SQL/Tomcat and Coordinated Cutover
 
-| **Estimated Time** | 75–90 minutes |
+| **Estimated Time** | 75–90 minutes of student activity, plus separately approved appliance preparation, replication, and full-system testing |
 |---------------------|---------------|
 | **Level**           | Advanced — Cloud Solution Architect |
-| **Prerequisites**   | Module 1 (Discovery & Assessment) and Module 2 (Agentless Migration) completed |
+| **Prerequisites**   | [Module 1](Module-1-Discovery.md) completed; [Module 2](Module-2-Agentless-Migration.md) frontend replication/testing at HOLD; separate modern appliance and support gates in §§4–7 |
 | **CAF Phase**       | **Migrate** — Cloud Adoption Framework |
+
+> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** SQL/App use the **modern simplified physical-server replication route with guest Mobility Service**, not the Hyper-V provider. Extra appliance hosting, exact Linux kernel/Mobility support, and target capacity remain manual STOP gates. No live readiness is claimed; see [PILOT-README](../PILOT-README.md).
+
+### Learning Objectives — Concepts
+
+By the end of this module, you will distinguish disk-block replication from application requests, deploy/register a separate supported replication appliance manually, install/register supported guest Mobility Service, validate the four isolated test peers across **both** engines, and coordinate **one planned business maintenance window**. Initial and delta replication do not require a business outage. The Module 2 frontend cutover remains on HOLD until this full application test and final window; this is not a second independent application wave.
 
 ---
 
-## 1. Overview — Continuous Replication for Mission-Critical Workloads
+## 1. Overview — Replication for Mission-Critical Workloads
 
-When a workload has state — a database with open transactions, a file server with active writes, a domain controller managing authentication — you cannot tolerate the gap between periodic snapshots. Agent-based migration solves this with **continuous, block-level replication** that achieves near-zero RPO.
+When a workload has state — a database with open transactions, a file server with active writes, an application maintaining sessions — the migration plan must account for data freshness and a controlled write boundary. Replication alone does not prove application consistency, preserve RAM/sessions, or guarantee zero data loss.
 
 ### How It Works Architecturally
 
-Agent-based migration deploys a **Mobility Service agent** on each source VM. This agent intercepts disk writes at the block level, streams them to a dedicated **replication appliance** (process server + configuration server), which forwards them to Azure cache storage and ultimately to Azure-managed replica disks.
-
-```
-┌──────────────────┐     Block-level changes     ┌───────────────────────┐
-│  Source VM        │ ──────────────────────────→  │  Replication Appliance│
-│  (Mobility Agent) │     Continuous stream        │  ┌─────────────────┐ │
-│  - SQL Server     │     Port 9443                │  │ Process Server  │ │
-│  - Node.js App    │                              │  │ Config Server   │ │
-└──────────────────┘                               │  └─────────────────┘ │
-                                                   └──────────┬──────────┘
-                                                              │ HTTPS/443
-                                                              ▼
-                                                   ┌─────────────────────┐
-                                                   │  Azure Cache Storage│
-                                                   │  → Managed Disks    │
-                                                   │  (Replica)          │
-                                                   └─────────────────────┘
-```
+This pilot deliberately treats **`OnPrem-SQL` and `OnPrem-Linux-App` as physical servers** for Azure Migrate. A **Mobility Service inside each of these two guests** tracks changed disk blocks and sends them through a **separate modern Windows Server 2022 replication appliance** to Azure. The Module 1 `MigrateAppl` remains discovery/assessment only. The Module 2 Hyper-V provider replicates **only Web and Linux-Web**. Do not select SQL/App under that provider or dual-protect a VM.
 
 **The replication pipeline:**
 
-1. **Change tracking** — The Mobility Service agent hooks into the OS I/O stack, capturing every disk write at the block level.
-2. **Compression & streaming** — Changed blocks are compressed and streamed to the process server over port 9443.
-3. **Cache & commit** — The process server caches data locally, then uploads to Azure cache storage accounts.
-4. **Replica disk write** — Azure writes the data to replica managed disks, maintaining both crash-consistent and application-consistent recovery points.
-5. **Cutover** — A final sync drains remaining changes, the source VM is shut down, and the Azure VM boots from replica disks.
+1. **Prepare and register the modern appliance** — Use this fresh pilot project's physical-server preparation flow and separately approved hosting; never reuse a source VM or the discovery appliance.
+2. **Install/register supported Mobility Service** — Use the registered appliance's matching installer/configuration and approved credentials on SQL and App only.
+3. **Initial replication** — Copy every required OS/application/database disk while the four sources keep serving.
+4. **Delta replication** — Track changed blocks, not HTTP requests, SQL log shipping, open transaction memory, or CPU utilization. Source-to-appliance control uses TCP 443 and data uses TCP 9443; appliance-to-Azure uses TCP 443 under the current documented network requirements. These are scoped data-path requirements, **not an old appliance management URL**.
+5. **Test and final migration** — Boot separate isolated test peers first. At the later shared final boundary, freeze writers, drain work, verify the supported final-sync/source-shutdown procedure for each engine, and validate all targets before releasing traffic.
 
-#### Agent-Based Replication Flow
-
-```mermaid
-sequenceDiagram
-    participant VM as Source VM<br/>(Mobility Agent)
-    participant PS as Process Server<br/>(Replication Appliance)
-    participant Azure as Azure<br/>Managed Disks
-
-    Note over VM,Azure: Continuous Replication
-    VM->>PS: Block-level changes (continuous)
-    PS->>PS: Compress & encrypt
-    PS->>Azure: Stream to cache storage
-    Azure->>Azure: Apply to replica disk
-
-    Note over VM,Azure: Recovery Points
-    Azure->>Azure: Crash-consistent (every 5 min)
-    Azure->>Azure: App-consistent (configurable)
-
-    Note over VM,Azure: Cutover
-    VM->>VM: Stop application
-    VM->>PS: Final sync
-    PS->>Azure: Apply final blocks
-    Azure->>Azure: Create VM from latest point
+```text
+Web + Linux-Web → Hyper-V host provider ─────────────┐
+                                                   ├→ Azure replica disks → isolated tests / final targets
+SQL + App → guest Mobility → modern replication appliance ┘
+Discovery appliance → inventory / assessment only
 ```
 
 ### RPO/RTO Characteristics
 
-| Metric | Value | Implication |
-|--------|-------|-------------|
-| **RPO** | Near-zero (seconds to minutes) | Continuous replication means minimal data loss — critical for databases |
-| **RTO** | Minutes (final sync + VM boot) | Cutover is fast regardless of total data volume |
-| **Initial Sync** | Proportional to disk size ÷ bandwidth | Can take hours for large databases — plan around this |
-| **Ongoing Overhead** | Low CPU/memory on source VM | Agent typically uses 5–10% CPU; monitor for high-churn workloads |
+| Metric | Meaning | Implication |
+|--------|---------|-------------|
+| **RPO** | Acceptable age of recovered data | Inspect actual points and final accepted changes; neither engine promises zero RPO |
+| **RTO** | Acceptable restoration time | Include the planned outage, both engines, boot, SQL checks, alias updates, and acceptance |
+| **Initial sync** | First copy of all required disks | Depends on disk size, bandwidth, and ongoing churn; sources remain active |
+| **Ongoing overhead** | Tracking/transmitting changed blocks | Observe guest/appliance/network load; a busy CPU alone is not changed-disk evidence |
 
-### When to Choose Agent-Based
+### When Stateful Planning Matters
 
-✅ **Use agent-based for:**
-- **Databases** — SQL Server, MySQL, PostgreSQL — anything with transaction logs and open connections
-- **Stateful applications** — File servers, domain controllers, applications with persistent sessions
-- **Tight RPO requirements** — When losing even minutes of data is unacceptable
-- **Physical servers** — The only migration option for bare-metal servers
-- **Multi-cloud sources** — AWS EC2 instances, GCP Compute Engine VMs
+- SQL stores the real business orders in `ContosoApp`; the application VM stores its OS, application code/configuration and logs. The HTTP generator's location is **not** the reason to choose a migration method.
+- Both host-based and Mobility-based replication can handle active stateful disk writes where supported. This pairing is for comparing two hands-on methods, not a rule that databases require agents.
+- A booted VM or healthy replication label is not proof of consistent, current business data.
+- Contoso Order Desk is a small unauthenticated Java/JSP order form and API. Customer records support basic sample requests; customer/employee login profiles or an employee portal are illustrative business scenarios, **not implemented features**.
 
-❌ **Agent-based is overkill for:**
-- Stateless web servers (use agentless — Module 2)
-- Dev/test VMs where RPO doesn't matter
-- Environments where installing agents is prohibited by policy
+#### Hands-On Steps
 
-### The Replication Appliance Architecture
+**Local workstation — student notes:**
 
-The replication appliance runs two critical roles:
+1.  Identify **`OnPrem-SQL`** and **`OnPrem-Linux-App`**, their fresh source IDs, and their physical-server replication architecture in the pilot register.
 
-| Component | Role | Resource Needs |
-|-----------|------|---------------|
-| **Configuration Server** | Coordinates replication, manages agent registration, stores metadata | 8 GB RAM minimum |
-| **Process Server** | Receives replication data, compresses, caches, uploads to Azure | CPU and disk-intensive; scale based on churn |
+2.  Record that SQL holds Orders/Customers, while App holds the runtime/configuration/logs and issues JDBC reads/writes.
 
-> **🏗️ In Production:** For large migrations, deploy **dedicated process servers** separate from the configuration server. A single process server handles approximately 200 VMs or 2 TB of daily churn. Add process servers for scale, not configuration servers.
+3.  Record which frontends and background generators can reach SQL through the five edges in §3.
+
+**Expected Result:** You can explain the two replication data paths and why disk replication still needs database/application validation.
+
+**CSA Why:** Method selection, disk churn, and application-consistency planning answer different questions.
 
 ---
 
 ## 2. Agentless vs. Agent-Based — Decision Matrix
 
-This is the decision matrix a CSA uses when categorizing workloads into migration waves:
+Compare **supported source configurations and operational requirements**, not a rule that statefulness forces an agent. Neither method is a separate application boundary in this pilot.
 
-| Criteria | Agentless | Agent-Based |
-|----------|-----------|-------------|
-| **Source impact** | Zero — no software installed on source VMs | Mobility Service agent required on each VM |
-| **RPO** | Snapshot interval (5–15 minutes) | Near-zero (seconds) |
-| **Replication type** | Periodic Hyper-V/VMware snapshots | Continuous block-level streaming |
-| **Best for** | Stateless, non-critical, quick wins | Databases, stateful, mission-critical |
-| **Supported sources** | Hyper-V, VMware only | Hyper-V, VMware, Physical, AWS, GCP |
-| **Application consistency** | Crash-consistent only | Application-consistent snapshots (VSS) |
-| **Network overhead** | Low (periodic bursts) | Moderate (continuous stream) |
-| **Rollback complexity** | Simple — source VM untouched | Moderate — agent must be uninstalled |
-| **Scale limits** | ~300 VMs per appliance | ~200 VMs per process server |
-| **Setup complexity** | Minimal — uses existing appliance | Moderate — dedicated appliance + agent per VM |
-| **Change control impact** | None — no changes to source VMs | Requires change ticket for agent installation |
+| Criteria | Module 2 — Hyper-V Host Replication | Module 3 — Modern Physical-Server Route |
+|----------|------------------------------------|------------------------------------------|
+| **Pilot sources** | Web + Linux-Web only | SQL + Linux-App only, treated as physical |
+| **Replication software** | Provider / Recovery Services agent on HyperVHost | Mobility Service in each of the two guests + separate modern replication appliance |
+| **Discovery appliance** | Inventory/assessment, not replication | Same independent discovery role; cannot be reused as replication appliance |
+| **Data tracked** | Selected VM disk changes | Selected guest disk blocks; not HTTP or SQL log shipping |
+| **Guest change approval** | No guest migration agent | Required before Mobility installation, including supported privileged installation access |
+| **Readiness** | Supported Hyper-V/source/target configuration | Exact OS + running kernel + Mobility version + storage/boot tuple and approved appliance hosting |
+| **Data consistency / RPO** | Inspect points, validate business data | Same requirement; no zero-loss guarantee |
+| **Portal source** | **From replication provider (Hyper-V)** | **From a replication appliance (Physical or others)**, or verified inventory/assessment route |
+| **Final cutover** | Separate frontend jobs inside the shared window | Separate SQL/App jobs in that **same** planned window; not one cross-engine atomic job |
 
-> **CSA Decision Rule:** If the workload has state (databases, file shares, session stores) or requires RPO < 15 minutes, choose agent-based. For everything else, default to agentless for operational simplicity.
-
-#### Agentless vs Agent-Based Decision Tree
+> **CSA Decision Rule:** Never enable both replication architectures for the same source VM. If an existing registration, duplicate inventory identity, or wrong-source selection cannot be conclusively resolved, STOP and use a clean pilot source deployment; no automated binding-clearing or registered-appliance clone is provided.
 
 ```mermaid
 flowchart TD
-    Q1{What type of<br/>workload?} -->|"Web Server<br/>Stateless App"| Q2{Need continuous<br/>replication?}
-    Q1 -->|"Database<br/>Stateful App"| Agent["🔧 Agent-Based<br/>Module 3"]
-    Q1 -->|"Physical Server"| Agent
-
-    Q2 -->|No| Agentless["⚡ Agentless<br/>Module 2"]
-    Q2 -->|Yes| Agent
-
-    Agent --> RPO["RPO: Seconds<br/>Continuous sync"]
-    Agentless --> RPO2["RPO: Minutes<br/>Snapshot-based"]
-
-    subgraph Workshop["Workshop VM Mapping"]
-        direction LR
-        IIS["OnPrem-Web → Agentless"] 
-        Nginx["OnPrem-Linux-Web → Agentless"]
-        SQL["OnPrem-SQL → Agent-Based"]
-        NodeJS["OnPrem-Linux-App → Agent-Based"]
-    end
-
-    style Agentless fill:#4CAF50,color:white
-    style Agent fill:#2196F3,color:white
-    style IIS fill:#4CAF50,color:white
-    style Nginx fill:#4CAF50,color:white
-    style SQL fill:#2196F3,color:white
-    style NodeJS fill:#2196F3,color:white
+    Scope[One four-VM application boundary] --> Web[Web pair: Hyper-V provider]
+    Scope --> Data[SQL and App: modern appliance plus Mobility]
+    Web --> Test[One isolated four-VM application test]
+    Data --> Test
+    Test --> Window[One planned maintenance window]
+    Window --> Validate[Data and application acceptance before traffic]
 ```
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Mark Web/Linux-Web as **Hyper-V** and SQL/App as **modern physical/Mobility**, with each verified source identity and project/appliance association.
+
+2.  Mark all four as **one connected application**, with no frontend final cutover until SQL/App preparation and the full test succeed.
+
+**Expected Result:** Two different hands-on replication methods are planned without dual protection or independent application waves.
+
+**CSA Why:** An explicit architecture and identity register prevents silently selecting the Hyper-V discovery record for a physical-route migration.
 
 ---
 
 ## 3. Stateful Workload Migration Strategy
 
-Before touching the portal, a CSA defines the **stateful migration strategy**. Databases and stateful applications require coordinated cutover — you cannot migrate SQL Server at 2 PM and the application that depends on it at 4 PM.
+Before touching the portal, a CSA defines the **stateful migration strategy**. Databases and dependent applications require coordinated cutover; migrating the frontends while their SQL/App dependencies remain unreachable does not restore the service.
 
-### Application-Consistent Snapshots: Why They Matter
+### Application-Consistent Recovery: Why It Matters
 
-| Snapshot Type | What It Captures | Risk If Used for Database |
-|--------------|------------------|---------------------------|
-| **Crash-consistent** | Disk state at a point in time | Database may require crash recovery on boot; potential data loss of in-flight transactions |
-| **Application-consistent** | VSS-coordinated flush of application buffers to disk | Database is in a clean, consistent state — no recovery needed |
+| Recovery Type | What It Represents | SQL Validation Implication |
+|---------------|--------------------|---------------------------|
+| **Crash-consistent** | Disk state similar to an unexpected power loss | SQL may perform crash recovery; verify database state, integrity, and data freshness |
+| **Application-consistent** | A recovery point coordinated with application quiescence where supported | Still validate committed data and application behavior; do not infer this from a generic health label |
+| **Planned final migration** | Writes paused, selected sources shut down, final synchronization completed | Compare the recovered database with the final source baseline before additional writes |
 
-Agent-based migration supports **application-consistent snapshots** via VSS (Windows) and pre/post scripts (Linux). For SQL Server, this means all committed transactions are flushed to disk before the snapshot is taken.
+Do not assume every available recovery point is application-consistent. Inspect what each selected replication engine actually offers. RPO/RTO values are objectives, not a guarantee of no downtime or no data loss.
 
 ### SQL Server Migration Considerations
 
 | Concern | Strategy |
 |---------|----------|
-| **Transaction log handling** | Continuous replication captures all log writes. During cutover, ensure no active transactions. |
-| **Always On AG / FCI** | Migrate secondary replicas first, failover AG to Azure, then migrate primary. Complex — consider Azure SQL migration tools instead. |
-| **Post-migration integrity** | Run `DBCC CHECKDB` on every user database immediately after migration |
-| **Connection strings** | Catalog all applications connecting to this SQL Server. Plan connection string updates as part of the cutover. |
-| **TempDB and log locations** | Azure VM may have different drive letters. Verify TempDB and log file paths post-migration. |
-| **Recovery model** | Verify recovery model (FULL/SIMPLE) is preserved. Check backup chain is not broken. |
+| **Transaction log handling** | Pause new writes and let in-flight work finish before the final source baseline and planned migration |
+| **Post-migration integrity** | Run `DBCC CHECKDB` on `ContosoApp`; confirm it is online |
+| **Connection strings** | Preserve the private JNDI descriptor; repoint `onprem-sql` to the actual SQL peer address |
+| **Database files** | Include every VM disk holding SQL data or logs; do not move data to a temporary disk |
+| **Recovery model and backups** | Record the existing recovery model and retain an independent source backup |
+| **Data freshness** | Compare captured Customers/Orders counts and recent order IDs/times, not an assumed initial seed count |
 
-### Node.js / Application Server Considerations
+### Tomcat / Application Server Considerations
 
 | Concern | Strategy |
 |---------|----------|
-| **Stateless vs stateful** | If truly stateless, consider agentless. If using local sessions, file uploads, or SQLite — agent-based. |
-| **Environment variables** | Document all env vars (DB_HOST, API_KEY, etc.) that reference on-premises resources. Update post-migration. |
-| **Service discovery** | If the app discovers services by IP or hostname, update service registry/DNS post-migration. |
-| **Process manager** | Verify PM2/systemd auto-starts the application on boot. Test this during test migration. |
-| **Port bindings** | Confirm NSG rules allow inbound traffic on application ports (e.g., 3000, 8080). |
+| **Runtime** | Preserve Ubuntu 24.04, Tomcat 10.1, OpenJDK 17, and the `contoso-orderdesk` systemd service |
+| **Database configuration** | Keep protected JNDI credentials intact; do not print or replace them for an address change |
+| **Name resolution** | Update the four known lab aliases on all four test/target guests, preserving unrelated hosts entries |
+| **JDBC connections** | Restart `contoso-orderdesk` after alias changes to discard the old pool |
+| **Proxy upstream** | Test/reload Nginx after repointing `onprem-app`, so its 8080 upstream resolves the new App address |
+| **Background traffic** | Stop/disable only known generators while validating and cutting over; leave SQL/Tomcat/Nginx running |
+
+### Application Dependency Map
+
+| Initiator | Dependency | Purpose |
+|-----------|------------|---------|
+| Windows Web | SQL TCP 1433 | Optional background SQL traffic |
+| Windows Web | App TCP 3000 | Optional background HTTP traffic |
+| Linux-App | SQL TCP 1433 | Order Desk database reads/writes |
+| Linux-App | Nginx TCP 8080 | Optional HTTP traffic generator |
+| Nginx | App TCP 3000 | Reverse proxy to the Order Desk |
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Record these five edges in your student notes.
+
+2.  Identify their matching NSG/guest firewall paths.
+
+3.  Plan the isolated test for **all four VMs**, even though this module enables replication only for SQL and App.
+
+4.  Plan one final cutover window, with SQL target validation first, App next, then the frontends and complete address repointing.
+
+**Expected Result:** The database baseline, required disks, dependency edges, and shared cutover order are defined.
+
+**CSA Why:** A data-aware dependency plan is more useful than independent VM success indicators.
 
 ---
 
 ## 4. Prerequisites
 
-- ✅ Module 1 completed — Azure Migrate project with VMs discovered
-- ✅ The following VMs are running inside Hyper-V:
+| Source VM | OS | Role | Source IP |
+|-----------|----|------|-----------|
+| `OnPrem-SQL` | Windows Server 2022 | SQL Server 2022 Express, `ContosoApp`, TCP 1433 | `192.168.0.11` |
+| `OnPrem-Linux-App` | Ubuntu 24.04 | Tomcat 10.1 / OpenJDK 17 JSP Order Desk, TCP 3000 | `192.168.0.13` |
 
-| VM Name              | OS                    | Role                   | IP Address    |
-|----------------------|-----------------------|------------------------|---------------|
-| OnPrem-SQL           | Windows Server 2022   | SQL Server 2019 Express| 192.168.0.11  |
-| OnPrem-Linux-App     | Ubuntu 22.04          | Node.js Express app    | 192.168.0.13  |
+The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generation 2 **HyperVHost** hosts this pair and the Module 2 pair. The source nested network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`), separate from the source Azure VNet `10.0.0.0/16`.
 
-- ✅ RDP access to OnPrem-SQL and SSH access to OnPrem-Linux-App
-- ✅ Azure subscription with quota for 2× Standard_B2s VMs
-- ✅ Target Resource Group and Virtual Network in Azure
+#### Hands-On Steps
 
----
+**Local workstation — Azure portal:**
 
-## 5. Step 1 — Deploy the Replication Appliance
+1.  Confirm Module 1 discovery and assessment completed in the intended Azure Migrate project.
 
-The replication appliance is a dedicated Windows Server that manages all replication traffic between on-premises VMs and Azure. It is distinct from the Azure Migrate discovery appliance used in Module 1.
+**HyperVHost — Hyper-V Manager:**
 
-### 5.1 Download the Replication Appliance
+2.  Confirm the SQL and App source VMs are running.
 
-1. In the Azure Portal, navigate to **Azure Migrate** → **Servers, databases and web apps**.
-2. In the **Migration tools** section, click **Discover**.
-3. For **Are your machines virtualized?**, select **Physical or other (AWS, GCP, etc.)**.
-4. Select your **Target region**.
-5. Click **Create resources** — this provisions the required Azure resources (Recovery Services vault, cache storage accounts).
-6. Under **Install the replication appliance**, click **Download** to get the appliance installer.
+3.  Confirm you have approved guest access.
 
-![Download Replication Appliance](../images/module-3-step-1-1.png)
+**Local workstation — Azure portal:**
 
-> **Note:** Also download the **registration key** — you will need it to register the appliance with your Azure Migrate project. The key expires after 5 days.
+4.  Verify the **fresh SQL/App source identities are not enabled for Hyper-V replication or any other protection**, and confirm the separately approved modern appliance meets §7.
 
-### 5.2 Install the Replication Appliance
+    The Web/Linux-Web host registration remains independent. Do not reconfigure existing replication, reuse a registered-appliance clone, or treat frontend final cutover as a prerequisite.
 
-1. Copy the installer and registration key to a Windows Server machine on the same network as the source VMs (you can use the Hyper-V host or a dedicated VM).
-2. Run the installer (`MicrosoftAzureSiteRecoveryUnifiedSetup.exe`) as Administrator.
-3. In the setup wizard:
-   - Select **Install the configuration server and process server**.
-   - Accept the license terms.
-   - Browse to the **registration key** file you downloaded.
-   - Select the **NIC** that connects to the source VMs.
-4. Wait for the installation to complete (approximately 10–15 minutes).
+5.  Confirm the target landing zone and isolated test VNet described in §6.
 
-```powershell
-# Silent installation (for automation or repeatable deployments)
-.\MicrosoftAzureSiteRecoveryUnifiedSetup.exe /q /x:C:\ASR_Setup
-cd C:\ASR_Setup
-.\UNIFIEDSETUP.EXE /AcceptThirdpartyEULA `
-    /servermode "CS" `
-    /InstallLocation "C:\Program Files (x86)\Microsoft Azure Site Recovery" `
-    /CSType CSLegacy
-```
+    If they do not exist, build them through the linked manual portal steps before use.
 
-> **🏗️ In Production — Appliance Sizing:**
->
-> | VMs to Migrate | Process Server CPU | Process Server RAM | Cache Disk |
-> |----------------|--------------------|--------------------|------------|
-> | Up to 100 | 8 vCPUs | 16 GB | 600 GB SSD |
-> | 100–200 | 12 vCPUs | 24 GB | 1 TB SSD |
-> | 200+ | Deploy additional process servers | — | — |
->
-> The cache disk must be SSD and sized at minimum 2× the daily churn of all replicating VMs.
+**Local workstation — student notes:**
 
-### 5.3 Register the Appliance
+6.  For Azure copies, use **VM → Run command → RunPowerShellScript** (Windows) or **RunShellScript** (Linux) once the guest agent is ready, or already-approved RDP/SSH access.
 
-1. After installation, the **Azure Site Recovery Configuration Server** management tool opens automatically.
-2. Add an account for push installation (or use manual installation as described in Steps 2 and 3).
-3. Under **Vault Registration**, paste the registration key.
-4. Verify the appliance appears in the Azure Portal under **Azure Migrate** → **Discovered items**.
+    Each command executes **inside the explicitly selected guest**. A public IP is not assumed, and your workstation need not reach test private addresses.
 
-![Replication Appliance Registered](../images/module-3-step-1-3.png)
+7.  For SQL commands, use the existing local SQL tooling and an authorized Windows identity: the lab's existing Run Command identity where already permitted, or the approved SQL account through RDP/SSMS.
 
-> **Tip:** If the appliance management tool doesn't open automatically, launch it from the desktop shortcut `cspsconfigtool.exe`.
+    Use the existing approved **trusted** local SQL connection. If certificate trust, SQL tooling or authorization is unavailable, STOP for its owner; do not bypass certificate verification, grant new permissions, change SQL certificates/configuration, or expose passwords to make a check work.
 
-**Expected Outcome:** The replication appliance is installed, registered, and visible in the Azure Migrate portal.
+8.  Read the current [physical/server support matrix](https://learn.microsoft.com/azure/site-recovery/vmware-physical-azure-support-matrix) and [modern appliance support matrix](https://learn.microsoft.com/azure/site-recovery/replication-appliance-support-matrix), updated 2026-10-15.
+
+**Source OnPrem-Linux-App — SSH session (read-only checks):**
+
+9.  Record the actual running kernel and block layout:
+
+    ```bash
+    cat /etc/os-release
+    uname -r
+    lsblk -o NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,MOUNTPOINTS,PKNAME,TRAN,MODEL,LOG-SEC,PHY-SEC
+    findmnt /
+    test -d /sys/firmware/efi && printf 'UEFI boot\n' || printf 'Review boot mode\n'
+    ```
+
+**Local workstation — student notes:**
+
+10. Compare the **exact Ubuntu release + running kernel/flavour + Mobility version** with the matrix; record guest controller/driver, filesystem/LVM, logical-sector size, boot/EFI layout, Secure Boot state, free space, and every required disk for both sources.
+
+    Source-host NVMe does not prove guest NVMe; Linux **guest NVMe and 4-KiB logical sectors** are unsupported in the current physical-route matrix. Generation 2 alone is not compatibility evidence. Use approved read-only guest/Hyper-V inspection for facts not shown above.
+
+11. **STOP before agent installation/replication** if any support tuple, appliance placement, privilege, or required target capacity is unverified or unsupported.
+
+    Record **DEFERRED — instructor/support verification required**. Do not downgrade Ubuntu, pin a guessed kernel, replace a disk/controller, loosen security, or install an unsupported agent to make the pilot proceed.
+
+**Expected Result:** Fresh source identities, guest/SQL access, and the exact support tuple are recorded. The separate appliance/agent requirements are either verified for this pilot or explicit STOP gates; no live compatibility is asserted by this guide.
+
+**CSA Why:** A distribution label and an assessment's Ready result do not certify a particular replication agent, running kernel, storage, or appliance placement.
 
 ---
 
-## 6. Step 2 — Install Mobility Service on OnPrem-SQL (Windows)
+## 5. Step 1 — Prepare the Stateful Source Workloads
 
-The Mobility Service agent is the on-VM component that captures disk writes and streams them to the replication appliance.
+A useful data baseline records **current** application state. Customers/Orders may already contain activity; the original seed counts are not acceptance criteria. Initial replication can run while the source application is active. The nondisruptive test uses captured committed IDs and an explicitly understood recovery-point difference while source writes continue; exact frozen equality is reserved for final cutover.
 
-### 6.1 Obtain the Mobility Service Installer
+### 5.1 Capture SQL State and Data Baseline
 
-The installer is available on the replication appliance at:
+#### Hands-On Steps
 
-```
-\\<replication-appliance-ip>\C$\Program Files (x86)\Microsoft Azure Site Recovery\home\svsystems\pushinstallsvc\repository\
-```
+**HyperVHost — RDP client / Hyper-V Manager VMConnect:**
 
-Or download it from the Azure Portal:
-1. In Azure Migrate → **Replicating machines** → click **Prepare infrastructure**.
-2. Download the **Mobility Service installer for Windows**.
+1.  After connecting to the pilot HyperVHost, open **source `OnPrem-SQL` (`192.168.0.11`)** using approved guest RDP/VMConnect and SQL access. The nested NAT address is not assumed reachable from your workstation.
 
-> **🏗️ In Production — Agent Deployment at Scale:**
-> - Use **push installation** from the replication appliance for small batches.
-> - For 50+ VMs, use **SCCM, Intune, or Ansible** for silent agent deployment.
-> - Always verify agent version compatibility with the process server version. Mismatches cause replication failures.
-> - Firewall rule required: source VM → process server on **port 9443** (outbound).
+    These are source checks, not commands for the student workstation.
 
-### 6.2 Connect to OnPrem-SQL
+**Source OnPrem-SQL — PowerShell / SSMS:**
 
-1. RDP into OnPrem-SQL:
+2.  In a local PowerShell session with the existing SqlServer tooling and authorized Windows identity, run:
 
-```powershell
-mstsc /v:192.168.0.11
-```
+    ```powershell
+    Get-Service -Name 'MSSQL$SQLEXPRESS'
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT name, state_desc, recovery_model_desc
+    FROM sys.databases WHERE name = N'ContosoApp';
+    '@
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT (SELECT COUNT_BIG(*) FROM dbo.Customers) AS Customers,
+           (SELECT COUNT_BIG(*) FROM dbo.Orders) AS Orders;
+    '@
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT TOP (5) OrderID, CustomerID, ProductName, Quantity, OrderDate
+    FROM dbo.Orders ORDER BY OrderID DESC;
+    '@
+    ```
 
-2. Use the administrator credentials configured during Module 1 setup.
+    In SSMS, the same SQL can be run in a query window connected to `ContosoApp` with the existing authorized identity.
 
-### 6.3 Install the Mobility Service
+3.  Record the timestamp, counts, and recent order IDs/times in your student notes.
 
-1. Copy the installer to OnPrem-SQL.
-2. Run the installer as Administrator:
+4.  Using the existing SQL backup procedure or **SSMS → Databases → ContosoApp → Tasks → Back Up**, take a full source database backup to the approved backup location.
 
-```powershell
-# Extract the installer
-.\MicrosoftAzureSiteRecoveryMobilityService.exe /q /x:C:\Temp\ASR_Mobility
-cd C:\Temp\ASR_Mobility
+    A VM replica or checkpoint is not the independent SQL backup.
 
-# Install the agent
-.\UnifiedAgent.exe /Role "MS" `
-    /InstallLocation "C:\Program Files (x86)\Microsoft Azure Site Recovery" `
-    /Platform "VmWare" `
-    /Silent
-```
+5.  Verify the backup succeeded.
 
-### 6.4 Register with the Replication Appliance
+6.  Retain the backup's location in your notes.
 
-After installation, register the agent with your replication appliance:
+**Local workstation — student notes:**
 
-```powershell
-cd "C:\Program Files (x86)\Microsoft Azure Site Recovery\agent"
+7.  Keep all four source VMs and business application serving, including previously enabled synthetic orders, during initial/delta replication and testing.
 
-.\UnifiedAgentConfigurator.exe /CSEndPoint <replication-appliance-ip> /PassphraseFilePath <passphrase-file-path>
-```
+8.  Record this source baseline as a **time-stamped lower-bound data reference**, not a frozen final count.
 
-> **Note:** The passphrase file is generated during the replication appliance setup and can be found at `C:\ProgramData\Microsoft Azure Site Recovery\private\connection.passphrase` on the replication appliance.
+**Source OnPrem-SQL — PowerShell / SSMS:**
 
-### 6.5 Verify Agent Health
+9.  Retain the captured order IDs/times and counts with the backup evidence, without changing the database recovery model or reseeding it.
 
-```powershell
-# Check the Mobility Service is running
-Get-Service -Name "InMage Scout VX Agent - Sentinel/Outpost" | Select-Object Name, Status
-Get-Service -Name "svagents" | Select-Object Name, Status
-```
+**Local workstation — Azure portal:**
 
-You can also verify in the Azure Portal:
-1. Navigate to **Azure Migrate** → **Discovered items**.
-2. Confirm OnPrem-SQL shows the Mobility Service agent as **Connected**.
+10. Once replication is enabled in §8, inspect the selected test recovery point and its relationship to that capture.
 
-![Agent Status Connected](../images/module-3-step-2-5.png)
+11. Prefer a healthy point after the capture; record its timestamp and any observed lag.
 
-> **🏗️ In Production — Agent Monitoring:**
-> Set up Azure Monitor alerts for agent health status changes. An agent going offline during replication means data is not being captured — you lose RPO protection until it reconnects. Monitor the `svagents` service on every protected VM.
+    Source writes may continue. In the recovered copy, account for the captured committed IDs and subsequent changes visible at that point; do not require equality with a later live source count. If the point predates your reference or a committed order cannot be accounted for, investigate and record the limitation rather than calling data validation passed. Exact final-source/target equality is required only at §11's planned write freeze.
 
-**Expected Outcome:** The Mobility Service agent is installed and registered on OnPrem-SQL, showing as connected in the Azure Portal.
+### 5.2 Confirm the Existing Application Runtime
+
+#### Hands-On Steps
+
+**Source OnPrem-Linux-App — SSH session:**
+
+1.  Through approved SSH to **source `OnPrem-Linux-App` (`192.168.0.13`)**, run:
+
+    ```bash
+    java -version
+    systemctl is-active contoso-orderdesk
+    curl --fail --silent --show-error http://localhost:3000/api/health
+    curl --fail --silent --show-error http://localhost:3000/api/ready
+    curl --fail --silent --show-error http://localhost:3000/api/orders
+    ```
+
+2.  Confirm Java 17, the existing Tomcat-backed service, healthy runtime, SQL readiness, and current Orders/Customers data.
+
+    Do not display the protected JNDI descriptor or copy credentials into your notes.
+
+**Local workstation — student notes:**
+
+3.  Record all source disks needed for OS, SQL data/logs, and application files.
+
+    Preserve the existing runtime rather than reinstalling or replacing it.
+
+**Expected Result:** The source SQL/App state and current data baseline are recorded, an independent SQL backup is available, and the preserved runtime is understood.
+
+**CSA Why:** You cannot validate recovered data against a baseline you never captured.
 
 ---
 
-## 7. Step 3 — Install Mobility Service on OnPrem-Linux-App (Linux)
+## 6. Step 2 — Confirm Target Compute, Networks, and Dependencies
 
-### 7.1 Connect to OnPrem-Linux-App
+Target planning is shared across the whole application. The target region must differ from the source HyperVHost VM's actual region in this lab. **East US → West US 2 is only an example**; neither eligibility, quota headroom, nor an assessment recommendation guarantees allocation.
 
-```bash
-ssh adminuser@192.168.0.13
-```
+| Role / Exact Final Target Name | Pilot selection evidence required |
+|--------------------------------|-----------------------------------|
+| IIS — `OnPrem-Web` | Actual assessment + Windows source/target support + regional capacity/quota |
+| SQL — `OnPrem-SQL` | SQL performance/data-disk needs + Windows/Mobility route support + capacity/quota |
+| Nginx — `OnPrem-Linux-Web` | Two-vCPU source configuration + Hyper-V target support + capacity/quota |
+| Tomcat — `OnPrem-Linux-App` | Two-vCPU source configuration + exact Linux/Mobility/storage support + capacity/quota |
 
-### 7.2 Download the Mobility Service Installer
+No fixed all-four SKU is prescribed here. The historical B1/B2 table in Module 2 is **not approved pilot sizing**; resolve its one-vCPU Linux examples against the actual two-vCPU sources. A previous IaaS export recommended `Standard_D2als_v6` for all four, but that is an assessment result, not a lab default, availability promise, or instruction to change a script menu. Record the actual reviewed size for each role before enabling replication.
 
-```bash
-# Download from the replication appliance
-wget "http://<replication-appliance-ip>:9443/installers/download?type=linuxmobility" \
-    -O MobilityServiceInstaller.tar.gz
+| Network | Address Space | Subnet | Use |
+|---------|---------------|--------|-----|
+| Source Azure VNet | `10.0.0.0/16` | Existing lab design | Hosts the nested source environment |
+| `vnet-pilot-target-01` | `10.1.0.0/16` | `default`, `10.1.0.0/24` | Final targets |
+| `vnet-pilot-test-01` | `10.2.0.0/16` | `default`, `10.2.0.0/24` | Isolated test copies only |
 
-# Or copy via scp
-scp adminuser@<replication-appliance-ip>:"/Program Files (x86)/Microsoft Azure Site Recovery/home/svsystems/pushinstallsvc/repository/Microsoft-ASR_UA*Ubuntu-22.04*release.tar.gz" \
-    ~/MobilityServiceInstaller.tar.gz
-```
+### 6.1 Confirm Region, Quota, and Compute Choice
 
-### 7.3 Install the Mobility Service
+#### Hands-On Steps
 
-```bash
-# Extract the installer
-mkdir -p /tmp/MobilityService
-tar -xvf MobilityServiceInstaller.tar.gz -C /tmp/MobilityService
+**Local workstation — Azure portal:**
 
-# Run the installer
-cd /tmp/MobilityService
-sudo ./install -d /usr/local/ASR -r MS -v VmWare -q
-```
+1.  Read **Virtual machines → HyperVHost → Location**.
 
-### 7.4 Register with the Replication Appliance
+2.  Confirm the chosen target is a different actual region.
 
-```bash
-# Copy the passphrase file from the replication appliance
-scp adminuser@<replication-appliance-ip>:"/ProgramData/Microsoft Azure Site Recovery/private/connection.passphrase" \
-    /tmp/passphrase.txt
+3.  In **Subscriptions → Usage + quotas**, check target-region total vCPU quota, VM-family quota, and VM-count allowance.
 
-# Register the agent
-cd /usr/local/ASR/Vx/bin
-sudo ./UnifiedAgentConfigurator.sh -i <replication-appliance-ip> -P /tmp/passphrase.txt
+4.  Confirm eligibility in the VM size selector.
 
-# Clean up the passphrase file — do not leave credentials on disk
-rm -f /tmp/passphrase.txt
-```
+5.  Select each role's target size manually only after reviewing its actual source requirements, assessment, chosen replication architecture and current portal eligibility.
 
-### 7.5 Verify Agent Status
+6.  Record the actual per-role choices and sum their vCPUs/VM count, including any simultaneous test/target overlap and existing allocations without double-counting.
 
-```bash
-# Check agent service status
-sudo systemctl status svagents
+    No inherited B1/B2 or all-four D2 example is automatically selected. **STOP** if the size/support/capacity review is incomplete; quota is not an allocation reservation.
 
-# Verify agent connectivity
-sudo /usr/local/ASR/Vx/bin/UnifiedAgentConfigurator.sh -S
-```
+7.  Review assessment recommendations without assuming they override the manually approved pilot choices.
 
-> **⚠️ Warning:** Ensure the Linux VM has outbound connectivity to Azure on port 443 and to the replication appliance on port 9443. Verify firewall rules:
-> ```bash
-> # Test connectivity to replication appliance
-> nc -zv <replication-appliance-ip> 9443
-> # Test connectivity to Azure
-> nc -zv *.hypervrecoverymanager.windowsazure.com 443
-> ```
+8.  Review current portal pricing for selected VM/disk sizes.
 
-**Expected Outcome:** The Mobility Service agent is installed and registered on OnPrem-Linux-App, showing as connected in the Azure Portal.
+    No fixed cost or capacity promise applies.
+
+9.  Keep **Azure Hybrid Benefit / existing Windows Server license rights: No** unless eligible rights have been confirmed.
+
+### 6.2 Confirm the Landing Zone and Test Isolation
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Open **Resource groups → `rg-pilot-target-01`**.
+
+2.  Confirm the target VNet/subnet and associated NSG are in the selected target region.
+
+    If missing, perform [Module 2 §4.2's manual creation steps](Module-2-Agentless-Migration.md#42-build-the-target-landing-zone).
+
+3.  Confirm **`vnet-pilot-test-01`** and its test NSG exist in the same region.
+
+    If missing, perform [Module 2 §8.1's manual creation/isolation steps](Module-2-Agentless-Migration.md#81-build-the-isolated-test-network) before booting any test copy.
+
+4.  Inspect test **Peerings**, DNS servers, subnet routes, and NSG rules.
+
+    There must be no source/live-target peering, VPN/route path, or source DNS reachability.
+
+5.  Confirm test outbound denies cover `192.168.0.0/24`, `10.0.0.0/16`, and `10.1.0.0/16` ahead of default rules.
+
+6.  Verify approved host/guest outbound connectivity against the lab network plan.
+
+    Do not assume Azure default outbound access or that a NAT gateway exists. Keep the approved platform/management path available without reconnecting test and source networks.
+
+7.  Review the five dependency edges from §3 in both the test and final networks, plus local IIS/Nginx 80, Nginx proxy 8080, Tomcat 3000, and SQL 1433 listeners.
+
+    Restrict application and SQL access to approved private peers; do not expose the demo to the Internet.
+
+**Expected Result:** The selected compute plan, target networks, isolation, outbound access, and required dependency paths are ready for this application's test and final migration.
+
+**CSA Why:** A valid VM size and a running database do not compensate for the wrong network or region.
+
+---
+
+## 7. Step 3 — Deploy and Register the Modern Replication Appliance
+
+The current [physical-server tutorial](https://learn.microsoft.com/azure/migrate/tutorial-migrate-physical-virtual-machines?view=migrate), updated 2026-06-27, uses the **simplified/modern agent-based experience**. The classic agent-based appliance retired on 2026-09-30; that retirement does **not** retire the Classic Azure VM assessment in Module 1. Do not substitute an old Windows Server 2016/configuration-server/MySQL recipe, a guessed download URL, or the discovery appliance installer.
+
+Before enabling either group's protection, recheck Module 2 §4.3's **UNKNOWN / STOP mixed-method association gate**: the owner must verify project/provider/appliance/managed-vault compatibility. The presence of both source choices is not shared-vault certification. Do not force associations, guess blank IDs, silently create separate projects, or patch scripts.
+
+### 7.1 Verify Separate Hosting and Prepare the Physical-Server Route
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Reopen Module 0 §3.6's approved machine record and §4's support tuple.
+
+2.  Verify a separate, unreplicated **Windows Server 2022** machine with at least **8 CPUs, 16 GB memory, 80-GB OS disk and separate 620-GB data disk**, sufficient free capacity and the current published prerequisites.
+
+    This minimum is not the higher-scale 16-CPU/32-GB tier. The appliance OS must not have the Hyper-V role. This guest-role restriction is not proof that every hypervisor/cloud placement is prohibited or supported.
+
+3.  Verify the **actual hosting placement** with the current documentation/instructor/support review. An Azure-hosted or nested placement for this modern appliance is **unverified in this pilot**, not declared universally unsupported.
+
+    **STOP** if placement, storage backing, quota, licensing, network reachability or cost approval is missing. The original host's 512-GB OS disk and 100-GB discovery partition do not supply a 620-GB data disk. Do not change the host, its disks, deployment scripts, or source workload allocations to make space. Never reuse `MigrateAppl`, SQL, App, or a registered-appliance clone.
+
+**Local workstation — Azure portal:**
+
+4.  Open the fresh pilot project and verify its subscription/resource ID.
+
+5.  Select **Execute → Migrations → Start execution**.
+
+6.  Select **Servers or virtual machines (VMs)** and target **Azure VM**.
+
+7.  Under **Other sources**, select **From a replication appliance (Physical or others)** and follow the portal's appliance setup link.
+
+    The overview uses **Migrations**; some tutorial/screenshots use singular **Migration**. Match the actual equivalent operation, not a guessed legacy menu.
+
+8.  Confirm virtualization type **Physical**, the reviewed target region, and the region confirmation.
+
+9.  Select **Create resources** only after checking the fresh pilot scope and region.
+
+    This prepares project-managed migration resources, including the background recovery vault. The region is then locked. Do not create a separate ASR DR policy or rebind an existing protected environment.
+
+### 7.2 Install and Register the Appliance
+
+#### Hands-On Steps
+
+**Separate approved replication-appliance machine — elevated PowerShell / installer UI:**
+
+1.  Download the current appliance package from the **actual project's setup link**.
+
+2.  Verify the publisher/signature and any currently published hash using the official instructions; extract to the approved appliance location.
+
+3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator on this separate machine**.
+
+    This is the Microsoft appliance installer, not a workshop `migrate-step` helper. No copied installer command, fixed binary URL, execution-policy bypass, or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
+
+**Replication appliance — Microsoft Azure Appliance Configuration Manager:**
+
+4.  Let prerequisite checks and component status load, resolve approved prerequisite issues, then select **Continue**.
+
+5.  Select the approved **FQDN or NAT IP** connectivity choice; verify source guests can reach that actual endpoint and the appliance can reach required Azure endpoints. Save and continue.
+
+6.  Enter a unique **Friendly name of appliance** and the **Azure Migrate replication appliance key** obtained from this project's portal setup page.
+
+    This is not a legacy shared passphrase. Keep key/configuration files and all credentials private.
+
+7.  Select **Login** and complete the Azure authentication tab/device-code flow before its five-minute code expires.
+
+8.  Verify the displayed **Subscription, Resource Group, and Recovery Services Vault** belong to this fresh pilot project; then continue.
+
+9.  Under **Provide Physical Server Details**, select **Add Credentials** where approved: record OS, credential friendly name, and the actual source username/password in the protected UI.
+
+    Current push installation requires a source **Windows administrator** and source **Linux root** credential. Existing SSH/sudo inventory access does not by itself prove push eligibility. **STOP** if these privileges are not approved; do not enable root/password SSH, relax UAC/firewalls, or change security policy merely for push. Use the supported manual-agent option below only if its separately approved privileges and procedure are available.
+
+10. Select **Add Server**, entering each exact SQL/App **source IP/FQDN** and the approved credential account as required by the selected installation route.
+
+11. Confirm fresh identities and source access; exclude HyperVHost, `MigrateAppl`, the replication appliance itself, Web, and Linux-Web.
+
+**Local workstation — Azure portal:**
+
+12. Confirm this modern appliance is registered and healthy in the intended project/region, with its current component versions.
+
+13. Record its identity, versions, registration status and the verified SQL/App source associations without secrets.
+
+### 7.3 Choose a Supported Mobility Installation Route
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Recheck the exact OS/kernel/Mobility support evidence from §4 before any guest installation.
+
+2.  Select **push installation** in §8 only if the documented Windows administrator/Linux root privileges, scoped connectivity and change approval are satisfied.
+
+3.  Otherwise, use **manual installation** only from the registered modern appliance and the current [Mobility Service instructions](https://learn.microsoft.com/azure/site-recovery/vmware-physical-mobility-service-overview), updated 2026-10-15.
+
+**Source OnPrem-SQL — approved local administrator / installer UI (manual option):**
+
+4.  Obtain the appliance-matched Windows installer using the current documented transfer method and verify its publisher/version.
+
+5.  Open the installer, select **Install**, and obtain that source machine's **Machine Details** string from its configurator.
+
+**Replication appliance — Configuration Manager (manual option):**
+
+6.  Open **Mobility service configuration details**, supply that machine's details string, and select **Download configuration file**.
+
+**Source OnPrem-SQL — Unified Agent configurator (manual option):**
+
+7.  Supply the resulting **machine-specific configuration file** and select **Register**. Confirm successful registration to this appliance.
+
+**Source OnPrem-Linux-App — approved privileged SSH session (manual option):**
+
+8.  Open the current official article's **Linux manual installation** instructions and choose the exact supported OS/agent package matching this appliance.
+
+9.  Follow that current terminal-based install, machine-details/configuration generation, and registration sequence with the approved privilege model.
+
+    **STOP** if the precise package, command arguments, machine-specific configuration or privileges cannot be verified. Do not use the Windows GUI sequence for Linux, guess an old binary URL/CLI/passphrase, or force an unsupported agent/kernel combination. This guide deliberately does not invent a version-dependent Linux command block.
+
+**Local workstation — Azure portal / replication appliance:**
+
+10. Verify the actual Mobility version, source identity, registered appliance and successful agent connection for both SQL and App. If using push, perform this verification after §8 enables replication.
+
+**Expected Result:** The separate modern appliance and the selected supported agent-install route are verified, or an explicit **STOP / DEFERRED** is recorded. Discovery, appliance registration, guest-agent registration and successful disk replication are distinct checks.
+
+**CSA Why:** Correct modern registration and approved guest privileges prevent mixing a retired workflow, the wrong appliance, or a duplicate source record with a successful migration.
 
 ---
 
 ## 8. Step 4 — Configure Replication
 
+SQL and Tomcat use the **modern physical-server/Mobility path**, not the registered Hyper-V provider. Select every disk needed for the existing database and application; replication preserves disk state rather than rebuilding an app. Keep all four sources serving throughout initial/delta replication. No workshop `migrate-step1`–`migrate-step6` script is part of this manual sequence.
+
 ### 8.1 Start the Replication Wizard
 
-1. In **Azure Migrate: Server Migration**, click **Replicate**.
-2. In **Source settings**:
-   - **Are your machines virtualized?** → Select **Physical or other (AWS, GCP, etc.)**
-   - This enables the agent-based replication workflow
-3. Click **Next**.
+#### Hands-On Steps
 
-![Source Settings - Physical](../images/module-3-step-4-1.png)
+**Local workstation — Azure portal:**
+
+1.  Open the verified pilot project → **Execute → Migrations → Start execution**.
+
+2.  Choose **Servers or virtual machines (VMs)** → **Azure VM**.
+
+3.  Select **From a replication appliance (Physical or others)** and the registered modern appliance from §7.
+
+4.  Alternatively, use **From all inventory** or **From an assessment** only when the displayed record/architecture can be verified as this physical-route SQL/App source; select the corresponding Physical discovery appliance when prompted.
+
+    The Hyper-V discovery inventory may contain a same-name record. It is not permission to select **From replication provider (Hyper-V)** for this pair. **STOP on ambiguous identity, duplicate selection, wrong architecture or unresolved readiness**; do not try different records until something executes.
 
 ### 8.2 Select Virtual Machines
 
-1. In the **Virtual machines** tab, both VMs with the Mobility Service installed should appear.
-2. Select **OnPrem-SQL** and **OnPrem-Linux-App**.
-3. Click **Next**.
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Select exactly **`OnPrem-SQL`** and **`OnPrem-Linux-App`**.
+
+2.  On **Workloads**, verify the two fresh source identities, source addresses, physical replication architecture and correct **replication-appliance** dropdown; review each readiness finding.
+
+3.  Review imported assessment values if used, then the supported **Target VM security type**, approved **Guest credentials** for push, or the already verified manual-agent registration. Do not silently accept a security change or grant extra privileges.
+
+4.  For **manual installation**, require verified agent registration now. For **push**, record installation as **approved / pending initial execution**, not already complete; installation occurs after §8.6 submission. Require support, credential and readiness gates before **Next**, and verify successful installation/registration in the resulting jobs before treating replication as active.
 
 ### 8.3 Configure Target Settings
 
-1. **Subscription** — Select your Azure subscription.
-2. **Resource Group** — Select `rg-migrate-workshop` (or your resource group).
-3. **Replication Storage Account** — Select a storage account for cache data.
-4. **Virtual Network** — Select the target VNet.
-5. **Subnet** — Select the appropriate subnet.
-6. Click **Next**.
+#### Hands-On Steps
 
-> **🏗️ In Production — Target Design Considerations:**
-> - Place SQL VMs in a **dedicated data subnet** with NSG rules restricting inbound to port 1433 from application subnets only.
-> - Place application VMs in an **application subnet** with NSG rules allowing inbound on application ports from the web tier only.
-> - Use **Proximity Placement Groups** for SQL + App VMs that need low-latency communication.
+**Local workstation — Azure portal:**
+
+1.  Select the lab subscription.
+
+2.  Select **`rg-pilot-target-01`**.
+
+3.  Confirm the project's prepared target region.
+
+4.  Select its offered replication storage/cache account, creating it through the wizard only if required.
+
+5.  Choose final target **`vnet-pilot-target-01` → `default` (`10.1.0.0/24`)**.
+
+    The isolated `10.2` network is selected later for test migration, not as the final target.
 
 ### 8.4 Configure Compute Settings
 
-For **OnPrem-SQL**:
-- **VM Name** — `OnPrem-SQL`
-- **Azure VM Size** — **Standard_B2s**
-- **OS Type** — **Windows**
+#### Hands-On Steps
 
-For **OnPrem-Linux-App**:
-- **VM Name** — `OnPrem-Linux-App`
-- **Azure VM Size** — **Standard_B2s**
-- **OS Type** — **Linux**
+**Local workstation — Azure portal:**
 
-> **🏗️ In Production:** For SQL Server workloads, use memory-optimized SKUs (E-series or M-series). Standard_B2s is suitable for this lab but would be undersized for production database workloads. Right-size based on Module 1 assessment data.
+1.  For **SQL**, set target name **`OnPrem-SQL`**.
+
+2.  Set OS **Windows**.
+
+3.  Select the SQL size explicitly approved in §6 after reviewing current assessment/support, memory, disks, regional/family quota and actual capacity.
+
+4.  For **App**, set target name **`OnPrem-Linux-App`**.
+
+5.  Set OS **Linux**, preserving Ubuntu 24.04 and the existing runtime.
+
+6.  Select App's explicitly approved size from §6; do not blindly downsize its two-vCPU source to the inherited one-vCPU example.
+
+7.  Record the actual choices. Neither `Standard_D2als_v6` from an assessment export nor an old all-four `Standard_D2as_v5` example is a required SKU or capacity reservation.
+
+8.  Identify each VM's correct **OS/boot disk**.
+
+9.  Review supported target settings for its source generation.
+
+10. Keep Windows licensing benefit **No** unless rights are confirmed.
 
 ### 8.5 Configure Disk Settings
 
-1. For **OnPrem-SQL**, select all disks. Use **Standard SSD** or **Premium SSD** for the database disk.
-2. For **OnPrem-Linux-App**, select all disks with **Standard SSD**.
+#### Hands-On Steps
 
-> **Tip:** For SQL Server workloads, use **Premium SSD** for the disk hosting database files (`*.mdf`, `*.ldf`) to ensure adequate IOPS. Place TempDB on the Azure temporary disk (ephemeral SSD) for best performance — configure this post-migration.
+**Local workstation — Azure portal:**
+
+1.  Select **all required source VM disks** for both machines, including SQL data/log disks and App files as well as the OS disks.
+
+2.  Choose the reviewed target disk types; use **Standard SSD** for the lab unless an assessment-driven alternative has been agreed.
+
+    Do not move SQL files or logs to an ephemeral disk as part of this exercise.
 
 ### 8.6 Review and Start Replication
 
-1. Review the configuration summary for both VMs.
-2. Click **Replicate** to start replication.
+#### Hands-On Steps
 
-**Expected Outcome:** Replication jobs start for both OnPrem-SQL and OnPrem-Linux-App. Continuous replication begins streaming data to Azure.
+**Local workstation — Azure portal:**
+
+1.  Review source host/VMs, exact target names, region, resource group, VNet/subnet, OS types, sizes, boot disks, and every required selected disk.
+
+2.  Review **Tags**, then select **Review and start execution** / **Start execution**, as shown in the current portal.
+
+    This enables **initial replication**, not final migration or business cutover. Review the **Preparation** stage and installation/replication jobs.
+
+3.  Open the resulting jobs; verify Mobility Service installed/registered successfully, initial copy progresses, and SQL/App use this modern appliance.
+
+4.  If the Module 2 frontends are not yet replicating, perform its §§5–7 now, selecting the Hyper-V provider for **only** that pair.
+
+    That does not require frontend cutover.
+
+**Expected Result:** SQL and App replication setup jobs are submitted with the reviewed settings. A submitted job is not evidence that the initial sync has completed.
+
+**CSA Why:** Correct disk inclusion is essential to preserve the existing database and application runtime.
 
 ---
 
 ## 9. Step 5 — Monitor Replication
 
+Replication readiness comes from each **modern physical-route** workload's **Preparation** details, installed agent/appliance versions, jobs, and actual recovery points—not a generic protection label or successful submission. The frontend Hyper-V records must be reviewed separately in the same project's **Execute → Migrations** view.
+
+| Observation | Meaning | Student Action |
+|-------------|---------|----------------|
+| Setup job in progress | Host/VM configuration still being applied | Review job progress and reported errors |
+| Initial synchronization in progress | Full disk copy not finished | Wait and observe progress |
+| Initial sync complete, health good, recent recovery point | Candidate for test migration | Review timestamp and portal test readiness |
+| Error, warning, degraded health, stale/missing point | Readiness not established | Review the reported issue before proceeding |
+
 ### 9.1 View Replication Status
 
-1. In **Azure Migrate: Server Migration**, click the **Replicating servers** count.
-2. Both VMs should appear with their current replication state.
+#### Hands-On Steps
 
-### 9.2 Replication States for Agent-Based Migration
+**Local workstation — Azure portal:**
 
-| State                         | Description                                                  | Action |
-|-------------------------------|--------------------------------------------------------------|--------|
-| **Enabling protection**       | Initial configuration and agent handshake in progress        | Wait — typically 5–10 minutes |
-| **Initial replication (n%)**  | Full disk sync in progress with percentage completion        | Monitor bandwidth utilization |
-| **Protected**                 | Initial sync complete; continuous replication is active      | Ready for test migration |
-| **Resynchronization needed**  | Agent lost sync and needs to re-sync changed blocks          | **Investigate immediately** — network or agent issue |
+1.  Open **Azure Migrate project → Execute → Migrations**.
 
-### 9.3 Key Metrics to Monitor
+2.  Select **`OnPrem-SQL`** and **`OnPrem-Linux-App`**.
 
-| Metric | Healthy Range | Alert Threshold | Action |
-|--------|--------------|-----------------|--------|
-| **Replication lag (RPO)** | < 5 minutes | > 15 minutes | Check network bandwidth, process server load |
-| **Data churn rate** | < 50 MB/s per VM | > 100 MB/s per VM | Consider dedicated process server |
-| **Process server CPU** | < 70% | > 85% | Scale up or add process servers |
-| **Process server cache disk** | < 70% utilized | > 80% utilized | Increase cache disk size |
-| **Agent status** | Connected | Disconnected | Check agent service, network connectivity |
+3.  Inspect their individual details.
 
-```powershell
-# Check replication status via PowerShell
-Get-AzMigrateServerReplication `
-    -ResourceGroupName "rg-migrate-workshop" `
-    -ProjectName "your-migrate-project-name" | `
-    Select-Object MachineName, MigrationState, ReplicationProgressPercentage
-```
+4.  Inspect their related **Jobs**.
 
-### 9.4 Troubleshooting Common Replication Issues
+### 9.2 Review Initial Synchronization
 
-| Symptom | Likely Cause | Resolution |
-|---------|-------------|------------|
-| Initial replication stuck at 0% | Network connectivity issue | Verify port 9443 from source to process server |
-| RPO consistently > 30 minutes | High churn exceeding bandwidth | Throttle non-essential I/O during replication; increase bandwidth |
-| Resynchronization triggered | Agent service crashed or network blip | Restart `svagents` service; resync will auto-resume |
-| Process server disk full | Cache disk undersized for churn volume | Expand cache disk; ensure 2× daily churn capacity |
+#### Hands-On Steps
 
-> **🏗️ In Production — Replication Monitoring:**
-> Do not rely on portal spot-checks. Configure Azure Monitor alerts for:
-> - RPO exceeding threshold (> 15 minutes for critical VMs)
-> - Agent disconnection events
-> - Process server resource utilization
-> - Replication health status changes
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Both VMs reach the **Protected** state with continuous replication active and healthy RPO.
+1.  Wait for the initial copy of every selected required disk to finish.
+
+2.  Review failed or stalled jobs in the portal.
+
+    Do not proceed solely because the enable-replication request was accepted.
+
+### 9.3 Review Health and Recovery Points
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Confirm healthy replication for each VM.
+
+2.  Inspect the latest available recovery-point timestamp for each VM.
+
+3.  Compare recovery-point age to the objective recorded in your notes.
+
+    For the nondisruptive test, use a healthy point related to §5.1's captured committed IDs/counts. Prefer a point after that reference; source orders continue, so later live counts may be higher.
+
+4.  Review the test-migration readiness shown for each source record.
+
+5.  Resolve reported readiness blockers before starting a separate test migration.
+
+### 9.4 Confirm the Full Test Group Is Ready
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Confirm **all four** source VMs, including the Module 2 pair, have completed initial sync and are ready for the intended isolated test.
+
+2.  Record the reviewed health/recovery-point information in your student notes.
+
+**Expected Result:** SQL and App, together with the frontend pair, have completed initial sync, healthy replication, and reviewed recovery points for the full isolated test. Application consistency and cutover acceptance remain to be demonstrated.
+
+**CSA Why:** The slowest or least-ready dependency determines the application's test readiness.
 
 ---
 
 ## 10. Step 6 — Test Migration
 
-> **🛡️ CSA Position: Test migration for stateful workloads is even more critical than for stateless VMs.** A web server that boots correctly is validated in 30 seconds. A database that boots correctly but has corrupt data is a silent disaster. Validate data integrity, not just service status.
+A stateful test validates data integrity and the entire application, not just successful boot. Before **any** test copy boots, verify no test peering/route/DNS path to source or final SQL/App peers, and confirm both engines can create their test peers in the **same approved isolated VNet**. Inherited Windows startup tasks/Linux traffic services may auto-start against old aliases; network isolation protects the source before guest controls are available. Local CPU workers need a separate check, not an assumption about expiry.
 
-### 10.1 Test Migrate OnPrem-SQL
+Names ending in `-test` below are **illustrative role labels only**. Use the unique generated name and **resource ID produced by each actual test job**, never a guessed suffix or an unsuffixed source/final VM. Record all four test names/IDs/NIC IPs; verify all four alias mappings on all four guests **before any cross-tier request or controlled write**. If isolation, unique identities or common-VNet support cannot be verified, **STOP / DEFERRED**.
 
-1. In **Replicating machines**, click **OnPrem-SQL**.
-2. Click **Test migration**.
-3. Select the test VNet (e.g., `vnet-migrate-test` from Module 2).
-4. Click **Test migration** and wait for the job to complete.
+### 10.1 Test Migrate OnPrem-SQL and Complete the Four-VM Test Set
 
-![Test Migration - SQL VM](../images/module-3-step-6-1.png)
+#### Hands-On Steps
 
-### 10.2 Validate SQL Server on Test VM — Deep Validation
+**Local workstation — Azure portal:**
 
-1. RDP into the test VM `OnPrem-SQL-test`.
-2. **Service-level validation:**
+1.  Reconfirm the **pre-boot isolation** in §6.2.
 
-```powershell
-# Verify SQL Server service is running
-Get-Service -Name "MSSQL`$SQLEXPRESS" | Select-Object Name, Status
+    Use the same **`vnet-pilot-test-01` → `default` (`10.2.0.0/24`)** for every test copy.
 
-# Verify SQL Server Agent (if applicable)
-Get-Service -Name "SQLAgent`$SQLEXPRESS" -ErrorAction SilentlyContinue | Select-Object Name, Status
-```
+2.  In **Execute → Migrations**, select **`OnPrem-SQL` → Testing → Start test migration**.
 
-3. **Database integrity validation — NON-NEGOTIABLE:**
+3.  Review the offered recovery point against your baseline.
 
-```powershell
-# List all databases and their states
-sqlcmd -S .\SQLEXPRESS -Q "SELECT name, state_desc, recovery_model_desc FROM sys.databases"
+4.  Select the test network.
 
-# Run DBCC CHECKDB on every user database
-sqlcmd -S .\SQLEXPRESS -Q "DBCC CHECKDB('YourDatabase') WITH NO_INFOMSGS"
+5.  Submit the test migration.
 
-# Verify row counts match expected values (compare with source)
-sqlcmd -S .\SQLEXPRESS -Q "USE [YourDatabase]; SELECT COUNT(*) AS RecordCount FROM [YourTable]"
+6.  Wait for its job to complete.
 
-# Check for recent transactions (verify data freshness)
-sqlcmd -S .\SQLEXPRESS -Q "USE [YourDatabase]; SELECT TOP 5 * FROM [YourTable] ORDER BY [DateColumn] DESC"
-```
+7.  Reuse **`OnPrem-Web-test`** and **`OnPrem-Linux-Web-test`** retained from Module 2.
 
-4. **Connectivity validation:**
+    If they were cleaned up, recreate **those two test migrations only** through Module 2 §8. Do not substitute their unsuffixed live VMs.
 
-```powershell
-# Test SQL connectivity from PowerShell
-$connectionString = "Server=.\SQLEXPRESS;Database=master;Integrated Security=True"
-$connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
-$connection.Open()
-Write-Host "SQL Server connection successful. State:" $connection.State
-$connection.Close()
-```
+8.  In each Azure VM's **Networking → NIC → IP configurations**, record its **actual test private IP**, exact name, and resource ID in a four-role map in your notes.
 
-> **🏗️ In Production — SQL Validation Checklist:**
-> - [ ] `DBCC CHECKDB` passes with no errors on all user databases
-> - [ ] Row counts match source (within replication lag tolerance)
-> - [ ] Most recent transactions are present (verify data freshness)
-> - [ ] All database files are online (`sys.master_files`)
-> - [ ] SQL Server error log is clean (`xp_readerrorlog`)
-> - [ ] Linked servers (if any) are not pointing to unreachable on-premises hosts
+    Do not infer Azure addresses from the source `.10/.11/.12/.13` endings.
 
-**Expected Outcome:** SQL Server is running, databases are accessible, data integrity verified via DBCC CHECKDB, and row counts match expected values.
+9.  Use each test VM's portal Run Command when its agent is ready, or existing approved RDP/SSH access.
+
+    Private test addresses are not assumed reachable from your workstation.
+
+**Windows test VMs (`OnPrem-Web-test`, `OnPrem-SQL-test`) — Run Command (RunPowerShellScript) or elevated PowerShell:**
+
+10. Before any functional traffic or test writes, disable/stop only the known inherited generator inside each Windows test VM:
+
+    ```powershell
+    $task = Get-ScheduledTask -TaskName 'LabOrderDeskTraffic' -ErrorAction SilentlyContinue
+    if ($task) {
+        Disable-ScheduledTask -TaskName 'LabOrderDeskTraffic' | Out-Null
+        Stop-ScheduledTask -TaskName 'LabOrderDeskTraffic'
+    }
+    ```
+
+**Linux test VMs — Run Command (RunShellScript) or SSH session:**
+
+11. Disable/stop only the known inherited generator inside each Linux test VM, including App immediately after §10.3 creates it:
+
+    ```bash
+    if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
+      sudo systemctl disable --now contoso-orderdesk-traffic.service
+    fi
+    ```
+
+    Leave **SQL, `contoso-orderdesk` (Tomcat), Nginx and IIS running**. Do not disable broad groups of services or stop the application just to stop a generator.
+
+**All four test guests — approved guest task/service controls:**
+
+12. Inspect and stop any **copied CPU worker** independently of network traffic. Its bounded expiry/no-reboot-resume policy is not proof it is already stopped.
+
+**Windows test guests — Run Command (RunPowerShellScript) or elevated PowerShell:**
+
+13. Stop/disarm the exact existing CPU task only, if present:
+
+    ```powershell
+    $cpuTask = Get-ScheduledTask -TaskName 'LabCpuSimulation' -ErrorAction SilentlyContinue
+    if ($cpuTask) {
+        Disable-ScheduledTask -TaskName 'LabCpuSimulation' | Out-Null
+        Stop-ScheduledTask -TaskName 'LabCpuSimulation'
+    }
+    Get-ScheduledTask -TaskName LabOrderDeskTraffic,LabCpuSimulation -ErrorAction SilentlyContinue |
+        Select-Object TaskName,State,@{N='Enabled';E={$_.Settings.Enabled}}
+    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+        Where-Object { $_.CommandLine -match 'C:\\LabCpuSimulation\\windows-cpu\.ps1.*-Mode Worker' } |
+        Select-Object ProcessId,Name
+    ```
+
+**Linux test guests — Run Command (RunShellScript) or SSH session:**
+
+14. Stop the exact CPU unit if loaded; disarm a persistent enabled unit only if present:
+
+    ```bash
+    if systemctl cat lab-cpu-simulation.service >/dev/null 2>&1; then
+      sudo systemctl stop lab-cpu-simulation.service
+      if systemctl is-enabled --quiet lab-cpu-simulation.service; then
+        sudo systemctl disable lab-cpu-simulation.service
+      fi
+    fi
+    systemctl show contoso-orderdesk-traffic.service lab-cpu-simulation.service \
+      --property=Id,LoadState,ActiveState,MainPID,UnitFileState
+    ```
+
+15. Confirm network generators are stopped/disabled and CPU workers have no running task/service process on **all four test copies**. If a known worker remains, STOP before validation; do not kill unrelated processes. Do not renew, restart or auto-resume CPU simulation on test/target copies.
+
+### 10.2 Validate SQL Server on the Test VM
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Open the verified SQL **test-job output**, using its recorded actual name and resource ID.
+
+2.  Confirm its test VNet/resource ID.
+
+**OnPrem-SQL-test — Run Command (RunPowerShellScript) or PowerShell through RDP:**
+
+3.  Run the following **inside that test SQL guest**, using its portal Windows Run Command where already authorized for SQL, or local PowerShell through approved RDP with the existing SQL-authorized account:
+
+    ```powershell
+    Get-Service -Name 'MSSQL$SQLEXPRESS'
+    Get-NetTCPConnection -LocalPort 1433 -State Listen | Select-Object LocalAddress, LocalPort
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT name, state_desc, recovery_model_desc
+    FROM sys.databases WHERE name = N'ContosoApp';
+    '@
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query "DBCC CHECKDB (N'ContosoApp') WITH NO_INFOMSGS;"
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT (SELECT COUNT_BIG(*) FROM dbo.Customers) AS Customers,
+           (SELECT COUNT_BIG(*) FROM dbo.Orders) AS Orders;
+    '@
+    Invoke-Sqlcmd -ServerInstance '.\SQLEXPRESS' -Database ContosoApp -Query @'
+    SELECT TOP (5) OrderID, CustomerID, ProductName, Quantity, OrderDate
+    FROM dbo.Orders ORDER BY OrderID DESC;
+    '@
+    ```
+
+4.  Confirm `ContosoApp` is online.
+
+5.  Confirm integrity checks report no errors.
+
+6.  Account for the captured committed IDs and counts against the **selected recovery point before creating any test order**. If the point follows the capture, the recovered count must not be below the captured committed lower bound, and the known IDs must be present; explain later source changes rather than requiring equality to a moving live count.
+
+    Captured IDs may no longer be in the newest five rows. In the existing authorized local SQL query window, replace the placeholder with the **actual comma-separated numeric IDs captured in §5.1** and query them explicitly:
+
+    ```sql
+    SELECT OrderID, CustomerID, ProductName, Quantity, OrderDate
+    FROM dbo.Orders
+    WHERE OrderID IN (<actual-captured-ID-list>)
+    ORDER BY OrderID;
+    ```
+
+    Require each captured committed row to be accounted for at the chosen point; do not interpret a missing TOP-five row as deletion. If source activity continued after the point, distinguish later source changes from missing recovered data.
+
+7.  Do not assume Customers/Orders still contain their initial seed counts.
+
+    Do not seed, recreate, or reset the recovered database to make a check pass.
+
+**Expected Result:** The test SQL instance listens on 1433, `ContosoApp` is online and intact, and recovered data is accounted for against the captured baseline.
 
 ### 10.3 Test Migrate OnPrem-Linux-App
 
-1. Return to **Replicating machines** and click **OnPrem-Linux-App**.
-2. Click **Test migration** → Select the test VNet → Click **Test migration**.
-3. Wait for the job to complete.
+#### Hands-On Steps
 
-### 10.4 Validate Node.js App on Test VM
+**Local workstation — Azure portal:**
 
-1. SSH into the test VM `OnPrem-Linux-App-test`.
-2. Verify the application:
+1.  Select **`OnPrem-Linux-App` → Testing → Start test migration** in the same project.
 
-```bash
-# Check if Node.js is installed and correct version
-node --version
+2.  Choose **the same `vnet-pilot-test-01` → `default`**.
 
-# Check if the app process is running
-pm2 list   # If using PM2 process manager
-# OR
-sudo systemctl status nodeapp   # If running as a systemd service
+3.  Review the recovery point.
 
-# Start the app if it's not running
-cd /opt/app
-npm start &
+4.  Submit the test migration.
 
-# Verify the app is responding on port 3000
-curl -s http://localhost:3000
-curl -s http://localhost:3000/api/health   # If a health endpoint exists
+5.  Wait for the completed job.
 
-# Verify the app is listening on the expected port
-sudo ss -tlnp | grep ':3000'
-```
+6.  Open the verified App **test-job output**, using its recorded actual name and resource ID.
 
-3. **Test application-to-database connectivity** (note: in the isolated test VNet, the app may not reach the SQL test VM unless both are on the same test VNet):
+7.  Confirm its resource ID and test network.
 
-```bash
-# Check if the app reports database connectivity errors
-curl -s http://localhost:3000/api/health | python3 -m json.tool
+8.  Add its actual private IP to the four-role map.
 
-# Check application logs for connection errors
-pm2 logs --lines 50
-# OR
-sudo journalctl -u nodeapp --since "10 minutes ago" --no-pager
-```
+**OnPrem-Linux-App-test — Run Command (RunShellScript) or SSH session:**
 
-> **🏗️ In Production:** For test migrations of multi-tier applications, migrate all dependent VMs to the test VNet simultaneously so you can validate end-to-end connectivity. A web app that passes smoke tests but cannot reach its database is not a successful test.
+9.  Through its portal Linux Run Command or approved SSH, disable/stop its known traffic generator using §10.1.
 
-**Expected Outcome:** The Node.js Express app is running and responding on port 3000.
+    Do not start order writes yet.
 
-### 10.5 Clean Up Test Migrations
+### 10.4 Repoint the Test Peers Before Functional Traffic
 
-1. Return to **Replicating machines** in Azure Migrate.
-2. For each VM, click **Clean up test migration**.
-3. Confirm and clean up test resources.
+#### Hands-On Steps
 
-> **⚠️ Warning:** Do not proceed to production migration until test migrations are cleaned up and validated. Leaving test VMs in place blocks the production cutover workflow.
+**Local workstation — Azure portal:**
 
-**Expected Outcome:** Test VMs are deleted and both VMs return to the **Protected** replication state.
+1.  Confirm all four `-test` VMs are present in the **same isolated** test VNet.
+
+2.  Complete the actual-IP role map before updating aliases:
+
+| Role | Test-Role Label (record actual generated name/ID) | Alias to Use on All Four Guests |
+|------|---------------|--------------------------------|
+| Windows frontend | `OnPrem-Web-test` | `onprem-web` → actual Web **test** private IP |
+| SQL | `OnPrem-SQL-test` | `onprem-sql` → actual SQL **test** private IP |
+| App | `OnPrem-Linux-App-test` | `onprem-app` → actual App **test** private IP |
+| Nginx | `OnPrem-Linux-Web-test` | `onprem-nginx` → actual Nginx **test** private IP |
+
+**All four test guests — hosts file:**
+
+3.  Update only these **four managed aliases on all four test guests**, preserving unrelated hostnames, comments, and entries.
+
+    Never map a test guest back to a source SQL/App/Nginx address.
+
+**Windows test guests — RDP session (Notepad as Administrator):**
+
+4.  With approved **RDP**, on each Windows test guest open **Notepad as Administrator**.
+
+5.  Open `C:\Windows\System32\drivers\etc\hosts` (select All files).
+
+6.  Remove only the four managed alias tokens from old mappings.
+
+    Retain any other aliases on those lines.
+
+7.  Add one mapping per managed alias using your actual test peer IPs.
+
+8.  Save the file without adding `.txt`.
+
+**Windows test guests — Run Command (RunPowerShellScript):**
+
+9.  If using **portal Windows Run Command instead**, paste this targeted update into **each Windows test VM's RunPowerShellScript** after replacing all four placeholders.
+
+    It changes only the named aliases and keeps unrelated entries/comments:
+
+    ```powershell
+    $map = @{
+        'onprem-web'   = '<actual-Web-test-private-IP>'
+        'onprem-sql'   = '<actual-SQL-test-private-IP>'
+        'onprem-app'   = '<actual-App-test-private-IP>'
+        'onprem-nginx' = '<actual-Nginx-test-private-IP>'
+    }
+    foreach ($ip in $map.Values) { [void][Net.IPAddress]::Parse($ip) }
+    $path = "$env:windir\System32\drivers\etc\hosts"
+    $lines = foreach ($line in [IO.File]::ReadAllLines($path)) {
+        $parts = $line -split '#', 2
+        $fields = @($parts[0].Trim() -split '\s+' | Where-Object { $_ })
+        if ($fields.Count -gt 1 -and @($fields[1..($fields.Count-1)] | Where-Object { $map.ContainsKey($_) }).Count) {
+            $keep = @($fields[1..($fields.Count-1)] | Where-Object { -not $map.ContainsKey($_) })
+            $comment = if ($parts.Count -eq 2) { '#' + $parts[1] } else { '' }
+            if ($keep.Count) { $fields[0] + "`t" + ($keep -join ' ') + ' ' + $comment }
+            elseif ($comment) { $comment }
+        } else { $line }
+    }
+    $lines = @($lines) + @($map.Keys | Sort-Object | ForEach-Object { $map[$_] + "`t" + $_ })
+    [IO.File]::WriteAllLines($path, [string[]]$lines, [Text.UTF8Encoding]::new($false))
+    Clear-DnsClientCache
+    ```
+
+**Linux test guests — SSH session:**
+
+10. With approved **SSH**, use `sudoedit /etc/hosts` on each Linux test guest, applying the same four-alias-only change and preserving unrelated entries.
+
+**Linux test guests — Run Command (RunShellScript) or SSH session:**
+
+11. Alternatively, use the following **RunShellScript** block on each Linux test VM (also works through SSH with sudo) after substituting all four actual peer IPs:
+
+    ```bash
+    sudo python3 - <<'PY'
+    from pathlib import Path
+    from ipaddress import ip_address
+    mapping = {
+        'onprem-web': '<actual-Web-test-private-IP>',
+        'onprem-sql': '<actual-SQL-test-private-IP>',
+        'onprem-app': '<actual-App-test-private-IP>',
+        'onprem-nginx': '<actual-Nginx-test-private-IP>',
+    }
+    for value in mapping.values():
+        assert ip_address(value).version == 4
+    path = Path('/etc/hosts')
+    result = []
+    for line in path.read_text().splitlines():
+        body, sep, comment = line.partition('#')
+        fields = body.split()
+        if len(fields) > 1 and any(name.lower() in mapping for name in fields[1:]):
+            kept = [name for name in fields[1:] if name.lower() not in mapping]
+            if kept:
+                result.append(fields[0] + '\t' + ' '.join(kept) + (' #' + comment if sep else ''))
+            elif sep:
+                result.append('#' + comment)
+        else:
+            result.append(line)
+    result += [value + '\t' + name for name, value in mapping.items()]
+    path.write_text('\n'.join(result) + '\n')
+    PY
+    ```
+
+**Each test guest — Run Command, PowerShell, or SSH session:**
+
+12. Check resolution locally: on Windows run `[Net.Dns]::GetHostAddresses('onprem-sql')`.
+
+13. On Windows, repeat for `onprem-web`, `onprem-app` and `onprem-nginx`.
+
+14. On Linux run `getent hosts onprem-web onprem-sql onprem-app onprem-nginx`.
+
+15. Compare to the **test** role map.
+
+**OnPrem-Linux-App-test — Run Command (RunShellScript) or SSH session:**
+
+16. Run `sudo systemctl restart contoso-orderdesk` to discard its old JDBC pool.
+
+    Keep the traffic service disabled. Do not display or edit the protected JNDI credentials; the SQL alias change is sufficient.
+
+**OnPrem-Linux-Web-test — Run Command (RunShellScript) or SSH session:**
+
+17. Run `sudo nginx -t && sudo systemctl reload nginx`.
+
+    Its existing 8080 proxy uses `onprem-app`; reloading resolves the updated upstream. Leave the static port-80 site unchanged.
+
+### 10.5 Validate the Full Four-VM Application
+
+#### Hands-On Steps
+
+**OnPrem-Web-test — Run Command (RunPowerShellScript) or approved RDP PowerShell:**
+
+1.  Use RunPowerShellScript or approved RDP PowerShell:
+
+    ```powershell
+    Get-Service W3SVC
+    (Invoke-WebRequest http://localhost:80 -UseBasicParsing).StatusCode
+    Test-NetConnection -ComputerName onprem-sql -Port 1433 -InformationLevel Quiet
+    Test-NetConnection -ComputerName onprem-app -Port 3000 -InformationLevel Quiet
+    ```
+
+    Expect running IIS, HTTP 200, and `True` for **Web → SQL:1433** and **Web → App:3000**.
+
+2.  Recheck the expected Windows Web static content as in Module 2.
+
+**OnPrem-Linux-App-test — Run Command (RunShellScript) or SSH session:**
+
+3.  Use RunShellScript or approved SSH:
+
+    ```bash
+    java -version
+    systemctl is-active contoso-orderdesk
+    curl --fail --silent --show-error http://localhost:3000/api/health
+    curl --fail --silent --show-error http://localhost:3000/api/ready
+    curl --fail --silent --show-error http://localhost:3000/api/orders
+    curl --fail --silent --show-error http://onprem-nginx:8080/api/ready
+    ```
+
+    Expect Java 17 and the preserved Tomcat 10.1 service. `/api/health` reports live runtime (`healthy`, Contoso Order Desk, source server identity, timestamp); **`/api/ready` proves SQL reachability**. Orders lists existing data and counts. The proxy request checks **App → Nginx:8080 → App:3000 → SQL:1433**. Health alone is not SQL readiness.
+
+**OnPrem-Linux-Web-test — Run Command (RunShellScript) or SSH session:**
+
+4.  Run:
+
+    ```bash
+    systemctl is-active nginx
+    curl --fail --silent --show-error http://localhost:80 | grep -F 'TD SYNNEX | Linux Web'
+    curl --fail --silent --show-error http://onprem-app:3000/api/health
+    curl --fail --silent --show-error http://localhost:8080/api/ready
+    ```
+
+    Expect the unchanged static port-80 page, App health, and SQL-ready proxy on 8080. This checks **Nginx → App:3000** without an all-to-all port scan.
+
+**OnPrem-Linux-App-test — browser or Run Command (RunShellScript) / SSH session:**
+
+5.  With generators still disabled, compare pre-write SQL counts/recent orders from §10.2 and the API's `count` / `customerCount`.
+
+6.  Open `http://localhost:3000` through a browser **inside the App guest if available**, or view its HTML with `curl` there.
+
+    It should identify **Contoso Order Desk**. No public endpoint is needed.
+
+7.  Take an existing `customerId` from the preceding `/api/orders` response.
+
+8.  Create **one** manual sample order only after those comparisons, replacing the placeholder below with that `customerId`.
+
+    The POST goes through Nginx, creates a real row, and returns the created `orderId`:
+
+    ```bash
+    curl --fail --silent --show-error --include http://onprem-nginx:8080/api/orders \
+      --data-urlencode 'customerId=<existing-customer-id>' \
+      --data-urlencode 'productName=<your-unique-test-marker>' \
+      --data-urlencode 'quantity=1' \
+      --data-urlencode 'unitPrice=9.99'
+    curl --fail --silent --show-error http://onprem-nginx:8080/api/orders
+    ```
+
+9.  Expect HTTP **201**, status `created`, returned order ID/unique marker in readback, API total `count` increased by **one**, and `customerCount` unchanged while generators remain disabled. The `orders` array is at most 20 recent rows, not the total count.
+
+    On timeout or uncertain response, read the API and query SQL for the unique marker/ID first; **do not blindly retry**. Every successful POST adds another order.
+
+**OnPrem-SQL-test — Run Command (RunPowerShellScript) or PowerShell through RDP:**
+
+10. Confirm that new order/count locally in test SQL using the §10.2 query.
+
+**Local workstation — student notes:**
+
+11. Record SQL integrity, the baseline comparison, five dependency edges, and the single sample-order readback in your student notes.
+
+    These test writes belong only to disposable test SQL, not the source or final target.
+
+**Expected Result:** All four isolated copies work together with correct test-only aliases. SQL data is validated before a single deliberate test write; direct runtime health, SQL readiness, the Nginx proxy, and create/readback all pass.
+
+### 10.6 Clean Up All Four Test Migrations
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  After recording the successful full test, open **Azure Migrate → Execute → Migrations**.
+
+2.  For **each of the four source records**, select **Testing → Clean up test migration**.
+
+3.  Confirm testing is complete.
+
+4.  Review the test resources.
+
+5.  Check exact names and **resource IDs** before deleting.
+
+    Remove only that job's **`-test` copies and associated test resources**, never unsuffixed live targets, source originals, or an entire shared resource group.
+
+6.  Select **Clean up test**.
+
+7.  Confirm test cleanup completes.
+
+8.  Confirm continuing source replication remains healthy.
+
+9.  Recheck final target settings before cutover.
+
+**Source guests — approved guest PowerShell / SSH session:**
+
+10. Confirm all four sources are still serving and their previously active synthetic orders continue. No source write pause was required for this rehearsal. Do not resume copied test generators or restart/renew CPU workers.
+
+**Local workstation — student notes:**
+
+11. Record that source data can change again; capture a **new final baseline** in §11.2.
+
+**Expected Result:** All four test copies are cleaned up through the portal after a recorded full application pass; source replication continues for the final window.
+
+**CSA Why:** A successful isolated application test gives evidence without risking source writes; controlled cleanup prevents test/live confusion.
 
 ---
 
 ## 11. Step 7 — Cutover for Stateful Workloads
 
-Stateful workload cutover is a **coordinated operation**. You do not migrate the database and the application independently — they cut over together in a single maintenance window.
+Cutover is **one planned maintenance window for the four-VM application**, with separate modern-physical SQL/App jobs and Hyper-V frontend jobs—not an atomic cross-engine transaction or a frontend-only wave. Temporary business downtime is expected from write freeze through accepted target activation; neither zero downtime nor session/RAM preservation is promised. Sequence per-VM actions and validate each dependency. Keep manual order entry and all generators stopped until the complete target system passes the pre-write go/no-go checks.
 
-### 11.1 Cutover Sequence for Multi-Tier Applications
+The current physical tutorial (2026-06-27) offers **Completion → Migrate → Yes** for **“Shut down virtual machines and perform a planned migration with no data loss”**, and describes source shutdown plus on-demand replication of subsequent changes. That is the documented planned success path, not a live-tested guarantee for this nested pilot. For **each** engine require a successful final-sync job, fresh accepted changes and the **actual source VM OFF**, followed by target business-data comparison. If shutdown/final sync cannot be verified, **STOP**; do not force host power-off and then expect a powered-off guest agent to upload a final delta, or substitute ASR failover instructions.
 
-#### Coordinated Cutover Sequence
+### 11.1 Cutover Sequence for the Application
 
 ```mermaid
-stateDiagram-v2
-    [*] --> PreCheck: Verify replication healthy
-    PreCheck --> DrainApp: DRAIN - Stop incoming traffic
-    DrainApp --> FinalSync: SYNC - Wait for final replication
-    FinalSync --> StopSource: STOP - Shutdown source VMs
-    StopSource --> BootAzure: BOOT - Start Azure VMs
-    BootAzure --> UpdateDNS: WIRE - Update DNS/load balancer
-    UpdateDNS --> StartApp: START - Enable traffic to Azure
-    StartApp --> Monitor: VALIDATE - Monitor for 48-72 hrs
-    Monitor --> Complete: COMPLETE - Decommission source
-    Monitor --> Rollback: ROLLBACK if issues detected
-
-    Rollback --> RestartSource: Restart source VMs
-    RestartSource --> RevertDNS: Revert DNS
+flowchart TD
+    Ready[Healthy replication and successful full isolated test] --> Drain[Pause order writes and known source generators]
+    Drain --> Baseline[Capture final source data and application baseline]
+    Baseline --> SQL[Migrate SQL with source shutdown and final sync]
+    SQL --> SQLCheck[Validate target SQL integrity and baseline]
+    SQLCheck --> App[Migrate App and verify target SQL readiness]
+    App --> Front[Migrate Nginx and Windows Web in the same window]
+    Front --> Wire[Record all target IPs and update aliases on all four]
+    Wire --> Test[Restart Tomcat, reload Nginx, validate complete system]
+    Test --> Accept[One target sample order, acceptance, then release traffic]
 ```
 
-```
-    ┌──────────────────────────────────────────────────────────┐
-    │                    CUTOVER SEQUENCE                       │
-    ├──────────────────────────────────────────────────────────┤
-    │                                                          │
-    │  1. DRAIN ──→ Stop application (Node.js)                │
-    │               ↓ Ensures no new transactions              │
-    │  2. SYNC  ──→ Final delta sync (SQL + App VMs)          │
-    │               ↓ All pending writes committed             │
-    │  3. STOP  ──→ Shut down source VMs                      │
-    │               ↓ Source is now frozen                      │
-    │  4. BOOT  ──→ Azure VMs come online                     │
-    │               ↓ Verify SQL Server, verify app            │
-    │  5. WIRE  ──→ Update connection strings + DNS            │
-    │               ↓ Application points to Azure SQL VM       │
-    │  6. START ──→ Start application, verify end-to-end       │
-    │               ↓ Health checks pass                       │
-    │  7. DONE  ──→ Notify stakeholders                       │
-    │                                                          │
-    └──────────────────────────────────────────────────────────┘
-```
+### 11.2 Pre-Migration Checklist and Final Write Boundary
 
-### 11.2 Pre-Migration Checklist
+#### Hands-On Steps
 
-- [ ] Test migrations completed successfully and cleaned up
-- [ ] SQL Server backup taken before migration (safety net — independent of replication)
-- [ ] Application users notified of maintenance window
-- [ ] Target NSG rules pre-configured:
-  - Port 1433 (SQL Server) — inbound from application subnet only
-  - Port 3000 (Node.js) — inbound from web tier / load balancer
-  - Port 22 (SSH) and 3389 (RDP) — restricted to management subnet or Azure Bastion only
-- [ ] DNS TTL reduced to 300 seconds (done 7 days before cutover)
-- [ ] Connection string update procedure tested and ready
-- [ ] Rollback trigger criteria defined (see section 13)
-- [ ] On-call team briefed on migration timeline
+**Local workstation — Azure portal:**
 
-### 11.3 Execute Migration
+1.  Confirm the full four-VM isolated test passed.
 
-1. In **Replicating machines**, select both **OnPrem-SQL** and **OnPrem-Linux-App**.
-2. Click **Migrate**.
-3. In the migration dialog:
-   - **Shut down source VMs before migration?** → **Yes** (mandatory for database consistency)
-4. Click **Migrate** to begin the cutover.
+2.  Confirm all four test migrations were cleaned up.
 
-![Production Migration](../images/module-3-step-7-2.png)
+3.  Confirm all four source records have healthy replication and acceptable recovery points.
 
-> **Note:** For SQL Server, shutting down the source VM ensures all pending transactions are flushed and the database is in a clean, consistent state. This is not optional for database workloads.
+**Local workstation — student notes:**
 
-### 11.4 Monitor Migration Progress
+4.  Confirm the independent source SQL backup and rollback criteria.
 
-1. Navigate to **Azure Migrate** → **Jobs** to view migration progress.
-2. Wait for both jobs to reach **Completed** status.
+5.  Notify users of the shared window.
 
-### 11.5 Post-Cutover Validation — SQL Server
+6.  Stop new manual order entry through both the direct App and proxy paths.
 
-1. Connect to the migrated OnPrem-SQL VM via RDP or Azure Bastion.
-2. Run the full validation suite:
+    Do not admit other clients during validation.
 
-```powershell
-# 1. Verify SQL Server service
-Get-Service -Name "MSSQL`$SQLEXPRESS"
+**Source Windows guests — approved guest PowerShell:**
 
-# 2. Check databases are online
-sqlcmd -S .\SQLEXPRESS -Q "SELECT name, state_desc, recovery_model_desc FROM sys.databases"
+7.  Inside each source Windows guest with the known task (normally Windows Web), disable and stop only the generator:
 
-# 3. Verify data integrity — CRITICAL
-sqlcmd -S .\SQLEXPRESS -Q "DBCC CHECKDB('YourDatabase') WITH NO_INFOMSGS"
+    ```powershell
+    $task = Get-ScheduledTask -TaskName 'LabOrderDeskTraffic' -ErrorAction SilentlyContinue
+    if ($task) {
+        Disable-ScheduledTask -TaskName 'LabOrderDeskTraffic' | Out-Null
+        Stop-ScheduledTask -TaskName 'LabOrderDeskTraffic'
+    }
+    ```
 
-# 4. Verify latest data is present
-sqlcmd -S .\SQLEXPRESS -Q "USE [YourDatabase]; SELECT TOP 5 * FROM [YourTable] ORDER BY [DateColumn] DESC"
+**Source Linux guests — SSH session:**
 
-# 5. Check SQL Server error log for post-boot issues
-sqlcmd -S .\SQLEXPRESS -Q "EXEC xp_readerrorlog 0, 1, NULL, NULL, NULL, NULL, 'DESC'"
-```
+8.  Inside each source Linux guest with the known traffic unit (normally App), run:
 
-3. Test connectivity from other Azure VMs:
+    ```bash
+    if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
+      sudo systemctl disable --now contoso-orderdesk-traffic.service
+    fi
+    ```
 
-```powershell
-Test-NetConnection -ComputerName <OnPrem-SQL-private-ip> -Port 1433
-```
+**Source guests — approved guest PowerShell / SSH session:**
 
-### 11.6 Post-Cutover Validation — Node.js App
+9.  Keep **SQL, Tomcat, and Nginx running** while writes drain.
 
-1. SSH into the migrated OnPrem-Linux-App VM.
+    These commands are not a general service shutdown.
 
-```bash
-# Check Node.js app status
-pm2 list
-# OR
-sudo systemctl status nodeapp
+10. Confirm the known tasks/services are disabled/stopped.
 
-# Test the application
-curl -s http://localhost:3000
+11. Confirm manual clients are no longer creating orders.
 
-# Verify external access (if public IP assigned)
-curl -s http://<public-ip>:3000
-```
+**Source OnPrem-SQL — PowerShell / SSMS:**
 
-### 11.7 Update Connection Strings
+12. After in-flight writes finish, rerun §5.1's SQL query **on source SQL**.
 
-This is a critical post-cutover step. The Node.js app must now point to the SQL Server's **Azure private IP**, not the on-premises IP.
+13. Record the **final source** timestamp, counts, and recent orders, plus application readiness.
 
-```bash
-# Update environment variable or config file
-sudo nano /opt/app/.env
-# Change: DB_HOST=192.168.0.11
-# To:     DB_HOST=<OnPrem-SQL-azure-private-ip>
+    This is the baseline for final target comparison, not the earlier disposable test state.
 
-# Restart the application
-pm2 restart all
-# OR
-sudo systemctl restart nodeapp
-```
+14. Retain or refresh the independent backup according to the agreed procedure.
 
-> **🏗️ In Production — Connection String Management:**
-> Hard-coded IPs are a migration anti-pattern. Use **Azure Private DNS Zones** so applications connect via hostname (`sql.internal.contoso.com`) rather than IP. This way, you update DNS once and all applications pick up the change without code or config changes.
->
-> For Azure-native applications, consider **Azure Key Vault** for connection string storage with managed identity access.
+**HyperVHost — elevated Windows PowerShell:**
 
-### 11.8 Verify End-to-End Connectivity
+15. Verify you are on the **fresh pilot source host** recorded in Module 0, not an existing lab. Before any final source shutdown, disarm future host-boot starts for **exactly these four workload VMs**:
 
-```bash
-# From OnPrem-Linux-App, test SQL connectivity
-nc -zv <OnPrem-SQL-private-ip> 1433
+    ```powershell
+    Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App |
+        Select-Object Name,VMId,State,AutomaticStartAction
+    Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App |
+        Set-VM -AutomaticStartAction Nothing
+    Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App |
+        Select-Object Name,VMId,State,AutomaticStartAction
+    ```
 
-# Verify the app can query the database
-curl -s http://localhost:3000/api/health
-```
+16. Match all four VM IDs to the pilot register and require **AutomaticStartAction = Nothing** for every one before proceeding.
 
-```powershell
-# From OnPrem-SQL, verify it can be reached
-Test-NetConnection -ComputerName <OnPrem-Linux-App-private-ip> -Port 3000
-```
+    Module 0's successful deployment normally assigns a future-host-boot start policy. A later HyperVHost reboot must not resurrect retired writers. This manual VM policy action does **not** modify a workshop script. Do not rerun deployment, host configuration, migrate helpers, traffic helpers, or source startup automation after this boundary. Do not change the appliances' policies or unrelated VMs.
 
-**Expected Outcome:** Both VMs are running in Azure. SQL Server is accessible with verified data integrity, and the Node.js app is serving requests and connected to the migrated database.
+**Source guests — approved task/service controls:**
+
+17. Stop/disarm any known still-active local CPU workers using §10.1's exact CPU task/unit controls **on source guests**, and verify stopped/absent. Do not assume expiry or restart/renew them. Source network generators must already be stopped/disabled from Steps 7–11; application services remain running until their planned migration shutdown.
+
+**Local workstation — Azure portal:**
+
+18. Confirm both engines still have healthy replication and fresh points after the write freeze; review pending data/jobs and each planned source-shutdown/final-sync behavior before opening a Migrate pane.
+
+19. Confirm final target routing/NSG/guest firewall paths for the five edges and approved management access, with pre-boot containment preventing **inherited source aliases or copied generators from reaching source SQL/App**. Deny source nested/source-VNet prefixes and do not create an interim hybrid path.
+
+    Target peers must become mutually routable only in the intended final network; no user/order ingress opens until every target is valid. Do not introduce a public endpoint.
+
+20. If an existing client DNS record is used, plan its update within this window. No Azure DNS zone is automatically created by this project.
+
+21. Record the go/no-go approval, planned temporary interruption, rollback owner and the point at which target writes would require reconciliation. If any gate is unresolved, keep sources serving or in the approved maintenance state and STOP; do not force a migration.
+
+### 11.3 Migrate SQL First
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  In **Azure Migrate → Execute → Migrations**, select exactly **`OnPrem-SQL` → Completion → Migrate**.
+
+2.  Review the final mapping: **`OnPrem-SQL`**, target region, `rg-pilot-target-01`, final `10.1` VNet/subnet, chosen SQL size, and all required disks.
+
+3.  Select **Shut down virtual machines and perform a planned migration with no data loss: Yes**.
+
+4.  Review the settings.
+
+5.  Select **Migrate**.
+
+    Let the planned migration perform source shutdown and final synchronization; do not choose an option that bypasses the final source write boundary.
+
+6.  In **Jobs**, wait for successful completion.
+
+**HyperVHost — Hyper-V Manager:**
+
+7.  Verify the **mapped SQL source VM ID is OFF**, with `AutomaticStartAction Nothing`, on the pilot HyperVHost.
+
+    If it remains running or shutdown/final sync failed, STOP. Do not treat an accepted click or target boot as source-fencing evidence.
+
+**Local workstation — Azure portal:**
+
+8.  Inspect the SQL migration/final synchronization job and accepted recovery-point/data freshness; require successful completion covering the final write boundary, then verify final target **`OnPrem-SQL`** is running in the correct target group.
+
+9.  Preserve the existing Windows/SQL OS, do not select an optional OS upgrade, and use capacity reservations only if separately approved. Record the target's actual resource ID; no size choice guarantees allocation.
+
+### 11.4 Validate Target SQL Before Dependent Migration
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Open target **`OnPrem-SQL`**.
+
+2.  Confirm its resource ID, region, selected size, OS, and disks.
+
+3.  Record its **actual `10.1` private IP** from its NIC.
+
+    Do not reuse the test IP.
+
+4.  Use portal Windows Run Command with existing SQL permission, or approved RDP/SSMS as in §10.2.
+
+**Target OnPrem-SQL — Run Command (RunPowerShellScript) or RDP/SSMS:**
+
+5.  Run the SQL service/listener and integrity/data query **on this target**.
+
+6.  Before any new target writes, require `ContosoApp` online, no `DBCC CHECKDB` errors, and counts/recent orders matching the **final source baseline** from §11.2.
+
+    Keep order entry and generators stopped. If not accounted for, do not proceed with acceptance or dependent traffic.
+
+### 11.5 Migrate and Stage the App
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Select exactly **`OnPrem-Linux-App` → Completion → Migrate**.
+
+2.  Review its final target mapping and disks.
+
+3.  Select **Shut down virtual machines and perform a planned migration with no data loss: Yes**.
+
+4.  Submit the migration.
+
+5.  Wait for successful completion.
+
+**HyperVHost — Hyper-V Manager:**
+
+6.  Confirm the mapped source App VM ID is **OFF**, with `AutomaticStartAction Nothing`. Require a successful modern-physical final-sync job accepting changes through the final boundary; STOP on uncertain shutdown/synchronization, not a force-off workaround.
+
+**Local workstation — Azure portal:**
+
+7.  Confirm target **`OnPrem-Linux-App`** is running with Ubuntu 24.04, the selected size, and required disks.
+
+8.  Record its actual target private IP.
+
+**Target OnPrem-Linux-App — Run Command (RunShellScript) or SSH session:**
+
+9.  Through target App **RunShellScript** or approved SSH, repeat §10.1's known network-generator and CPU controls **on this final target**; require stopped/disarmed or absent before requests.
+
+10. Check `java -version`.
+
+11. Check `systemctl is-active contoso-orderdesk`.
+
+12. Stage App-to-SQL resolution before dependent frontend work: use the §10.4 Linux alias-update block **on target App**, with its `mapping` dictionary containing **only `onprem-sql` set to the actual target SQL IP** for this intermediate step.
+
+    Alternatively, through approved SSH use `sudoedit /etc/hosts` to change only that alias, preserving all other entries. No SQL credential change is needed.
+
+13. Restart `contoso-orderdesk`.
+
+14. Check **target App** localhost `/api/health` and `/api/ready`.
+
+    Require SQL readiness before moving on. The generator stays disabled; do not use the still-unrepointed proxy yet.
+
+### 11.6 Migrate Frontends in This Same Window
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Perform [Module 2 §9.3–§9.5](Module-2-Agentless-Migration.md#93-execute-migration--onprem-web-shared-window-only) for **`OnPrem-Web`** and **`OnPrem-Linux-Web`** now.
+
+2.  For each, choose planned **source shutdown: Yes**.
+
+3.  Confirm the actual mapping.
+
+4.  Wait for its completed migration job.
+
+**HyperVHost — Hyper-V Manager:**
+
+5.  Verify all four source VMs are shut down and retained.
+
+**Local workstation — Azure portal:**
+
+6.  Verify all four unsuffixed targets are running in the selected target group/network.
+
+7.  Record each target VM's actual NIC private IP, name, and resource ID.
+
+**Target frontends — Run Command or approved RDP/SSH:**
+
+8.  On **all four final targets**, repeat §10.1's exact network-generator/CPU stop/disarm and verification controls before functional traffic. Then inspect Windows/Linux frontend static pages locally using Module 2 §10.
+
+    Leave generators and manual order entry stopped.
+
+### 11.7 Repoint All Final Target Dependencies
+
+#### Hands-On Steps
+
+**All four target guests — Run Command or approved RDP/SSH:**
+
+1.  With all four targets created, repeat §10.4's four-alias update **on all four unsuffixed target guests**, substituting the actual **final target** Web/SQL/App/Nginx private IPs for every placeholder.
+
+    This replaces the intermediate App SQL mapping as well. Test `10.2` and source `192.168.0.x` addresses must not remain as these dependency aliases.
+
+2.  Use the same viable guest-access methods: portal Run Command, or approved RDP with elevated Notepad / SSH with `sudoedit`.
+
+    Preserve unrelated hosts entries/comments and keep the protected JNDI descriptor unchanged.
+
+3.  Check local resolution on each target against the final target role map.
+
+**Target OnPrem-Linux-App — Run Command (RunShellScript) or SSH session:**
+
+4.  Run `sudo systemctl restart contoso-orderdesk` to discard any old JDBC pool.
+
+**Target OnPrem-Linux-Web — Run Command (RunShellScript) or SSH session:**
+
+5.  Run `sudo nginx -t && sudo systemctl reload nginx` to resolve its updated upstream.
+
+    Do not change the port-80 static site.
+
+### 11.8 Validate End-to-End and Accept the Migration
+
+#### Hands-On Steps
+
+**All four target guests — Run Command or approved RDP/SSH:**
+
+1.  Repeat **only the read-only** service, SQL, static, five-edge, readiness and existing-order checks from §10.5 **on the four final targets** with their final IP map. **Do not repeat §10.5's POST here**; the single final-target marker write is Step 4 below.
+
+2.  Confirm IIS/Nginx static pages, SQL integrity/baseline, the five dependency edges, App health, SQL readiness, existing orders, and the 8080 proxy.
+
+3.  Compare pre-write target SQL/API counts to the final source baseline first.
+
+**Target OnPrem-Linux-App — Run Command (RunShellScript) or SSH session:**
+
+4.  After all read-only results and the pre-write go/no-go are accepted, deliberately create/read back **one target sample order**, using the same form-urlencoded POST procedure with a unique recorded marker product name. This is the only target POST in this validation; do not repeat the test procedure's POST as well.
+
+    The earlier test order was disposable and is not part of the final source baseline.
+
+5.  Confirm HTTP 201, returned ID/marker in API and SQL readback, total Orders increased by one and Customers unchanged while generators/manual clients remain stopped. A timeout/uncertain POST must be investigated with read-only API/SQL queries before any further write—never blindly retry.
+
+**Local workstation — student notes:**
+
+6.  Record acceptance and observed interruption in your student notes.
+
+**Approved client — DNS and browser:**
+
+7.  Only after acceptance, restore the approved user/client route to this target environment.
+
+8.  End the maintenance window.
+
+9.  If an existing DNS/FQDN is used, update and validate it from an approved client.
+
+    Private/localhost checks do not require public DNS.
+
+**Target guests — Run Command or approved RDP/SSH:**
+
+10. Leave optional generators disabled unless deliberately needed.
+
+    If resuming a generator that was previously active, use the ordinary guest task/service controls only after final aliases and readiness pass; do not activate traffic on a source or test copy.
+
+**HyperVHost — Hyper-V Manager:**
+
+11. Keep source originals shut down through the agreed rollback window.
+
+    Ongoing backup, monitoring, and optimization are separate [Module 5](Module-5-Post-Migration.md) work.
+
+**Expected Result:** All four final targets serve one validated application in the target network. SQL matches the final source baseline before the deliberate target write; all source copies remain shut down and retained, with no competing writable system.
+
+**CSA Why:** The shared write boundary, dependency ordering, and explicit acceptance turn VM migrations into a controlled service migration.
+
+### 11.9 Record Completion Separately From Traffic Acceptance
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal / student notes:**
+
+1.  Record both engines' final job/synchronization evidence, actual four source OFF states, final data comparison and the single accepted target marker order.
+
+2.  Inspect each workload's **Completion** stage. **Complete migration** is a separate action that stops replication/cleans migration state; it is not application acceptance, source backup or permission to delete source VMs.
+
+3.  Perform that action only when the application owner approves it and it is consistent with the agreed rollback/retention plan; otherwise record it **deferred**. Keep the original sources shut down and retained.
+
+**Expected Result:** Migration lifecycle completion is explicitly recorded without confusing it with writer release, ongoing DR, or premature source deletion.
 
 ---
 
 ## 12. Migration at Scale — CSA Guidance
 
-This section addresses what changes when you move from 4 VMs to 400.
+This section addresses what changes when you move from four VMs to hundreds. It does not add infrastructure to this lab.
 
 ### Migration Waves
 
-Never migrate everything at once. Organize workloads into waves:
+Organize migrations into waves, but keep tightly coupled dependencies in the same coordinated cutover group.
 
-| Wave | VMs | Criteria | Duration |
-|------|-----|----------|----------|
-| **Wave 0 — Pilot** | 5–10 | Low-risk, well-understood workloads | Week 1–2 |
-| **Wave 1 — Quick Wins** | 20–50 | Stateless web/app servers (agentless) | Week 3–4 |
-| **Wave 2 — Stateful** | 20–50 | Databases, file servers (agent-based) | Week 5–8 |
-| **Wave 3 — Complex** | Remaining | Multi-tier apps, legacy systems | Week 9–12+ |
+| Wave | Example Scope | Criteria |
+|------|---------------|----------|
+| **Wave 0 — Pilot** | Small representative group | Low-risk, well-understood dependencies and recovery procedures |
+| **Wave 1 — Quick Wins** | Independent applications | Proven runbook, clear ownership, limited external dependencies |
+| **Wave 2 — Stateful Groups** | Database and dependent application tiers together | Tested consistency, write pause, and data-aware rollback |
+| **Wave 3 — Complex** | Remaining dependency groups | Resolve constraints before scheduling the window |
 
 ### Bandwidth Planning
 
-Calculate required bandwidth before starting replication:
+Estimate the sustained transfer rate from measured churn, then allow for initial replication, protocol overhead, contention, and safety margin:
 
-```
-Required Bandwidth = (Total Daily Churn × Number of VMs) ÷ Available Bandwidth ÷ 86400 seconds
+```text
+Average changed-data rate (bytes/second)
+    = Total measured changed bytes per day / 86,400
 
-Example:
-- 100 VMs × 10 GB daily churn each = 1,000 GB/day = 1 TB/day
-- Available bandwidth: 1 Gbps = ~86 TB/day theoretical, ~43 TB/day practical
-- Result: Comfortable — replication will keep up
-
-Example (constrained):
-- 100 VMs × 50 GB daily churn each = 5 TB/day
-- Available bandwidth: 100 Mbps = ~0.86 TB/day practical
-- Result: Replication will fall behind — need ExpressRoute or phased approach
+For 100 VMs with 10 GB/day each:
+    1,000 GB/day must be replicated, before overhead and initial-copy demand.
 ```
 
-### Process Server Scaling
-
-| Scenario | Process Servers Needed |
-|----------|----------------------|
-| < 100 VMs, < 1 TB daily churn | 1 (combined with config server) |
-| 100–200 VMs, 1–2 TB daily churn | 1 dedicated process server |
-| 200–400 VMs, 2–4 TB daily churn | 2 dedicated process servers |
-| 400+ VMs | 3+ process servers, consider ExpressRoute |
+Observed lag and recovery-point age matter more than theoretical line speed. Review host-provider throughput, source load, and network capacity; the approved modern appliance is a required second-method component, not a generic throughput fix.
 
 ### Network Path Selection
 
-| Path | Bandwidth | Latency | Cost | Best For |
-|------|-----------|---------|------|----------|
-| **Public Internet (VPN)** | Variable, typically < 1 Gbps | Higher | Low | Small migrations (< 50 VMs) |
-| **Azure ExpressRoute** | 1–100 Gbps dedicated | Low, predictable | Higher | Large migrations, production workloads |
-| **ExpressRoute with Global Reach** | Same as ExpressRoute | Lowest | Highest | Multi-region, multi-site migrations |
+| Path | Characteristics | Planning Consideration |
+|------|-----------------|------------------------|
+| **Approved Internet path** | Variable bandwidth/latency | Validate required connectivity and effective sustained throughput |
+| **VPN / private connectivity** | Depends on the actual design | Do not accidentally reconnect isolated test and source networks |
+| **ExpressRoute** | Dedicated connectivity option | Evaluate business requirements and measured demand, not a fixed VM-count rule |
 
-> **🏗️ In Production:** For migrations exceeding 100 VMs or 1 TB daily churn, ExpressRoute is not a luxury — it is a requirement. The predictable bandwidth and lower latency significantly reduce migration risk and timeline.
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  In your student notes, estimate a larger dependency group's daily churn.
+
+2.  Estimate its required sustained rate.
+
+3.  Identify which observations from this lab would affect its wave size, window, and rollback allowance.
+
+    No new network service or server is deployed here.
+
+**Expected Result:** You can scale the planning model without splitting a connected application into incompatible cutover waves.
+
+**CSA Why:** Wave boundaries should reduce risk while preserving application dependencies.
 
 ---
 
 ## 13. Rollback Strategy for Stateful Workloads
 
-Rollback for stateful workloads is more complex than for stateless VMs. You cannot simply "boot the old VM" because the database may have accepted new transactions on the Azure side.
+Rollback is more complex once Azure has accepted new transactions. You cannot simply boot an older source SQL VM and silently discard target writes. Even the deliberate final target sample order is a target write that must be considered.
 
-### When to Rollback
+| Trigger | Example Threshold to Agree Before Cutover | Action |
+|---------|------------------------------------------|--------|
+| Database corruption | Any integrity-check error | Stop writes; preserve evidence and assess recovery |
+| Application errors | Sustained failures beyond agreed tolerance | Hold acceptance and evaluate rollback |
+| Performance degradation | Unacceptable increase over captured baseline | Compare repair time with rollback allowance |
+| Data integrity issues | Missing/incorrect committed data | Do not reopen either environment before reconciliation |
+| Dependency failure | Required SQL/App/proxy edge unavailable | Keep traffic paused until resolved or rolled back |
 
-| Trigger | Threshold | Action |
-|---------|-----------|--------|
-| Database corruption | Any `DBCC CHECKDB` errors | Immediate rollback |
-| Application errors | Error rate > 10% of requests | Investigate 30 min, then rollback if unresolved |
-| Performance degradation | Latency > 200% of on-premises baseline | Investigate 1 hour, then rollback if unresolved |
-| Data integrity issues | Missing or incorrect data detected | Immediate rollback |
-| Network connectivity failures | Application cannot reach database or dependencies | Investigate 30 min, then rollback |
+### 13.1 Decide Whether Target Writes Occurred
 
-### How to Rollback
+#### Hands-On Steps
 
-1. **Stop the application tier** — Prevent new transactions from reaching the Azure database.
-2. **Power on the source SQL VM** on the Hyper-V host.
-3. **If transactions occurred on Azure post-cutover:**
-   - Export the delta data from Azure SQL to the source (manual, application-specific).
-   - Or accept the data loss window and restore from the pre-migration backup.
-4. **Update DNS records** back to on-premises IPs.
-5. **Restart the source application VM**.
-6. **Notify stakeholders:** *"Rollback initiated due to [reason]. Services restored to on-premises. Root cause analysis and re-migration planning in progress."*
+**Target VMs — Run Command or approved RDP/SSH:**
 
-### Rollback Window
+1.  Stop new order entry.
 
-- **Keep source VMs in shutdown state for 48–72 hours minimum** after cutover.
-- **Do not uninstall the Mobility Service agent** until the rollback window closes — you may need to re-replicate.
-- **Do not decommission** source infrastructure until the application owner signs off.
+2.  Disable/stop the known Azure-side generators using the ordinary guest controls from §11.2.
 
-> **🏗️ In Production:** For regulated industries, the rollback window may be mandated by compliance policy (often 5–7 business days). Document the decommission decision with timestamps, approval signatures, and references to the change management ticket.
+3.  Preserve target VM/database state.
+
+    Do not delete targets to simplify rollback.
+
+**Local workstation — student notes:**
+
+4.  Compare the final source baseline with target order IDs/counts and the student action log.
+
+5.  Determine whether the sample order or any other target transactions occurred.
+
+6.  Keep only one environment writable.
+
+7.  Record the rollback decision and data owner approval.
+
+### 13.2 Restore Service Without Losing New Data
+
+#### Hands-On Steps
+
+**Target VMs — Run Command or approved RDP/SSH:**
+
+1.  **Branch before proceeding:** Steps 2–6 apply **only if §13.1 proved NO target writes**. If **any target write** occurred, including the acceptance marker, **skip Steps 2–6** and complete Step 7's reconciliation/restore decision **before any source restart**. Keep the alternative database nonwritable and preserve source `AutomaticStartAction Nothing`.
+
+    For the verified no-target-write branch, keep Azure clients/generators stopped and fence the Azure application/database from serving writes before starting the source.
+
+**HyperVHost — Hyper-V Manager:**
+
+2.  Then use **Hyper-V Manager on HyperVHost** to start source SQL.
+
+3.  Validate source SQL.
+
+4.  Start App.
+
+5.  Start the frontends.
+
+**Source guests — approved guest PowerShell / SSH session:**
+
+6.  Confirm source aliases and original client routing from your recorded source map before admitting traffic.
+
+**Local workstation — student notes:**
+
+7.  **If target writes occurred**, first agree and complete the application-specific reconciliation or restore plan.
+
+    Preserve a target backup/export, account for new transactions, and verify the chosen recovery destination contains the accepted business data. The supported action may be a forward fix rather than reverting. Do not restore clients to stale source SQL while deciding what to do.
+
+**Chosen recovery environment guests — Run Command or approved RDP/SSH:**
+
+8.  After the chosen data state is validated, update the appropriate aliases/client routing.
+
+9.  Restart App to discard old JDBC connections.
+
+10. Test/reload Nginx where its upstream changed.
+
+11. Validate the full service before reopening writes.
+
+**Local workstation — student notes:**
+
+12. Retain the stopped alternative environment for analysis/retry.
+
+    Do not delete source originals until acceptance and the rollback window have closed.
+
+### 13.3 Retain the Rollback Window
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Agree a retention window in the student plan (often **48–72 hours**, adjusted for policy and cost).
+
+2.  Keep source VMs shut down after successful cutover and retain the independent backup until the application owner accepts the service and authorizes decommissioning.
+
+3.  Record the final decision in your student notes.
+
+    Test cleanup is never permission to delete the source originals.
+
+**Expected Result:** Rollback restores a single validated service and explicitly accounts for all accepted target writes, rather than merely restarting stale sources.
+
+**CSA Why:** Preserving the latest committed business data is the central stateful rollback requirement.
 
 ---
 
 ## Key Takeaways
 
-1. **Agent-based for anything with state.** Databases, file servers, domain controllers — if it has data that changes, use continuous replication.
-2. **Always do test migration — no exceptions.** For databases, test migration validates data integrity, not just boot success. Run `DBCC CHECKDB`.
-3. **Coordinate database and application cutover in the same maintenance window.** Migrating SQL at 2 PM and the app at 4 PM creates a 2-hour outage you could have avoided.
-4. **Plan for 48–72 hour rollback window.** Do not decommission source VMs until the application owner confirms production stability.
-5. **At scale, the process server is your bottleneck.** Size it correctly, monitor it continuously, and add capacity before you hit limits.
-6. **Connection strings and DNS are the #1 post-cutover issue.** Solve this architecturally with Azure Private DNS, not manually with IP address edits.
+1. **Two methods, one application.** Web/Linux-Web use the host provider; SQL/App use the separate modern appliance and Mobility. Statefulness alone does not mandate either method.
+2. **Test the full isolated application.** Recreate cleaned-up frontend test copies if needed; never substitute live VMs.
+3. **Health is not SQL readiness.** Validate database integrity, data freshness, the proxy, and one deliberate order readback.
+4. **Use one coordinated cutover window.** Pause writes, capture the final baseline, migrate dependencies in order, and repoint all targets before acceptance.
+5. **Use actual private IPs.** Replacing source addresses with test addresses is temporary; final targets require their own actual peer mappings.
+6. **Rollback after target writes requires reconciliation.** Retain source originals and backups until acceptance and the agreed window close.
 
 ---
 
 ## Next Steps
 
-You have successfully migrated all four on-premises VMs to Azure:
+After shared-window acceptance, the expected final mapping is:
 
-| VM               | Migration Method | Module | Workload Type |
-|------------------|------------------|--------|---------------|
-| OnPrem-Web       | Agentless        | 2      | Stateless (IIS) |
-| OnPrem-Linux-Web | Agentless        | 2      | Stateless (Nginx) |
-| OnPrem-SQL       | Agent-Based      | 3      | Stateful (SQL Server) |
-| OnPrem-Linux-App | Agent-Based      | 3      | Application (Node.js) |
+| VM | Migration Path | Teaching Module | Workload |
+|----|----------------|-----------------|----------|
+| `OnPrem-Web` | Hyper-V host provider | 2 | Windows IIS static frontend |
+| `OnPrem-Linux-Web` | Hyper-V host provider | 2 | Ubuntu 24.04 Nginx static site and proxy |
+| `OnPrem-SQL` | Modern physical / Mobility | 3 | SQL Server 2022 Express / ContosoApp |
+| `OnPrem-Linux-App` | Modern physical / Mobility | 3 | Ubuntu 24.04 Tomcat 10.1 / OpenJDK 17 Order Desk |
 
-Continue to the next module in the workshop:
-
-- **Module 4: Azure Site Recovery Comparison** — Understand how ASR differs from Azure Migrate for disaster recovery scenarios
-- **Module 5: Post-Migration Optimization** — Right-size VMs, configure monitoring, implement backup, and optimize costs
+Continue to **[Module 4: Azure Site Recovery Comparison](Module-4-ASR-Comparison.md)** for the conceptual comparison, then **[Module 5: Post-Migration Optimization](Module-5-Post-Migration.md)** for monitoring, backup, and optimization. No disaster-recovery deployment is part of this migration module.

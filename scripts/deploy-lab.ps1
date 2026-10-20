@@ -1,1163 +1,930 @@
 <#
 .SYNOPSIS
-    Deploys the Azure Migrate Workshop lab environment end-to-end.
-
+Deploy the TD SYNNEX Cloud Enablement Services Hyper-V workshop.
 .DESCRIPTION
-    Self-contained script that creates an Azure VM with nested virtualization,
-    installs Hyper-V, creates 4 guest VMs, and installs sample workloads — all
-    from a single invocation.  No external script URLs are required.
-
-    Architecture:
-      Azure Host VM (Standard_E4s_v5)
-      └── Windows Server 2022 + Hyper-V
-          ├── OnPrem-Web       — Windows Server 2022 + IIS + sample Contoso web app
-          ├── OnPrem-SQL       — Windows Server 2022 + SQL Server 2022 Express + ContosoApp DB
-          ├── OnPrem-Linux-Web — Ubuntu 22.04 + Nginx + sample HTML site
-          └── OnPrem-Linux-App — Ubuntu 22.04 + Node.js 20 + Express.js API
-
-    The script runs in 5 sections:
-      1. Create Azure infrastructure (Resource Group, VNet, NSG, NIC, VM)
-      2. Install Hyper-V on the host VM (Invoke-AzVMRunCommand)
-      3. Restart the VM and wait for it to come back
-      4. Configure networking, create guest VMs, install workloads (Invoke-AzVMRunCommand)
-      5. Print connection info
-
-    Expected total runtime: 30-60 minutes (mainly due to VM creation and image downloads).
-
-.PARAMETER ResourceGroupName
-    Name of the Azure Resource Group to create.
-
-.PARAMETER Location
-    Azure region for deployment. Default: eastus.
-
-.PARAMETER AdminUsername
-    Administrator username for the host VM and guest Windows VMs.
-
-.PARAMETER AdminPassword
-    Administrator password for all VMs (SecureString). Must meet Azure complexity requirements.
-
-.PARAMETER VMSize
-    Azure VM size with nested virtualization support. Default: Standard_E4s_v5.
-
+Creates one Standard-security Windows host and provisions four nested workload VMs
+(two Windows, two Linux) that behave as one small-business environment. No appliance
+OS VM is created: Module 1 downloads the Azure Migrate appliance VHD onto the host's
+own OS disk and imports it. This script creates billable Azure resources.
+Use a new dedicated resource group. Existing groups are refused intentionally.
+.PARAMETER SubscriptionId
+The workshop subscription GUID, supplied as a SecureString so it is masked at the prompt
+rather than displayed on a shared screen. It is not treated as a stored secret.
+.PARAMETER AdminSourceCidr
+Your public IPv4 address, supplied as a SecureString for the same reason. The /32 suffix
+is optional and is added when absent; the lab only ever permits a single address.
+Required for the host RDP rule.
+.PARAMETER AzureOperationTimeoutMinutes
+Maximum monitored wait for each Azure host, network or disk creation operation.
+.PARAMETER GuestSetupTimeoutMinutes
+Azure's execution limit for ConfigureWorkshop; individual installer limits also apply.
+.PARAMETER ApplianceStoreSizeGB
+Size of the dedicated partition carved out of the host OS disk for the Azure Migrate
+appliance files. This is host-side storage, not the appliance guest's disk/partition capacity.
+.PARAMETER ApplianceStoreDriveLetter
+Drive letter for that partition inside HyperVHost. Leave it unset and deployment uses the
+first unassigned letter, which is E: on the default host size: C: is the OS disk and D: is
+the virtual DVD drive. Supply a letter only to override that choice.
+.PARAMETER IncludeApplianceVhd
+Whether to download the AZURE MIGRATE APPLIANCE VHD onto the host during deployment. This is
+Microsoft's appliance virtual machine - not the Hyper-V host-preparation script, which is a
+separate download and easily confused with it. Default No,
+which is the right answer for a learner: it is an ~11 GB download that is not needed to finish
+Module 0, and Module 1 fetches the appliance from the Azure Migrate project when it is actually
+required - which is also the link that serves the current build. Yes is for an instructor
+preparing a host before a session. When not supplied, the script asks once and defaults to No.
+.PARAMETER ApplianceVhdSha256
+The SHA256 Microsoft publishes for the AZURE MIGRATE APPLIANCE VHD archive - the Hyper-V zip
+listed under 'Verify security' in the appliance article. Used only with -IncludeApplianceVhd
+Yes, and intended for unattended runs: when supplied, the host checks the archive against it
+during staging and retains a mismatching ZIP for inspection without extracting it. When omitted, the archive is staged and this
+script offers to verify it once deployment finishes.
+.PARAMETER TomcatJdbcJar
+Optional local official mssql-jdbc-13.6.0.jre11.jar when the guest cannot use Maven HTTPS.
+Supply -TomcatJdbcSha256 with a separately reviewed expected checksum. No new password prompt.
+.PARAMETER TomcatJdbcSha256
+Expected SHA256 for the explicit local JDBC JAR. Required together with -TomcatJdbcJar.
+.PARAMETER HealthPath
+Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
-    $password = Read-Host -AsSecureString -Prompt "Enter admin password"
-    .\deploy-lab.ps1 -ResourceGroupName "rg-migrate-workshop" `
-                     -AdminUsername "azureuser" -AdminPassword $password
+$secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
+$secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
+$password = Read-Host 'Lab password' -AsSecureString
+.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
+MODULE COVERAGE
+    The scripts and the modules are run separately. This script completes:
 
-.EXAMPLE
-    .\deploy-lab.ps1 -ResourceGroupName "rg-migrate-lab" -Location "westus2" `
-                     -AdminUsername "labadmin" `
-                     -AdminPassword (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force) `
-                     -VMSize "Standard_E8s_v5"
+      Module 0, section 4   Deployment Steps - the whole of it.
+      Module 1, section 2   Prepare the Hyper-V host - applied in full (PHASE 7 of the
+                            host payload). Nothing is left to do there on a script-deployed lab.
+      Module 1, section 3.3 Download and verify the archive - the download and extract are
+                            started only when you opt in. The end-of-run check freshly hashes
+                            the exact ZIP; compare with the current official Hyper-V ZIP row.
+
+    Left for you: Module 0 section 5 (verify inside HyperVHost), section 6 (start the sample
+    traffic, optional), and all of Module 1 from section 1 onward.
 #>
-
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ResourceGroupName,
-
-    [Parameter(Mandatory = $false)]
-    [string]$Location = "eastus",
-
-    [Parameter(Mandatory = $true)]
-    [string]$AdminUsername,
-
-    [Parameter(Mandatory = $true)]
-    [SecureString]$AdminPassword,
-
-    [Parameter(Mandatory = $false)]
-    [string]$VMSize = "Standard_E4s_v7"
+    [Parameter(Mandatory)][SecureString]$SubscriptionId,
+    [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9_-]{1,60}$')][string]$ResourceGroupName,
+    [string]$Location = 'eastus',
+    [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9]{2,18}$')][string]$AdminUsername,
+    [Parameter(Mandatory)][SecureString]$AdminPassword,
+    [Parameter(Mandatory)][SecureString]$AdminSourceCidr,
+    [string]$VMSize = 'Standard_E8s_v7',
+    [ValidateRange(15,120)][int]$AzureOperationTimeoutMinutes = 60,
+    [ValidateRange(30,240)][int]$GuestSetupTimeoutMinutes = 240,
+    [ValidateRange(60,400)][int]$ApplianceStoreSizeGB = 100,
+    [ValidatePattern('^([D-Zd-z])?$')][string]$ApplianceStoreDriveLetter = '',
+    [ValidateSet('Yes','No')][string]$IncludeApplianceVhd,
+    [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$ApplianceVhdSha256 = '',
+    [string]$TomcatJdbcJar = '',
+    [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$TomcatJdbcSha256 = '',
+    [string]$HealthPath
 )
+$ErrorActionPreference = 'Stop'
 
+# ================================================================
+# Launch resilience
+# ================================================================
+# This script must run the same way whether it is started from an open PowerShell window or
+# by right-clicking it and choosing "Run with PowerShell". The two differ in ways that matter:
+#
+#   Right-click  - a brand new process, and the WINDOW CLOSES the moment the script ends,
+#                  taking any error with it.
+#   Open window  - the window survives, but the session may already be carrying state from a
+#                  script run earlier in it.
+#
+# Both are handled here.
+
+# A migrate-step script defines its own Write-Host and Write-Warning so it can mask
+# subscription IDs on a shared screen. Those are functions, and a function can outlive the
+# script that defined it. When one does, it shadows the real cmdlet for everything that runs
+# afterwards in that window - including this script, which then fails on a Write-Host line
+# with "$script:LabMaskedValues cannot be retrieved". Any such shadow is removed here, so an
+# open window behaves exactly like a fresh one.
+foreach ($shadowed in @('Write-Host', 'Write-Warning', 'Write-Error')) {
+    try {
+        if (Test-Path "Function:\$shadowed") {
+            Remove-Item "Function:\$shadowed" -Force -ErrorAction SilentlyContinue
+            Microsoft.PowerShell.Utility\Write-Host "Removed a leftover $shadowed override from this session." -ForegroundColor DarkGray
+        }
+    } catch { }
+}
+
+$script:LabScriptPath = $PSCommandPath
+
+function Save-LabDeploymentError {
+    # Writes the failure to a file so it survives a window that closes on exit. Any GUID is
+    # redacted: the subscription ID is deliberately never written to disk by this script.
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    try {
+        $name = if ($script:LabScriptPath) { [IO.Path]::GetFileNameWithoutExtension($script:LabScriptPath) } else { 'deploy-lab' }
+        $folder = if ($script:LabScriptPath) { Split-Path -Parent $script:LabScriptPath } else { [IO.Path]::GetTempPath() }
+        $path = Join-Path $folder ("{0}-error-{1}.log" -f $name, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        try { Set-Content -Path (Join-Path $folder '.lab-write-test') -Value 'x' -ErrorAction Stop
+              Remove-Item (Join-Path $folder '.lab-write-test') -Force -ErrorAction SilentlyContinue }
+        catch { $path = Join-Path ([IO.Path]::GetTempPath()) (Split-Path -Leaf $path) }
+
+        $invocation = $ErrorRecord.InvocationInfo
+        $report = @(
+            "Time       : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+            "Script     : $script:LabScriptPath"
+            "PowerShell : $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
+            "OS         : $([Environment]::OSVersion.VersionString)"
+            ''
+            "Message    : $([string]$ErrorRecord.Exception.Message)"
+            "Type       : $($ErrorRecord.Exception.GetType().FullName)"
+            "ErrorId    : $($ErrorRecord.FullyQualifiedErrorId)"
+            ''
+            "Failed at  : line $($invocation.ScriptLineNumber), column $($invocation.OffsetInLine)"
+            "Statement  : $(([string]$invocation.Line).Trim())"
+            ''
+            'Stack trace:'
+            ([string]$ErrorRecord.ScriptStackTrace)
+            ''
+            'Loaded Az modules:'
+        ) + @(Get-Module -Name 'Az.*' | ForEach-Object { "  $($_.Name) $($_.Version)" })
+
+        $redacted = $report | ForEach-Object {
+            [regex]::Replace([string]$_, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', '<guid-redacted>')
+        }
+        Set-Content -Path $path -Value $redacted -Encoding UTF8 -ErrorAction Stop
+        Write-Host ''
+        Write-Host 'A full error report was saved to:' -ForegroundColor Yellow
+        Write-Host "  $path" -ForegroundColor Yellow
+    } catch {
+        Write-Host ''
+        Write-Host "  (the error report could not be saved: $($_.Exception.Message))" -ForegroundColor DarkYellow
+    }
+}
+
+function Wait-LabBeforeExit {
+    # Holds a right-click window open. Set LAB_NO_PAUSE=1 for an unattended run.
+    if ($env:LAB_NO_PAUSE -eq '1') { return }
+    try {
+        if (-not [Environment]::UserInteractive) { return }
+        Write-Host ''
+        $null = Read-Host 'Press Enter to close this window'
+    } catch { }
+}
+
+trap {
+    Write-Host ''
+    Write-Host ($_ | Out-String) -ForegroundColor Red
+    Save-LabDeploymentError -ErrorRecord $_
+    Wait-LabBeforeExit
+    exit 1
+}
+# ================================================================
+# Shared helpers, formerly scripts/common.ps1
+# ================================================================
+# These were a separate file that deploy-lab.ps1 dot-sourced. They are inlined here so the
+# deployment is one file plus the two payload files it reads from disk (host/configure-host.ps1
+# and health.ps1). Nothing else consumes them: the migrate-step scripts each carry their own
+# copies of the helpers they need, for the same reason.
+
+# Shared checks. Dot-source this file; it never connects to Azure or changes resources.
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
 
-# ================================================================
-# Helper: Write-Log
-# ================================================================
-function Write-Log {
-    param([string]$Message)
-    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" -ForegroundColor Cyan
+function ConvertFrom-LabSecureString {
+    param([Parameter(Mandatory)][SecureString]$Secure, [Parameter(Mandatory)][string]$Name)
+    # Masked at the prompt so the value is not readable over a shared screen. It is not a
+    # stored secret: the value still reaches Azure and appears in resource identifiers.
+    $plain = [pscredential]::new('lab', $Secure).GetNetworkCredential().Password
+    if ($null -ne $plain) { $plain = $plain.Trim() }
+    if ([string]::IsNullOrWhiteSpace($plain)) { throw "$Name was entered empty. Rerun and supply it when prompted." }
+    return $plain
 }
 
-# ================================================================
-# Configuration
-# ================================================================
-$vmName        = "HyperVHost"
-$vnetName      = "$ResourceGroupName-vnet"
-$subnetName    = "default"
-$publicIpName  = "$vmName-pip"
-$nsgName       = "$vmName-nsg"
-$nicName       = "$vmName-nic"
-$osDiskName    = "$vmName-osdisk"
-$addressPrefix = "10.0.0.0/16"
-$subnetPrefix  = "10.0.0.0/24"
-
-# Decode admin password once so we can embed it in guest-VM scripts
-$adminPassPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
-)
-
-# Validate password doesn't contain characters that break heredoc/XML/YAML/bash embedding
-if ($adminPassPlain -match '[`"{}]') {
-    throw "Password contains characters (backtick, double-quote, or braces) that are unsafe for embedding in scripts. Please use a password with only: letters, numbers, and special characters like !@#$%^&*()-_=+[]|;:',.<>/?"
-}
-if ($adminPassPlain.Length -lt 12) {
-    Write-Warning "Password is shorter than 12 characters. Azure VMs require complex passwords."
-}
-
-# ================================================================
-# SECTION 1 — Pre-flight checks
-# ================================================================
-Write-Log "=== SECTION 1: Pre-flight checks ==="
-
-Write-Log "Verifying Az PowerShell module..."
-if (-not (Get-Module -ListAvailable -Name Az.Compute)) {
-    throw "The Az PowerShell module is required. Install it with: Install-Module -Name Az -Scope CurrentUser -Force"
-}
-
-try {
-    $context = Get-AzContext
-    if (-not $context) { throw "Not logged in." }
-    Write-Log "Subscription: $($context.Subscription.Name) ($($context.Subscription.Id))"
-} catch {
-    throw "Azure authentication required. Run Connect-AzAccount first. Error: $_"
-}
-
-# ================================================================
-# SECTION 2 — Create Azure Resources
-# ================================================================
-Write-Log "=== SECTION 2: Create Azure Resources ==="
-
-# --- Resource Group ---
-Write-Log "Creating Resource Group '$ResourceGroupName' in '$Location'..."
-try {
-    $rg = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($rg) {
-        Write-Log "Resource Group already exists."
-    } else {
-        New-AzResourceGroup -Name $ResourceGroupName -Location $Location -ErrorAction Stop | Out-Null
-        Write-Log "Resource Group created."
+function Assert-LabSubscriptionId {
+    param([Parameter(Mandatory)][string]$SubscriptionId)
+    if ($SubscriptionId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        throw 'SubscriptionId must be one subscription GUID. Check for a stray character or a pasted resource ID.'
     }
-} catch {
-    throw "Failed to create Resource Group: $_"
 }
 
-# --- VNet + Subnet ---
-Write-Log "Creating Virtual Network '$vnetName'..."
-try {
-    $vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($vnet) {
-        Write-Log "VNet already exists."
-    } else {
-        $subnetConfig = New-AzVirtualNetworkSubnetConfig -Name $subnetName -AddressPrefix $subnetPrefix -ErrorAction Stop
-        $vnet = New-AzVirtualNetwork -Name $vnetName -ResourceGroupName $ResourceGroupName -Location $Location `
-            -AddressPrefix $addressPrefix -Subnet $subnetConfig -ErrorAction Stop
-        Write-Log "VNet and Subnet created."
+function Assert-LabContext {
+    param([Parameter(Mandatory)][string]$SubscriptionId)
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not $context -or -not $context.Subscription -or $context.Subscription.Id -ne $SubscriptionId) {
+        throw "Select the intended subscription first: Set-AzContext -SubscriptionId '$SubscriptionId'"
     }
-} catch {
-    throw "Failed to create VNet: $_"
+    return $context
 }
 
-# --- Public IP (Static, Standard) ---
-Write-Log "Creating Public IP '$publicIpName'..."
-try {
-    $publicIp = Get-AzPublicIpAddress -Name $publicIpName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($publicIp) {
-        Write-Log "Public IP already exists."
-    } else {
-        $publicIp = New-AzPublicIpAddress -Name $publicIpName -ResourceGroupName $ResourceGroupName `
-            -Location $Location -AllocationMethod Static -Sku Standard -ErrorAction Stop
-        Write-Log "Public IP created."
+function Assert-LabResourceGroupName {
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -notmatch '^[\p{L}\p{M}\p{N}_.()-]{1,90}$' -or $Name.EndsWith('.')) {
+        throw 'Supply one exact resource group name, without wildcards, whitespace or a resource ID.'
     }
-} catch {
-    throw "Failed to create Public IP: $_"
 }
 
-# --- NSG with RDP rule ---
-Write-Log "Creating NSG '$nsgName'..."
-try {
-    $nsg = Get-AzNetworkSecurityGroup -Name $nsgName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($nsg) {
-        Write-Log "NSG already exists."
-    } else {
-        $rdpRule = New-AzNetworkSecurityRuleConfig -Name "Allow-RDP" `
-            -Description "Allow inbound RDP" `
-            -Access Allow -Protocol Tcp -Direction Inbound `
-            -Priority 1000 -SourceAddressPrefix "*" -SourcePortRange "*" `
-            -DestinationAddressPrefix "*" -DestinationPortRange "3389" -ErrorAction Stop
-        $nsg = New-AzNetworkSecurityGroup -Name $nsgName -ResourceGroupName $ResourceGroupName `
-            -Location $Location -SecurityRules $rdpRule -ErrorAction Stop
-        Write-Log "NSG created with RDP (3389) rule."
+function Get-LabResourceGroup {
+    param([Parameter(Mandatory)][string]$Name, [switch]$AllowMissing)
+    Assert-LabResourceGroupName $Name
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not $context -or -not $context.Subscription -or [string]::IsNullOrWhiteSpace($context.Subscription.Id)) {
+        throw 'Select the intended Azure subscription before inspecting resource groups.'
     }
-} catch {
-    throw "Failed to create NSG: $_"
-}
-
-# --- NIC ---
-Write-Log "Creating NIC '$nicName'..."
-try {
-    $nic = Get-AzNetworkInterface -Name $nicName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($nic) {
-        Write-Log "NIC already exists."
-    } else {
-        $subnet = (Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $ResourceGroupName -ErrorAction Stop).Subnets |
-            Where-Object { $_.Name -eq $subnetName }
-        $nic = New-AzNetworkInterface -Name $nicName -ResourceGroupName $ResourceGroupName -Location $Location `
-            -SubnetId $subnet.Id -PublicIpAddressId $publicIp.Id -NetworkSecurityGroupId $nsg.Id -ErrorAction Stop
-        Write-Log "NIC created."
+    $subscription = [uri]::EscapeDataString($context.Subscription.Id)
+    $group = [uri]::EscapeDataString($Name)
+    # Get-AzResourceGroup can replace CloudException with a generic missing-group
+    # message. Use the documented exact ARM GET to preserve its status and code.
+    $response = Invoke-AzRestMethod -Path "/subscriptions/$subscription/resourcegroups/$group`?api-version=2021-04-01" -Method GET -ErrorAction Stop
+    if ($null -eq $response -or $null -eq $response.StatusCode -or [string]::IsNullOrWhiteSpace($response.Content)) {
+        throw "No verifiable Azure response for group '$Name'. No absence or deletion is assumed."
     }
-} catch {
-    throw "Failed to create NIC: $_"
-}
-
-# --- Host VM (Windows Server 2022 Datacenter Gen2) ---
-Write-Log "Deploying host VM '$vmName' (Size: $VMSize)..."
-try {
-    $existingVm = Get-AzVM -Name $vmName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    if ($existingVm) {
-        Write-Log "VM '$vmName' already exists. Skipping deployment."
-    } else {
-        $credential = New-Object System.Management.Automation.PSCredential($AdminUsername, $AdminPassword)
-
-        $vmConfig = New-AzVMConfig -VMName $vmName -VMSize $VMSize -ErrorAction Stop
-        $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows -ComputerName $vmName `
-            -Credential $credential -ProvisionVMAgent -EnableAutoUpdate -ErrorAction Stop
-        $vmConfig = Set-AzVMSourceImage -VM $vmConfig `
-            -PublisherName "MicrosoftWindowsServer" -Offer "WindowsServer" `
-            -Skus "2022-datacenter-g2" -Version "latest" -ErrorAction Stop
-        $vmConfig = Set-AzVMOSDisk -VM $vmConfig -Name $osDiskName -CreateOption FromImage `
-            -StorageAccountType Premium_LRS -DiskSizeInGB 256 -ErrorAction Stop
-        $vmConfig = Add-AzVMNetworkInterface -VM $vmConfig -Id $nic.Id -ErrorAction Stop
-        $vmConfig = Set-AzVMBootDiagnostic -VM $vmConfig -Disable -ErrorAction Stop
-
-        New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vmConfig -ErrorAction Stop | Out-Null
-        Write-Log "Host VM deployed successfully."
-    }
-} catch {
-    throw "Failed to deploy VM: $_"
-}
-
-# ================================================================
-# SECTION 3 — Install Hyper-V role on host VM
-# ================================================================
-Write-Log "=== SECTION 3: Install Hyper-V role ==="
-
-$installHyperVScript = @'
-$ErrorActionPreference = "Stop"
-$feature = Get-WindowsFeature -Name Hyper-V -ErrorAction SilentlyContinue
-if ($feature.Installed) {
-    Write-Output "Hyper-V is already installed."
-} else {
-    Write-Output "Installing Hyper-V role..."
-    Install-WindowsFeature -Name Hyper-V -IncludeManagementTools -ErrorAction Stop | Out-Null
-    Write-Output "Hyper-V installed. Reboot required."
-}
-'@
-
-Write-Log "Running Invoke-AzVMRunCommand to install Hyper-V..."
-try {
-    $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName `
-        -CommandId 'RunPowerShellScript' -ScriptString $installHyperVScript -ErrorAction Stop
-    foreach ($msg in $result.Value) {
-        Write-Log "  [$($msg.Code)] $($msg.Message)"
-    }
-} catch {
-    throw "Failed to install Hyper-V: $_"
-}
-
-# ================================================================
-# SECTION 4 — Restart VM and wait for it to come back
-# ================================================================
-Write-Log "=== SECTION 4: Restart VM ==="
-
-Write-Log "Restarting VM '$vmName' to complete Hyper-V installation..."
-try {
-    Restart-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction Stop | Out-Null
-    Write-Log "VM restart initiated."
-} catch {
-    throw "Failed to restart VM: $_"
-}
-
-Write-Log "Waiting for VM to become ready after reboot..."
-$timeout = (Get-Date).AddMinutes(10)
-$vmReady = $false
-while ((Get-Date) -lt $timeout) {
-    Start-Sleep -Seconds 30
-    try {
-        $vmStatus = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -Status -ErrorAction Stop
-        $provisioningState = ($vmStatus.Statuses | Where-Object { $_.Code -like "ProvisioningState/*" }).DisplayStatus
-        $powerState         = ($vmStatus.Statuses | Where-Object { $_.Code -like "PowerState/*" }).DisplayStatus
-        Write-Log "  VM Status: $provisioningState / $powerState"
-        if ($powerState -eq "VM running") {
-            # Additional wait for OS boot
-            Start-Sleep -Seconds 60
-            $vmReady = $true
-            break
+    $body = ConvertFrom-Json -InputObject $response.Content -ErrorAction Stop
+    if ($response.StatusCode -ne 200) {
+        $code = ''
+        if ($null -ne $body -and $body.PSObject.Properties['error'] -and $null -ne $body.error -and $body.error.PSObject.Properties['code']) {
+            $code = [string]$body.error.code
         }
-    } catch {
-        Write-Log "  Waiting... ($($_.Exception.Message))"
+        if ($AllowMissing -and $response.StatusCode -eq 404 -and $code -eq 'ResourceGroupNotFound') { return $null }
+        throw "Could not verify group '$Name': HTTP $($response.StatusCode), code '$code'. No absence or deletion is assumed."
     }
+    $expectedId = "/subscriptions/$($context.Subscription.Id)/resourceGroups/$Name"
+    if ($null -eq $body -or $body.name -ne $Name -or
+        [uri]::UnescapeDataString($body.id) -ne $expectedId) {
+        throw "Azure returned an unexpected resource identity for '$Name'."
+    }
+    $tags = @{}
+    if ($body.PSObject.Properties['tags'] -and $null -ne $body.tags) {
+        foreach ($tag in $body.tags.PSObject.Properties) { $tags[$tag.Name] = $tag.Value }
+    }
+    return [pscustomobject]@{ ResourceGroupName=$body.name; ResourceId=$body.id; Tags=$tags }
 }
-if (-not $vmReady) {
-    throw "VM did not come back within 10 minutes after restart."
-}
-Write-Log "VM is running. Proceeding with configuration."
 
-# ================================================================
-# SECTION 5 — Configure networking, create guest VMs, install workloads
-# ================================================================
-Write-Log "=== SECTION 5: Configure Hyper-V networking, guest VMs, and workloads ==="
-
-# --- Create a managed disk from Windows Server 2022 marketplace image ---
-# This avoids unreliable ISO downloads from the Evaluation Center.
-Write-Log "Creating temporary managed disk from Windows Server 2022 marketplace image..."
-$windowsVhdSasUrl = ""
-try {
-    $existingDisk = Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName "WinServerBase-temp" -ErrorAction SilentlyContinue
-    if (-not $existingDisk) {
-        # Resolve latest image version (the API doesn't accept 'latest' for disk creation)
-        Write-Log "Resolving latest Windows Server 2022 image version..."
-        $imgVersion = Get-AzVMImage -Location $Location -PublisherName "MicrosoftWindowsServer" `
-            -Offer "WindowsServer" -Skus "2022-datacenter-smalldisk-g2" -ErrorAction Stop |
-            Sort-Object Version -Descending | Select-Object -First 1
-        Write-Log "Using image version: $($imgVersion.Version)"
-
-        $diskConfig = New-AzDiskConfig -Location $Location -CreateOption FromImage -HyperVGeneration V2 -OsType Windows `
-            -ImageReference @{ Id = $imgVersion.Id } -ErrorAction Stop
-        New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName "WinServerBase-temp" -Disk $diskConfig -ErrorAction Stop | Out-Null
-        Write-Log "Managed disk created from marketplace image."
+function Resolve-LabAdminSource {
+    param([Parameter(Mandatory)][string]$Cidr)
+    # The lab only ever permits a single host, so /32 carries no information and is optional:
+    # a bare address is accepted and normalised. An explicitly supplied prefix is still
+    # checked rather than overridden, so a range is refused instead of being silently
+    # narrowed to one address the caller did not choose.
+    $value = $Cidr.Trim()
+    $parts = $value.Split('/')
+    if ($parts.Count -eq 1) {
+        $address = $parts[0]
+    } elseif ($parts.Count -eq 2) {
+        $address = $parts[0]
+        if ($parts[1] -ne '32') {
+            throw "AdminSourceCidr must identify a single address. '$value' has a /$($parts[1]) prefix; supply one public IPv4 address, optionally followed by /32."
+        }
     } else {
-        Write-Log "Managed disk already exists."
+        throw 'AdminSourceCidr must be one public IPv4 address, optionally followed by /32.'
     }
-
-    Write-Log "Granting SAS access to download the VHD..."
-    $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName `
-        -DiskName "WinServerBase-temp" -Access Read -DurationInSecond 7200 -ErrorAction Stop
-    $windowsVhdSasUrl = $access.AccessSAS
-    Write-Log "SAS URL obtained for Windows Server VHD download."
-} catch {
-    Write-Log "WARNING: Failed to create marketplace disk: $_"
-    Write-Log "Windows guest VMs will not be created. You can manually provide a Windows VHDX."
-}
-
-# Build the large inline script that runs entirely inside the Azure VM.
-# We embed the admin password and Windows VHD SAS URL.
-$configureEverythingScript = @"
-`$ErrorActionPreference = "Stop"
-
-# ---------- Logging ----------
-`$labRoot = "C:\AzMigrateLab"
-`$logFile = "`$labRoot\setup-log.txt"
-New-Item -ItemType Directory -Path `$labRoot -Force | Out-Null
-
-function Write-Log {
-    param([string]`$Message)
-    `$entry = "[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] `$Message"
-    Write-Output `$entry
-    Add-Content -Path `$logFile -Value `$entry -ErrorAction SilentlyContinue
-}
-
-`$vhdPath       = "`$labRoot\VHDs"
-`$intSwitchName = "intSwitch"
-`$natName       = "LabNAT"
-`$natPrefix     = "192.168.0.0/24"
-`$hostIp        = "192.168.0.1"
-`$guestAdminPwd = '$($adminPassPlain -replace "'","''")'
-`$guestUser     = '$AdminUsername'
-`$windowsVhdSasUrl = '$($windowsVhdSasUrl -replace "'","''")'
-
-New-Item -ItemType Directory -Path `$vhdPath -Force | Out-Null
-
-# =============================================================
-# PHASE 1 — Virtual networking
-# =============================================================
-Write-Log "PHASE 1: Configuring virtual networking..."
-
-`$existingSwitch = Get-VMSwitch -Name `$intSwitchName -ErrorAction SilentlyContinue
-if (`$existingSwitch) {
-    Write-Log "Virtual switch '`$intSwitchName' already exists."
-} else {
-    New-VMSwitch -SwitchType Internal -Name `$intSwitchName -ErrorAction Stop | Out-Null
-    Write-Log "Created internal switch '`$intSwitchName'."
-}
-
-`$adapter = Get-NetAdapter | Where-Object { `$_.Name -like "*`$intSwitchName*" }
-if (`$adapter) {
-    `$existingIp = Get-NetIPAddress -InterfaceIndex `$adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { `$_.IPAddress -eq `$hostIp }
-    if (-not `$existingIp) {
-        New-NetIPAddress -IPAddress `$hostIp -PrefixLength 24 -InterfaceIndex `$adapter.ifIndex -ErrorAction Stop | Out-Null
-        Write-Log "Assigned `$hostIp to host adapter."
-    } else {
-        Write-Log "Host adapter already has IP `$hostIp."
+    # Dotted-quad only, no leading zeros. Abbreviated, hexadecimal and integer forms parse to
+    # a different address than they appear to, so they are refused rather than interpreted.
+    $ip = $null
+    if ($address -notmatch '^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$' -or
+        -not [System.Net.IPAddress]::TryParse($address, [ref]$ip) -or
+        $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+        $address -eq '0.0.0.0') {
+        throw 'AdminSourceCidr must be your current public IPv4 address, written as four decimal octets without leading zeros. The /32 suffix is optional.'
     }
-} else {
-    Write-Log "WARNING: Could not find adapter for switch '`$intSwitchName'."
+    return "$address/32"
 }
 
-`$existingNat = Get-NetNat -Name `$natName -ErrorAction SilentlyContinue
-if (`$existingNat) {
-    Write-Log "NAT '`$natName' already exists."
-} else {
-    New-NetNat -Name `$natName -InternalIPInterfaceAddressPrefix `$natPrefix -ErrorAction Stop | Out-Null
-    Write-Log "Created NAT '`$natName' with prefix `$natPrefix."
+function Assert-LabAdminSource {
+    param([Parameter(Mandatory)][string]$Cidr)
+    $null = Resolve-LabAdminSource $Cidr
 }
 
-# =============================================================
-# PHASE 2 — Download OS images
-# =============================================================
-Write-Log "PHASE 2: Downloading OS images..."
-
-# Install Windows ADK Deployment Tools (provides oscdimg.exe for cloud-init ISO creation)
-`$oscdimgPath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
-if (-not (Test-Path `$oscdimgPath)) {
-    Write-Log "Installing Windows ADK Deployment Tools (for oscdimg)..."
-    `$adkInstaller = "`$labRoot\adksetup.exe"
-    `$adkUrl = "https://go.microsoft.com/fwlink/?linkid=2243390"
-    Invoke-WebRequest -Uri `$adkUrl -OutFile `$adkInstaller -UseBasicParsing -ErrorAction Stop
-    Start-Process -FilePath `$adkInstaller -ArgumentList "/quiet /norestart /features OptionId.DeploymentTools" -Wait -ErrorAction Stop
-    Write-Log "Windows ADK Deployment Tools installed."
-} else {
-    Write-Log "Windows ADK Deployment Tools already installed."
-}
-
-`$ubuntuCloudUrl = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-`$ubuntuQcow2    = "`$vhdPath\Ubuntu2204-cloudimg.img"
-`$ubuntuBaseVhd  = "`$vhdPath\Ubuntu2204-Base.vhdx"
-
-`$windowsBaseVhd = "`$vhdPath\WindowsServer2022-Base.vhdx"
-
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# -- Install qemu-img (needed for image conversion) --
-`$qemuImg = "C:\Program Files\qemu\qemu-img.exe"
-if (-not (Test-Path `$qemuImg)) {
-    `$qemuImg = (Get-ChildItem "C:\ProgramData\chocolatey" -Recurse -Filter "qemu-img.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-}
-if (-not `$qemuImg -or -not (Test-Path `$qemuImg)) {
-    Write-Log "Installing qemu-img via Chocolatey..."
-    if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+function Assert-LabHostSizeName {
+    param([Parameter(Mandatory)][string]$VMSize)
+    if ($VMSize -notmatch '^Standard_[a-zA-Z0-9][a-zA-Z0-9_-]{1,80}$') {
+        throw 'VMSize must be one exact Azure size name, such as Standard_E8s_v7, without wildcards or whitespace.'
     }
-    choco install qemu --no-progress -y 2>&1 | Out-Null
-    `$qemuImg = (Get-ChildItem "C:\Program Files\qemu" -Filter "qemu-img.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-    if (-not `$qemuImg) {
-        `$qemuImg = (Get-ChildItem "C:\ProgramData\chocolatey" -Recurse -Filter "qemu-img.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-    }
-    if (-not `$qemuImg) { throw "qemu-img.exe not found after installation." }
 }
-Write-Log "qemu-img available at: `$qemuImg"
 
-# -- Ubuntu cloud image (download QCOW2, convert to VHDX via qemu-img) --
-if (-not (Test-Path `$ubuntuBaseVhd)) {
-    # Download Ubuntu QCOW2 cloud image
-    if (-not (Test-Path `$ubuntuQcow2)) {
-        Write-Log "Downloading Ubuntu 22.04 cloud image (QCOW2 format, ~600MB)..."
+function Get-LabHostSku {
+    param([Parameter(Mandatory)][string]$VMSize, [Parameter(Mandatory)][string]$Location)
+    Assert-LabHostSizeName $VMSize
+    $matches = @(Get-AzComputeResourceSku -Location $Location -ErrorAction Stop |
+        Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $VMSize })
+    if ($matches.Count -ne 1 -or $Location -notin $matches[0].Locations -or
+        @($matches[0].Restrictions | Where-Object Type -EQ 'Location').Count) {
+        throw "VM size '$VMSize' is not available to this subscription in '$Location'. Choose a size offered in that region or resolve the subscription restriction."
+    }
+    $sku = $matches[0]
+    $capabilities = @{}
+    foreach ($capability in $sku.Capabilities) { $capabilities[$capability.Name] = [string]$capability.Value }
+    $cores = 0; $availableCores = 0; $memory = [decimal]0
+    if (-not [int]::TryParse($capabilities['vCPUs'], [ref]$cores) -or $cores -le 0 -or
+        -not [decimal]::TryParse($capabilities['MemoryGB'], [Globalization.NumberStyles]::Number,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$memory)) {
+        throw "Cannot verify CPU/RAM metadata for '$VMSize' in '$Location'."
+    }
+    $availableCores = $cores
+    if ($capabilities.ContainsKey('vCPUsAvailable') -and
+        -not [int]::TryParse($capabilities['vCPUsAvailable'], [ref]$availableCores)) {
+        throw "Cannot verify enabled vCPUs for '$VMSize'."
+    }
+    if ($availableCores -lt 8 -or $availableCores -gt $cores -or $memory -lt 64) {
+        throw "Host size '$VMSize' has $availableCores enabled vCPUs and $memory GiB RAM. This workshop's four workloads plus the imported Azure Migrate appliance require at least 8 enabled vCPUs and 64 GiB RAM."
+    }
+    if ($capabilities['CpuArchitectureType'] -ne 'x64' -or
+        'V2' -notin @($capabilities['HyperVGenerations'] -split ',' | ForEach-Object { $_.Trim() }) -or
+        $capabilities['PremiumIO'] -ne 'True') {
+        throw "Host size '$VMSize' must report x64, Generation 2 and Premium SSD support for this workshop's Windows image and OS disk."
+    }
+    if ([string]::IsNullOrWhiteSpace($sku.Family)) { throw "Cannot identify the quota family for '$VMSize'." }
+    $usage = @(Get-AzVMUsage -Location $Location -ErrorAction Stop)
+    foreach ($name in @($sku.Family, 'cores')) {
+        $quota = @($usage | Where-Object { $_.Name.Value -eq $name })
+        $limit = [long]0; $used = [long]0
+        if ($quota.Count -ne 1 -or
+            -not [long]::TryParse([string]$quota[0].Limit, [ref]$limit) -or
+            -not [long]::TryParse([string]$quota[0].CurrentValue, [ref]$used) -or $limit -lt 0 -or $used -lt 0) {
+            throw "Cannot verify quota '$name' for '$VMSize' in '$Location'."
+        }
+        if ($limit - $used -lt $cores) {
+            throw "Insufficient '$name' quota in '$Location' for '$VMSize': need $cores free vCPUs; $($limit - $used) available. Reserve target/test quota separately."
+        }
+    }
+    # SKU metadata is not a nested-virtualization certification. The instructor
+    # verifies the selected series' Microsoft documentation before provisioning.
+    return [pscustomobject]@{ Name=$sku.Name; Family=$sku.Family; Cores=$availableCores; MemoryGB=$memory;
+        AcceleratedNetworking=($capabilities['AcceleratedNetworkingEnabled'] -eq 'True') }
+}
+
+function Invoke-LabImageCatalogGet {
+    param([Parameter(Mandatory)][string]$Path)
+    # Keep image catalog requests on an explicitly supported API instead of
+    # inheriting the installed Az.Compute SDK's default version.
+    $response=Invoke-AzRestMethod -Path "$Path`?api-version=2025-04-01" -Method GET -ErrorAction Stop
+    if ($null -eq $response -or [string]::IsNullOrWhiteSpace($response.Content)) { throw "No verifiable Windows image catalog response for '$Path'." }
+    $body=ConvertFrom-Json -InputObject $response.Content -ErrorAction Stop
+    if ($response.StatusCode -ne 200) {
+        $code='Unknown'
+        if ($null -ne $body -and $body.PSObject.Properties['error'] -and $null -ne $body.error -and $body.error.PSObject.Properties['code']) { $code=[string]$body.error.code }
+        throw "Windows image catalog lookup failed: HTTP $($response.StatusCode), code '$code', API 2025-04-01, path '$Path'. Resolve image catalog access before deploying."
+    }
+    return $body
+}
+
+function Get-LabWindowsImages {
+    param([Parameter(Mandatory)][string]$Location)
+    $context=Get-AzContext -ErrorAction Stop
+    if (-not $context -or -not $context.Subscription -or [string]::IsNullOrWhiteSpace($context.Subscription.Id)) { throw 'Select the intended Azure subscription before resolving Windows images.' }
+    $subscription=[uri]::EscapeDataString($context.Subscription.Id)
+    $region=[uri]::EscapeDataString($Location)
+    $images = @{}
+    foreach ($role in @('Host','Guest')) {
+        $sku = if ($role -eq 'Host') { '2022-datacenter-g2' } else { '2022-datacenter-smalldisk-g2' }
+        $offer = 'windowsserver2022'
+        $catalog="/subscriptions/$subscription/providers/Microsoft.Compute/locations/$region/publishers/MicrosoftWindowsServer/artifacttypes/vmimage/offers/$offer/skus/$sku/versions"
+        $versions = @(Invoke-LabImageCatalogGet $catalog)
+        if (-not $versions.Count) { throw "No Windows image versions found: MicrosoftWindowsServer:${offer}:${sku} in '$Location'. Verify region, offer and image access before deploying." }
+        foreach ($entry in $versions) {
+            $parsed=$null
+            if (-not $entry.PSObject.Properties['name'] -or $entry.name -notmatch '^\d+\.\d+\.\d+$' -or
+                -not [version]::TryParse($entry.name,[ref]$parsed)) { throw "Invalid Windows image version metadata for ${offer}:${sku} in '$Location'." }
+        }
+        $version=($versions | Sort-Object { [version]$_.name } -Descending | Select-Object -First 1).name
+        $imageId="$catalog/$version"
+        $details = @(Invoke-LabImageCatalogGet $imageId)
+        if ($details.Count -ne 1 -or -not $details[0].PSObject.Properties['id'] -or
+            [uri]::UnescapeDataString($details[0].id) -ne [uri]::UnescapeDataString($imageId) -or
+            -not $details[0].PSObject.Properties['properties'] -or $null -eq $details[0].properties) {
+            throw "Cannot verify the Windows image identity for ${offer}:${sku}:${version} in '$Location'."
+        }
+        $properties=$details[0].properties
+        if (-not $properties.PSObject.Properties['hyperVGeneration'] -or $properties.hyperVGeneration -ne 'V2' -or
+            -not $properties.PSObject.Properties['architecture'] -or $properties.architecture -ne 'x64' -or
+            -not $properties.PSObject.Properties['osDiskImage'] -or $null -eq $properties.osDiskImage -or
+            -not $properties.osDiskImage.PSObject.Properties['operatingSystem'] -or $properties.osDiskImage.operatingSystem -ne 'Windows') {
+            throw "Cannot verify a Windows x64 Gen2 image for ${offer}:${sku}:${version} in '$Location'."
+        }
+        $images[$role] = [pscustomobject]@{ Publisher='MicrosoftWindowsServer'; Offer=$offer; Sku=$sku; Version=$version; Id=$imageId }
+        Write-Host "Resolved $role image: MicrosoftWindowsServer:${offer}:${sku}:${version} (catalog API 2025-04-01)"
+    }
+    return [pscustomobject]$images
+}
+
+function New-LabWindowsGuestDiskConfig {
+    param([Parameter(Mandatory)][string]$Location, [Parameter(Mandatory)][string]$ImageId)
+    $disk=New-AzDiskConfig -Location $Location -CreateOption FromImage -HyperVGeneration V2 -OsType Windows -ImageReference @{Id=$ImageId} -ErrorAction Stop
+    # Standard prevents New-AzDisk's implicit Trusted Launch image lookup and
+    # prepares an ordinary OS disk for export to the nested Hyper-V guests.
+    $disk=Set-AzDiskSecurityProfile -Disk $disk -SecurityType Standard -ErrorAction Stop
+    if ($null -eq $disk -or $null -eq $disk.SecurityProfile -or $disk.SecurityProfile.SecurityType -ne 'Standard') {
+        throw 'Az.Compute did not retain Standard security on the temporary guest disk configuration. Update the module before deployment.'
+    }
+    return $disk
+}
+
+function Compress-LabScript {
+    param([Parameter(Mandatory)][string]$Text)
+    # Gzip keeps the embedded copy small so the managed Run Command payload stays close to
+    # its original size. The host decompresses it with the matching framework classes.
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    $buffer = [IO.MemoryStream]::new()
+    $compressor = [IO.Compression.GzipStream]::new($buffer, [IO.Compression.CompressionMode]::Compress)
+    try { $compressor.Write($bytes, 0, $bytes.Length) } finally { $compressor.Dispose() }
+    return [Convert]::ToBase64String($buffer.ToArray())
+}
+
+function Read-LabHostConfiguration {
+    param([Parameter(Mandatory)][string]$Path)
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($content)) { throw 'The host configuration script is empty. Obtain the complete workshop checkout.' }
+    $scriptsRoot = Split-Path (Split-Path $Path -Parent) -Parent
+    $healthPath = Join-Path $scriptsRoot 'health.ps1'
+    $health = Get-Content -LiteralPath $healthPath -Raw -Encoding UTF8 -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($health) -or ([regex]::Matches($content, '(?m)^# LAB_HEALTH_HELPERS\r?$')).Count -ne 1) {
+        throw 'Host health helpers are missing or incompatible. Obtain the complete workshop checkout.'
+    }
+    $content = $content.Replace('# LAB_HEALTH_HELPERS', $health)
+    # The optional traffic generator is delivered to the host during setup so the instructor
+    # never has to copy a file onto HyperVHost by hand. The host payload writes it to disk;
+    # it is never executed by deployment.
+    $trafficPath = Join-Path $scriptsRoot 'enable-lab-traffic.ps1'
+    $traffic = Get-Content -LiteralPath $trafficPath -Raw -Encoding UTF8 -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($traffic) -or ([regex]::Matches($content, '__LAB_TRAFFIC_PAYLOAD__')).Count -ne 1) {
+        throw 'The lab traffic script is missing or its host placeholder is incompatible. Obtain the complete workshop checkout.'
+    }
+    $trafficTokens = $null; $trafficErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($traffic, [ref]$trafficTokens, [ref]$trafficErrors)
+    if ($trafficErrors.Count) { throw 'The lab traffic script has syntax errors. Obtain the reviewed workshop revision.' }
+    $content = $content.Replace('__LAB_TRAFFIC_PAYLOAD__', (Compress-LabScript $traffic))
+    if (([regex]::Matches($content, '__LAB_CPU_ASSETS_PAYLOAD__')).Count -ne 1) { throw 'CPU host payload marker incompatible.' }
+    $cpuAssets = [ordered]@{}
+    foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+        $asset = Get-Content -LiteralPath (Join-Path $scriptsRoot ('cpu-simulation/' + $name)) -Raw -Encoding UTF8 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($asset)) { throw 'CPU asset missing or empty. Obtain the complete workshop checkout.' }
+        if ($name.EndsWith('.ps1')) {
+            $assetTokens = $null; $assetErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseInput($asset, [ref]$assetTokens, [ref]$assetErrors)
+            if ($assetErrors.Count) { throw 'CPU asset syntax errors. Obtain the reviewed workshop revision.' }
+        }
+        $cpuAssets[$name] = $asset
+    }
+    $content = $content.Replace('__LAB_CPU_ASSETS_PAYLOAD__', (Compress-LabScript ($cpuAssets | ConvertTo-Json -Compress)))
+    $appRoot = Join-Path (Split-Path $scriptsRoot -Parent) 'apps/contoso-orderdesk'
+    $runtimePath = Join-Path $appRoot 'dist/runtime.zip'
+    $runtimeHashPath = Join-Path $appRoot 'dist/runtime.sha256'
+    foreach ($marker in @('__TOMCAT_RUNTIME_PAYLOAD__','__TOMCAT_RUNTIME_SHA256__')) {
+        if (([regex]::Matches($content, [regex]::Escape($marker))).Count -ne 1) { throw 'Tomcat host runtime markers incompatible.' }
+    }
+    $expected = (Get-Content -LiteralPath $runtimeHashPath -Raw -ErrorAction Stop).Trim()
+    if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash -ine $expected) {
+        throw 'Tomcat runtime ZIP missing or checksum mismatch. Rebuild the complete reviewed checkout before deployment.'
+    }
+    $runtimeBytes = [IO.File]::ReadAllBytes($runtimePath)
+    if ([bool]$TomcatJdbcJar -ne [bool]$TomcatJdbcSha256) { throw 'Supply both -TomcatJdbcJar and -TomcatJdbcSha256, or neither.' }
+    if ($TomcatJdbcJar) {
+        if ([IO.Path]::GetFileName($TomcatJdbcJar) -cne 'mssql-jdbc-13.6.0.jre11.jar') { throw 'Local driver must be the pinned official mssql-jdbc-13.6.0.jre11.jar.' }
+        if ((Get-FileHash -LiteralPath $TomcatJdbcJar -Algorithm SHA256).Hash -ine $TomcatJdbcSha256) { throw 'Local JDBC prerequisite checksum mismatch.' }
+        Add-Type -AssemblyName System.IO.Compression
+        $memory = [IO.MemoryStream]::new()
+        $memory.Write($runtimeBytes, 0, $runtimeBytes.Length)
+        $memory.Position = 0
+        $archive = [IO.Compression.ZipArchive]::new($memory, [IO.Compression.ZipArchiveMode]::Update, $true)
         try {
-            Start-BitsTransfer -Source `$ubuntuCloudUrl -Destination `$ubuntuQcow2 -ErrorAction Stop
-        } catch {
-            Write-Log "BITS transfer failed, falling back to Invoke-WebRequest..."
-            Invoke-WebRequest -Uri `$ubuntuCloudUrl -OutFile `$ubuntuQcow2 -UseBasicParsing -ErrorAction Stop
-        }
-        Write-Log "Ubuntu cloud image downloaded."
-    }
-
-    # Convert QCOW2 to VHDX using qemu-img
-    Write-Log "Converting Ubuntu QCOW2 to VHDX (this may take a few minutes)..."
-    & `$qemuImg convert -f qcow2 -O vhdx -o subformat=dynamic "`$ubuntuQcow2" "`$ubuntuBaseVhd" 2>&1
-    if (`$LASTEXITCODE -ne 0) {
-        throw "qemu-img conversion failed with exit code `$LASTEXITCODE"
-    }
-    # Remove sparse file attribute (required by Hyper-V for differencing disks)
-    fsutil sparse setflag "`$ubuntuBaseVhd" 0
-    Write-Log "Ubuntu base VHDX created."
-
-    # Cleanup downloaded QCOW2
-    Remove-Item -Path `$ubuntuQcow2 -Force -ErrorAction SilentlyContinue
-} else {
-    Write-Log "Ubuntu base VHDX already exists."
-}
-
-# -- Windows Server 2022 base VHDX (downloaded from Azure marketplace managed disk via SAS) --
-if (-not (Test-Path `$windowsBaseVhd)) {
-    if ([string]::IsNullOrWhiteSpace(`$windowsVhdSasUrl)) {
-        throw "Windows VHD SAS URL not provided. Cannot create Windows guest VMs."
-    }
-
-    `$windowsVhdTemp = "`$vhdPath\WindowsServer2022-temp.vhd"
-    if (-not (Test-Path `$windowsVhdTemp) -or (Get-Item `$windowsVhdTemp).Length -lt 1GB) {
-        Remove-Item -Path `$windowsVhdTemp -Force -ErrorAction SilentlyContinue
-        Write-Log "Downloading Windows Server 2022 VHD from Azure marketplace disk (intra-Azure, fast)..."
-        # Install azcopy for reliable large file downloads
-        `$azcopy = (Get-ChildItem "`$labRoot\azcopy" -Recurse -Filter "azcopy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-        if (-not `$azcopy) {
-            Write-Log "Installing azcopy..."
-            Invoke-WebRequest -Uri "https://aka.ms/downloadazcopy-v10-windows" -OutFile "`$labRoot\azcopy.zip" -UseBasicParsing -ErrorAction Stop
-            Expand-Archive -Path "`$labRoot\azcopy.zip" -DestinationPath "`$labRoot\azcopy" -Force
-            `$azcopy = (Get-ChildItem "`$labRoot\azcopy" -Recurse -Filter "azcopy.exe" | Select-Object -First 1).FullName
-            Write-Log "azcopy installed at: `$azcopy"
-        }
-        `$env:AZCOPY_AUTO_LOGIN_TYPE = "AZCLI"
-        & `$azcopy copy `$windowsVhdSasUrl `$windowsVhdTemp --check-md5 NoCheck --log-level ERROR 2>&1 | ForEach-Object { Write-Log "  `$_" }
-        if (-not (Test-Path `$windowsVhdTemp) -or (Get-Item `$windowsVhdTemp).Length -lt 1GB) {
-            throw "azcopy download failed or file is too small."
-        }
-        Write-Log "Windows Server VHD downloaded (`$([math]::Round((Get-Item `$windowsVhdTemp).Length/1GB, 1)) GB)."
-    }
-
-    # Convert VHD to VHDX using qemu-img (auto-detect source format)
-    Write-Log "Converting Windows Server VHD to VHDX..."
-    & `$qemuImg convert -O vhdx -o subformat=dynamic "`$windowsVhdTemp" "`$windowsBaseVhd" 2>&1
-    if (`$LASTEXITCODE -ne 0) {
-        throw "qemu-img VHD to VHDX conversion failed with exit code `$LASTEXITCODE"
-    }
-    # Remove sparse file attribute (required by Hyper-V for differencing disks)
-    fsutil sparse setflag "`$windowsBaseVhd" 0
-    Write-Log "Windows Server base VHDX created."
-
-    # Cleanup temp VHD
-    Remove-Item -Path `$windowsVhdTemp -Force -ErrorAction SilentlyContinue
-} else {
-    Write-Log "Windows Server base VHDX already exists."
-}
-
-# =============================================================
-# PHASE 3 — Create guest VMs
-# =============================================================
-Write-Log "PHASE 3: Creating guest VMs..."
-
-# --- Helper: Create-WindowsGuestVM ---
-function Create-WindowsGuestVM {
-    param(
-        [string]`$VMName, [string]`$IPAddress,
-        [int]`$MemoryMB = 4096, [int]`$CPUs = 2
-    )
-
-    `$existingVM = Get-VM -Name `$VMName -ErrorAction SilentlyContinue
-    if (`$existingVM) { Write-Log "VM '`$VMName' already exists. Skipping."; return }
-
-    Write-Log "Creating Windows VM '`$VMName'..."
-
-    `$vmVhdPath = "`$vhdPath\`$VMName.vhdx"
-    if (-not (Test-Path `$vmVhdPath)) {
-        New-VHD -Path `$vmVhdPath -ParentPath `$windowsBaseVhd -Differencing -ErrorAction Stop | Out-Null
-    }
-
-    # Generate unattend.xml
-    `$unattendDir = "`$labRoot\Unattend\`$VMName"
-    New-Item -ItemType Directory -Path `$unattendDir -Force | Out-Null
-
-    `$unattendXml = @'
-<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend"
-          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-  <settings pass="specialize">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <ComputerName>__VMNAME__</ComputerName>
-    </component>
-    <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <Interfaces>
-        <Interface wcm:action="add">
-          <Ipv4Settings><DhcpEnabled>false</DhcpEnabled></Ipv4Settings>
-          <Identifier>Ethernet</Identifier>
-          <UnicastIpAddresses>
-            <IpAddress wcm:action="add" wcm:keyValue="1">__IPADDRESS__/24</IpAddress>
-          </UnicastIpAddresses>
-          <Routes>
-            <Route wcm:action="add">
-              <Identifier>0</Identifier>
-              <NextHopAddress>192.168.0.1</NextHopAddress>
-              <Prefix>0.0.0.0/0</Prefix>
-            </Route>
-          </Routes>
-        </Interface>
-      </Interfaces>
-    </component>
-    <component name="Microsoft-Windows-DNS-Client" processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <Interfaces>
-        <Interface wcm:action="add">
-          <Identifier>Ethernet</Identifier>
-          <DNSServerSearchOrder>
-            <IpAddress wcm:action="add" wcm:keyValue="1">8.8.8.8</IpAddress>
-          </DNSServerSearchOrder>
-        </Interface>
-      </Interfaces>
-    </component>
-  </settings>
-  <settings pass="oobeSystem">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
-               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <OOBE>
-        <HideEULAPage>true</HideEULAPage>
-        <SkipMachineOOBE>true</SkipMachineOOBE>
-        <SkipUserOOBE>true</SkipUserOOBE>
-      </OOBE>
-      <UserAccounts>
-        <AdministratorPassword>
-          <Value>__PASSWORD__</Value>
-          <PlainText>true</PlainText>
-        </AdministratorPassword>
-      </UserAccounts>
-    </component>
-  </settings>
-</unattend>
-'@ -replace '__VMNAME__', `$VMName -replace '__IPADDRESS__', `$IPAddress -replace '__PASSWORD__', `$guestAdminPwd
-    `$unattendXml | Out-File -FilePath "`$unattendDir\unattend.xml" -Encoding UTF8 -Force
-
-    `$vmDir = "`$labRoot\VMs\`$VMName"
-    New-Item -ItemType Directory -Path `$vmDir -Force | Out-Null
-
-    New-VM -Name `$VMName -MemoryStartupBytes (`$MemoryMB * 1MB) -VHDPath `$vmVhdPath ``
-        -SwitchName `$intSwitchName -Path `$vmDir -Generation 2 -ErrorAction Stop | Out-Null
-    Set-VMProcessor -VMName `$VMName -Count `$CPUs -ErrorAction Stop
-    Set-VMMemory -VMName `$VMName -DynamicMemoryEnabled `$false -ErrorAction Stop
-    Enable-VMIntegrationService -VMName `$VMName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
-
-    # Inject unattend.xml into the differencing VHD
-    try {
-        `$mountResult = Mount-VHD -Path `$vmVhdPath -Passthru -ErrorAction Stop
-        `$dl = (`$mountResult | Get-Disk | Get-Partition | Where-Object { `$_.Type -eq "Basic" } | Get-Volume).DriveLetter
-        if (`$dl -and (Test-Path "`${dl}:\Windows")) {
-            `$pantherDir = "`${dl}:\Windows\Panther"
-            New-Item -ItemType Directory -Path `$pantherDir -Force | Out-Null
-            Copy-Item -Path "`$unattendDir\unattend.xml" -Destination "`$pantherDir\unattend.xml" -Force
-            Write-Log "Injected unattend.xml into VHD for '`$VMName'."
-        } else {
-            Write-Log "WARNING: Windows dir not found in VHD for '`$VMName'."
-        }
-    } catch {
-        Write-Log "WARNING: Failed to inject unattend.xml for '`$VMName': `$_"
-    } finally {
-        Dismount-VHD -Path `$vmVhdPath -ErrorAction SilentlyContinue
-    }
-
-    Write-Log "VM '`$VMName' created (`$CPUs vCPUs, `${MemoryMB}MB RAM, IP `$IPAddress)."
-}
-
-# --- Helper: Create-LinuxGuestVM ---
-function Create-LinuxGuestVM {
-    param(
-        [string]`$VMName, [string]`$IPAddress,
-        [int]`$MemoryMB = 2048, [int]`$CPUs = 2,
-        [string[]]`$ExtraPackages = @(),
-        [string]`$ExtraRunCmdYaml = ""
-    )
-
-    `$existingVM = Get-VM -Name `$VMName -ErrorAction SilentlyContinue
-    if (`$existingVM) { Write-Log "VM '`$VMName' already exists. Skipping."; return }
-
-    Write-Log "Creating Linux VM '`$VMName'..."
-
-    `$vmVhdPath = "`$vhdPath\`$VMName.vhdx"
-    if (-not (Test-Path `$vmVhdPath)) {
-        New-VHD -Path `$vmVhdPath -ParentPath `$ubuntuBaseVhd -Differencing -ErrorAction Stop | Out-Null
-    }
-
-    # Resize the differencing disk so cloud-init has room
-    Resize-VHD -Path `$vmVhdPath -SizeBytes 30GB -ErrorAction SilentlyContinue
-
-    # Cloud-init files
-    `$cloudInitDir = "`$labRoot\CloudInit\`$VMName"
-    New-Item -ItemType Directory -Path `$cloudInitDir -Force | Out-Null
-
-    `$metaData = "instance-id: `$VMName`nlocal-hostname: `$VMName"
-    `$metaData | Out-File -FilePath "`$cloudInitDir\meta-data" -Encoding ASCII -Force -NoNewline
-
-    `$networkConfig = @'
-version: 2
-ethernets:
-  eth0:
-    addresses:
-      - __IPADDRESS__/24
-    routes:
-      - to: default
-        via: 192.168.0.1
-    nameservers:
-      addresses:
-        - 8.8.8.8
-        - 8.8.4.4
-'@ -replace '__IPADDRESS__', `$IPAddress
-    `$networkConfig | Out-File -FilePath "`$cloudInitDir\network-config" -Encoding ASCII -Force -NoNewline
-
-    `$basePackages = @("openssh-server", "curl", "wget", "net-tools")
-    `$allPackages  = `$basePackages + `$ExtraPackages
-    `$pkgYaml = (`$allPackages | ForEach-Object { "  - `$_" }) -join "`n"
-
-    `$baseRun = @("  - systemctl enable ssh", "  - systemctl start ssh")
-    `$runYaml = `$baseRun -join "`n"
-    if (`$ExtraRunCmdYaml) { `$runYaml += "`n`$ExtraRunCmdYaml" }
-
-    `$userData = @'
-#cloud-config
-password: __PASSWORD__
-chpasswd:
-  expire: false
-ssh_pwauth: true
-users:
-  - name: __USER__
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    lock_passwd: false
-    plain_text_passwd: __PASSWORD__
-packages:
-__PKGYAML__
-runcmd:
-__RUNYAML__
-'@ -replace '__PASSWORD__', `$guestAdminPwd -replace '__USER__', `$guestUser -replace '__PKGYAML__', `$pkgYaml -replace '__RUNYAML__', `$runYaml
-    `$userData | Out-File -FilePath "`$cloudInitDir\user-data" -Encoding ASCII -Force -NoNewline
-
-    # Create cloud-init ISO
-    `$ciIsoPath = "`$vhdPath\`$VMName-cidata.iso"
-    `$oscdimg = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
-
-    `$isoCreated = `$false
-    if (Test-Path `$oscdimg) {
-        `$prevEAP = `$ErrorActionPreference; `$ErrorActionPreference = "Continue"
-        & `$oscdimg -j2 -lcidata "`$cloudInitDir" "`$ciIsoPath" 2>&1 | Out-Null
-        `$ErrorActionPreference = `$prevEAP
-        if (`$LASTEXITCODE -eq 0 -and (Test-Path `$ciIsoPath)) { `$isoCreated = `$true }
-    }
-
-    if (-not `$isoCreated) {
-        # Fallback: build a minimal ISO with PowerShell using a simple raw-write method
-        Write-Log "oscdimg not found; creating cloud-init seed VHDX as fallback for '`$VMName'."
-        `$seedVhd = "`$vhdPath\`$VMName-seed.vhdx"
-        if (-not (Test-Path `$seedVhd)) {
-            New-VHD -Path `$seedVhd -SizeBytes 64MB -Fixed -ErrorAction Stop | Out-Null
-        }
-        `$ciIsoPath = `$null
-    }
-
-    `$vmDir = "`$labRoot\VMs\`$VMName"
-    New-Item -ItemType Directory -Path `$vmDir -Force | Out-Null
-
-    New-VM -Name `$VMName -MemoryStartupBytes (`$MemoryMB * 1MB) -VHDPath `$vmVhdPath ``
-        -SwitchName `$intSwitchName -Path `$vmDir -Generation 2 -ErrorAction Stop | Out-Null
-    Set-VMProcessor -VMName `$VMName -Count `$CPUs -ErrorAction Stop
-    Set-VMMemory -VMName `$VMName -DynamicMemoryEnabled `$false -ErrorAction Stop
-    Set-VMFirmware -VMName `$VMName -EnableSecureBoot Off -ErrorAction Stop
-    Enable-VMIntegrationService -VMName `$VMName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
-
-    if (`$ciIsoPath -and (Test-Path `$ciIsoPath)) {
-        Add-VMDvdDrive -VMName `$VMName -Path `$ciIsoPath -ErrorAction Stop
-        Write-Log "Attached cloud-init ISO to '`$VMName'."
-    }
-
-    Write-Log "VM '`$VMName' created (`$CPUs vCPUs, `${MemoryMB}MB RAM, IP `$IPAddress)."
-}
-
-# --- Define cloud-init runcmd YAML for Linux workloads ---
-
-# Nginx web server setup (packages directive installs nginx before runcmd runs)
-`$nginxRunCmdYaml = @'
-  - systemctl enable nginx
-  - systemctl start nginx
-  - |
-    cat > /var/www/html/index.html << 'HTMLEOF'
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Contoso Linux Web - On-Premises</title>
-        <style>
-            body { font-family: 'Segoe UI', sans-serif; margin: 40px; background: #1a1a2e; color: #eee; }
-            .container { max-width: 800px; margin: 0 auto; background: #16213e; padding: 40px; border-radius: 8px; }
-            h1 { color: #e94560; }
-            .info { background: #0f3460; padding: 15px; border-radius: 4px; margin: 20px 0; }
-            .status { color: #4ecca3; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Contoso Linux Web Server</h1>
-            <p class="status">&#x2705; Nginx is running</p>
-            <div class="info">
-                <h3>Environment Details</h3>
-                <ul>
-                    <li><strong>Server:</strong> OnPrem-Linux-Web</li>
-                    <li><strong>Platform:</strong> Ubuntu 22.04 + Nginx</li>
-                    <li><strong>IP Address:</strong> 192.168.0.12</li>
-                    <li><strong>Status:</strong> On-Premises (Pre-Migration)</li>
-                </ul>
-            </div>
-            <p>This is a sample Linux-hosted website for the Azure Migrate Workshop.</p>
-        </div>
-    </body>
-    </html>
-    HTMLEOF
-'@
-
-# Node.js + Express.js app setup
-`$nodeJsRunCmdYaml = @'
-  - apt-get update -y
-  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-  - mkdir -p /opt/contoso-app
-  - |
-    cat > /opt/contoso-app/package.json << 'PKGJSON'
-    {
-      "name": "contoso-app",
-      "version": "1.0.0",
-      "description": "Contoso sample Node.js application for Azure Migrate Workshop",
-      "main": "server.js",
-      "scripts": { "start": "node server.js" },
-      "dependencies": { "express": "^4.18.2" }
-    }
-    PKGJSON
-  - |
-    cat > /opt/contoso-app/server.js << 'SERVERJS'
-    const express = require('express');
-    const os = require('os');
-    const app = express();
-    const PORT = 3000;
-
-    app.get('/', (req, res) => {
-      res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Contoso API - On-Premises</title>
-          <style>
-            body { font-family: 'Segoe UI', sans-serif; margin: 40px; background: #0d1117; color: #c9d1d9; }
-            .container { max-width: 800px; margin: 0 auto; background: #161b22; padding: 40px; border-radius: 8px; border: 1px solid #30363d; }
-            h1 { color: #58a6ff; }
-            pre { background: #0d1117; padding: 15px; border-radius: 4px; overflow-x: auto; }
-            .status { color: #3fb950; font-weight: bold; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h1>Contoso App Server</h1>
-            <p class="status">&#x2705; Node.js API is running</p>
-            <h3>System Info</h3>
-            <pre>`${JSON.stringify({
-              hostname: os.hostname(),
-              platform: os.platform(),
-              arch: os.arch(),
-              uptime: Math.floor(os.uptime()) + 's',
-              memory: Math.floor(os.totalmem() / 1024 / 1024) + 'MB',
-              nodeVersion: process.version
-            }, null, 2)}</pre>
-            <h3>API Endpoints</h3>
-            <ul>
-              <li><a href="/api/health" style="color:#58a6ff">/api/health</a> - Health check</li>
-              <li><a href="/api/info" style="color:#58a6ff">/api/info</a> - System information</li>
-            </ul>
-          </div>
-        </body>
-        </html>
-      `);
-    });
-
-    app.get('/api/health', (req, res) => {
-      res.json({ status: 'healthy', timestamp: new Date().toISOString(), server: 'OnPrem-Linux-App' });
-    });
-
-    app.get('/api/info', (req, res) => {
-      res.json({
-        hostname: os.hostname(),
-        platform: os.platform(),
-        arch: os.arch(),
-        uptime: os.uptime(),
-        memory: { total: os.totalmem(), free: os.freemem() },
-        cpus: os.cpus().length,
-        nodeVersion: process.version,
-        environment: 'on-premises'
-      });
-    });
-
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Contoso App Server running on port `${PORT}`);
-    });
-    SERVERJS
-  - cd /opt/contoso-app && npm install --production
-  - |
-    cat > /etc/systemd/system/contoso-app.service << 'SVCFILE'
-    [Unit]
-    Description=Contoso Node.js Application
-    After=network.target
-
-    [Service]
-    Type=simple
-    User=root
-    WorkingDirectory=/opt/contoso-app
-    ExecStart=/usr/bin/node server.js
-    Restart=on-failure
-    RestartSec=10
-    Environment=NODE_ENV=production
-
-    [Install]
-    WantedBy=multi-user.target
-    SVCFILE
-  - systemctl daemon-reload
-  - systemctl enable contoso-app
-  - systemctl start contoso-app
-'@
-
-# --- Create VMs ---
-Create-WindowsGuestVM -VMName "OnPrem-Web" -IPAddress "192.168.0.10" -MemoryMB 4096 -CPUs 2
-Create-WindowsGuestVM -VMName "OnPrem-SQL" -IPAddress "192.168.0.11" -MemoryMB 4096 -CPUs 2
-Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("nginx") -ExtraRunCmdYaml `$nginxRunCmdYaml
-Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraRunCmdYaml `$nodeJsRunCmdYaml
-
-# =============================================================
-# PHASE 4 — Start VMs and wait for boot
-# =============================================================
-Write-Log "PHASE 4: Starting guest VMs..."
-
-`$allVMs = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
-foreach (`$vm in `$allVMs) {
-    `$v = Get-VM -Name `$vm -ErrorAction SilentlyContinue
-    if (`$v -and `$v.State -ne "Running") {
-        Start-VM -Name `$vm -ErrorAction Stop
-        Write-Log "Started VM '`$vm'."
-    } elseif (`$v) {
-        Write-Log "VM '`$vm' is already running."
-    } else {
-        Write-Log "WARNING: VM '`$vm' not found."
-    }
-}
-
-Write-Log "Waiting 180 seconds for VMs to boot and complete first-boot setup..."
-Start-Sleep -Seconds 180
-
-# --- Wait helper ---
-function Wait-ForGuestVM {
-    param([string]`$VMName, [int]`$TimeoutSeconds = 300)
-    Write-Log "Waiting for '`$VMName' heartbeat..."
-    `$deadline = (Get-Date).AddSeconds(`$TimeoutSeconds)
-    while ((Get-Date) -lt `$deadline) {
-        `$hb = Get-VMIntegrationService -VMName `$VMName -Name "Heartbeat" -ErrorAction SilentlyContinue
-        if (`$hb -and `$hb.PrimaryStatusDescription -eq "OK") {
-            Write-Log "'`$VMName' is responding."
-            return `$true
-        }
-        Start-Sleep -Seconds 10
-    }
-    Write-Log "WARNING: Timed out waiting for '`$VMName'."
-    return `$false
-}
-
-# =============================================================
-# PHASE 5 — Install workloads
-# =============================================================
-Write-Log "PHASE 5: Installing workloads..."
-
-`$winCred = New-Object System.Management.Automation.PSCredential(
-    "Administrator",
-    (ConvertTo-SecureString `$guestAdminPwd -AsPlainText -Force)
-)
-
-# ---- OnPrem-Web: IIS + ASP.NET + sample site ----
-Write-Log "--- Configuring OnPrem-Web (192.168.0.10) ---"
-try {
-    Wait-ForGuestVM -VMName "OnPrem-Web" | Out-Null
-
-    Invoke-Command -VMName "OnPrem-Web" -Credential `$winCred -ScriptBlock {
-        `$ErrorActionPreference = "Stop"
-
-        if (-not (Get-WindowsFeature Web-Server).Installed) {
-            Install-WindowsFeature -Name Web-Server -IncludeManagementTools -ErrorAction Stop | Out-Null
-        }
-        if (-not (Get-WindowsFeature Web-Asp-Net45).Installed) {
-            Install-WindowsFeature -Name Web-Asp-Net45 -ErrorAction Stop | Out-Null
-        }
-
-        `$sitePath = "C:\inetpub\wwwroot"
-        @'
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Contoso Web App - On-Premises</title>
-    <style>
-        body { font-family: 'Segoe UI', sans-serif; margin: 40px; background: #f0f0f0; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1 { color: #0078d4; }
-        .info { background: #e8f4fd; padding: 15px; border-radius: 4px; margin: 20px 0; }
-        .status { color: #107c10; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Contoso Web Application</h1>
-        <p class="status">&#x2705; Application is running</p>
-        <div class="info">
-            <h3>Environment Details</h3>
-            <ul>
-                <li><strong>Server:</strong> OnPrem-Web</li>
-                <li><strong>Platform:</strong> Windows Server 2022 + IIS</li>
-                <li><strong>IP Address:</strong> 192.168.0.10</li>
-                <li><strong>Database:</strong> OnPrem-SQL (192.168.0.11)</li>
-                <li><strong>Status:</strong> On-Premises (Pre-Migration)</li>
-            </ul>
-        </div>
-        <p>This is a sample on-premises web application for the Azure Migrate Workshop.</p>
-    </div>
-</body>
-</html>
-'@ | Out-File -FilePath "`$sitePath\index.html" -Encoding UTF8 -Force
-        Write-Output "IIS and sample website deployed on OnPrem-Web."
-    } -ErrorAction Stop
-
-    Write-Log "OnPrem-Web configured successfully."
-} catch {
-    Write-Log "ERROR configuring OnPrem-Web: `$_"
-}
-
-# ---- OnPrem-SQL: SQL Server 2022 Express + ContosoApp DB ----
-Write-Log "--- Configuring OnPrem-SQL (192.168.0.11) ---"
-try {
-    Wait-ForGuestVM -VMName "OnPrem-SQL" | Out-Null
-
-    Invoke-Command -VMName "OnPrem-SQL" -Credential `$winCred -ScriptBlock {
-        param(`$sapwd)
-        `$ErrorActionPreference = "Stop"
-
-        `$sqlSseiUrl = "https://go.microsoft.com/fwlink/p/?linkid=2216019"
-        `$sqlSsei = "C:\Temp\SQL2022-SSEI-Expr.exe"
-        `$sqlMediaPath = "C:\Temp\SqlExpress"
-
-        New-Item -ItemType Directory -Path "C:\Temp" -Force | Out-Null
-        New-Item -ItemType Directory -Path `$sqlMediaPath -Force | Out-Null
-
-        `$sqlService = Get-Service -Name "MSSQL```$SQLEXPRESS" -ErrorAction SilentlyContinue
-        if (-not `$sqlService) {
-            Write-Output "Downloading SQL Server 2022 Express installer..."
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri `$sqlSseiUrl -OutFile `$sqlSsei -UseBasicParsing -ErrorAction Stop
-
-            Write-Output "Downloading SQL Server 2022 Express media (this may take a few minutes)..."
-            Start-Process -FilePath `$sqlSsei -ArgumentList "/Action=Download", "/MediaPath=`$sqlMediaPath", "/MediaType=Core", "/Quiet" -Wait -NoNewWindow
-
-            # Find the actual setup.exe
-            `$setupExe = Get-ChildItem -Path `$sqlMediaPath -Filter "setup.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not `$setupExe) {
-                `$setupExe = Get-ChildItem -Path `$sqlMediaPath -Filter "SETUP.EXE" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            foreach ($pair in @(
+                @{ Name='jdbc/mssql-jdbc-13.6.0.jre11.jar'; Bytes=[IO.File]::ReadAllBytes($TomcatJdbcJar) },
+                @{ Name='jdbc/SHA256SUMS'; Bytes=[Text.Encoding]::UTF8.GetBytes($TomcatJdbcSha256.ToLowerInvariant() + '  mssql-jdbc-13.6.0.jre11.jar' + "`n") }
+            )) {
+                $entry = $archive.CreateEntry($pair.Name)
+                $stream = $entry.Open()
+                try { $stream.Write($pair.Bytes, 0, $pair.Bytes.Length) } finally { $stream.Dispose() }
             }
+        } finally { $archive.Dispose() }
+        $runtimeBytes = $memory.ToArray()
+        $memory.Dispose()
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actualHash = ([BitConverter]::ToString($sha.ComputeHash($runtimeBytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+    $content = $content.Replace('__TOMCAT_RUNTIME_PAYLOAD__', [Convert]::ToBase64String($runtimeBytes))
+    $content = $content.Replace('__TOMCAT_RUNTIME_SHA256__', $actualHash)
+    $tokens = $null; $errors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw 'The host configuration script has syntax errors. Obtain the reviewed workshop revision.' }
+    return $content
+}
 
-            if (`$setupExe) {
-                Write-Output "Installing SQL Server 2022 Express from: `$(`$setupExe.FullName)"
-                Start-Process -FilePath `$setupExe.FullName -ArgumentList @(
-                    "/Q",
-                    "/IACCEPTSQLSERVERLICENSETERMS",
-                    "/ACTION=Install",
-                    "/FEATURES=SQLENGINE",
-                    "/INSTANCENAME=SQLEXPRESS",
-                    "/SQLSVCSTARTUPTYPE=Automatic",
-                    "/SQLSYSADMINACCOUNTS=BUILTIN\Administrators",
-                    "/SECURITYMODE=SQL",
-                    "/SAPWD=`$sapwd",
-                    "/TCPENABLED=1",
-                    "/NPENABLED=1"
-                ) -Wait -NoNewWindow
-                Write-Output "SQL Server 2022 Express installed."
+function Assert-LabRunResult {
+    param([Parameter(Mandatory)]$Result, [Parameter(Mandatory)][string]$Marker)
+    $stdout = @($Result.Value | Where-Object Code -Match 'StdOut' | ForEach-Object Message) -join "`n"
+    $stderr = @($Result.Value | Where-Object Code -Match 'StdErr' | ForEach-Object Message) -join "`n"
+    $failedStatuses = @($Result.Value | Where-Object { $_.Code -match '/(failed|error)(/|$)' })
+    $markerLine = '(?m)^' + [regex]::Escape($Marker) + '\r?$'
+    if ($failedStatuses.Count -gt 0 -or $stdout -cnotmatch $markerLine -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+        throw "Remote validation did not pass. Review the VM Run Command output. $stderr"
+    }
+    return $stdout
+}
+
+# Both values arrive masked. Convert once, validate, then use the plain form internally.
+$subscriptionIdPlain = ConvertFrom-LabSecureString -Secure $SubscriptionId -Name 'SubscriptionId'
+Assert-LabSubscriptionId $subscriptionIdPlain
+$adminSourceCidrPlain = ConvertFrom-LabSecureString -Secure $AdminSourceCidr -Name 'AdminSourceCidr'
+$hostScript = Read-LabHostConfiguration "$PSScriptRoot/host/configure-host.ps1"
+. "$PSScriptRoot/health.ps1"
+# The steps after 'Submit guest setup' run on the host, not here. Their names match the phase
+# markers the host payload emits, so the counter keeps advancing through the longest part of
+# the deployment instead of resting on a single step for 40-80 minutes.
+Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
+    'Source deployment', 'Create source network', 'Create host public IP', 'Create host firewall rules',
+    'Create host network interface', 'Create Azure host', 'Install Hyper-V and DHCP', 'Restart Azure host',
+    'Check Hyper-V readiness', 'Create appliance store partition', 'Create guest image disk',
+    'Submit guest setup', 'Guest setup starting',
+    'Host networking', 'Downloading and converting images', 'Creating nested VMs', 'Guest first boot',
+    'Installing workloads', 'Installing IIS', 'Installing SQL', 'Validating sample applications',
+    'Staging the traffic generator', 'Preparing the host for discovery', 'Guest setup complete'
+)
+if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
+$adminSourceCidrPlain = Resolve-LabAdminSource $adminSourceCidrPlain
+Assert-LabHostSizeName $VMSize
+foreach ($module in @('Az.Accounts','Az.Resources','Az.Network','Az.Compute')) {
+    Import-Module $module -ErrorAction Stop
+}
+$null = Assert-LabContext $subscriptionIdPlain
+foreach ($command in @('Set-AzVMRunCommand','Get-AzVMRunCommand')) { $null = Get-Command $command -ErrorAction Stop }
+if (-not (Get-Command Set-AzVMRunCommand).Parameters.ContainsKey('ProtectedParameter')) { throw 'Update Az.Compute; managed Run Command protected parameters are required.' }
+if ($AdminUsername -in @('admin','administrator','root','guest','user','test')) { throw 'Choose a non-reserved administrator username, such as labadmin.' }
+$credential = [pscredential]::new($AdminUsername,$AdminPassword)
+$passwordPlain = $credential.GetNetworkCredential().Password
+if ($passwordPlain.Length -lt 12 -or $passwordPlain.Length -gt 72 -or $passwordPlain -match '[\r\n\x00-\x1f]') { throw 'Use a 12-72 character lab password without control characters.' }
+$classes = @('[a-z]','[A-Z]','[0-9]','[^a-zA-Z0-9]') | Where-Object { $passwordPlain -cmatch $_ }
+if (@($classes).Count -lt 3) { throw 'The password must include at least three character categories: lower, upper, number, symbol.' }
+$runNameProbe = 'ConfigureWorkshop'
+# An existing group is allowed only when it is this workshop's own and its host never
+# finished provisioning, so an interrupted run resumes instead of costing a full rebuild.
+# A group that is not tagged as this workshop, or whose host completed setup, is refused:
+# replaying provisioning after migration has begun could restart retired source VMs.
+$existingGroup = Get-LabResourceGroup -Name $ResourceGroupName -AllowMissing
+$resumeDeployment = $false
+if ($existingGroup) {
+    if (-not $existingGroup.Tags -or $existingGroup.Tags['Workshop'] -ne 'TD-SYNNEX-CES-HyperV') {
+        throw "Resource group '$ResourceGroupName' exists and is not tagged as this workshop. Use a new, dedicated source resource group."
+    }
+    $existingHost = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -ErrorAction SilentlyContinue
+    if (-not $existingHost) {
+        throw "Resource group '$ResourceGroupName' exists but has no HyperVHost. Inspect and remove it, then deploy into a clean group."
+    }
+    $completed = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runNameProbe -Expand InstanceView -ErrorAction SilentlyContinue
+    if ($completed -and [string]$completed.InstanceView.ExecutionState -eq 'Succeeded') {
+        throw "Guest setup already succeeded in '$ResourceGroupName'. Deployment is not a post-migration repair command; use a new group for a fresh lab."
+    }
+    $resumeDeployment = $true
+    Write-Host "Resuming the incomplete deployment in '$ResourceGroupName'. Existing resources are reused; unfinished guests are rebuilt."
+}
+# The appliance VHD is an ~11 GB download and nothing in Module 0 needs it. A learner should
+# skip it: Module 1 downloads the appliance from the Azure Migrate project when it is required,
+# and the project's own link is the one that serves the current build. An instructor staging a
+# host before a session usually does want it. Asked once, defaulting to No.
+if (-not $PSBoundParameters.ContainsKey('IncludeApplianceVhd')) {
+    $IncludeApplianceVhd = 'No'
+    if ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
+        Write-Host ''
+        Write-Host 'Stage the Azure Migrate appliance VHD on the host during deployment?' -ForegroundColor Cyan
+        Write-Host '  No   Recommended. Module 1 downloads it from your project when it is needed.' -ForegroundColor Gray
+        Write-Host '  Yes  For an instructor preparing a host ahead of a session. Adds an ~11 GB download.' -ForegroundColor Gray
+        if ((Read-Host 'Yes or No [No]') -match '^(?i)y') { $IncludeApplianceVhd = 'Yes' }
+    }
+}
+if ($IncludeApplianceVhd -eq 'Yes') {
+    # The published hash is NOT asked for here. Nothing can be verified before the download has
+    # happened, so the question would be asked long before it could be answered usefully. The
+    # host computes the archive's SHA256 as part of staging it, and this script compares that
+    # against the published value at the END of the run.
+    Write-Host ''
+    Write-Host 'The Azure Migrate appliance VHD will be staged on the host during deployment.' -ForegroundColor Cyan
+    Write-Host 'Its SHA256 is computed there, and this script offers to check it when deployment finishes.' -ForegroundColor Gray
+}
+
+$hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
+$windowsImages = Get-LabWindowsImages -Location $Location
+$guestDiskConfig = New-LabWindowsGuestDiskConfig -Location $Location -ImageId $windowsImages.Guest.Id
+Write-Host "Selected host: $($hostSku.Name), $($hostSku.Cores) enabled vCPUs, $($hostSku.MemoryGB) GiB RAM. Confirm this series supports nested virtualization with Standard security before running deployment."
+foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Storage','Microsoft.Migrate','Microsoft.OffAzure','Microsoft.RecoveryServices','Microsoft.KeyVault')) {
+    $state = @(Get-AzResourceProvider -ProviderNamespace $provider)[0].RegistrationState
+    if ($state -ne 'Registered') { throw "Register $provider first with Register-AzResourceProvider and wait until Registered." }
+}
+Write-Host "Creating source lab in the selected subscription, region $Location."
+Write-LabHealth 'Source deployment' Preparing 0 'Preflight passed. Starting dedicated workshop resource creation.' $HealthPath
+$tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training' }
+$vmName = 'HyperVHost'
+$diskName = 'WinServerBase-temp'
+# Resolved by the host during the store step, since only the host knows which letters are free.
+$storeDrive = $null
+$appliancePath = $null
+$runName = 'ConfigureWorkshop'
+$diskCreated = $false
+$runCreated = $false
+$setupPassed = $false
+$setupObservation = @{ Terminal = $false }
+$deploymentClock = [Diagnostics.Stopwatch]::StartNew()
+try {
+    if (-not $resumeDeployment) { New-AzResourceGroup -Name $ResourceGroupName -Location $Location -Tag $tags | Out-Null }
+    # Every resource below is created only when absent, so a resumed run continues from the
+    # point the previous attempt stopped instead of rebuilding what already exists.
+    $vnet = Get-AzVirtualNetwork -Name "$ResourceGroupName-vnet" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($vnet) { Write-Host 'Reusing the existing source network.' } else {
+        $subnet = New-AzVirtualNetworkSubnetConfig -Name default -AddressPrefix '10.0.0.0/24' -DefaultOutboundAccess $false
+        $job = New-AzVirtualNetwork -Name "$ResourceGroupName-vnet" -ResourceGroupName $ResourceGroupName -Location $Location -AddressPrefix '10.0.0.0/16' -Subnet $subnet -AsJob
+        $vnet = Wait-LabJob $job 'Create source network' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    # The host's attached Standard public IP provides explicit outbound connectivity.
+    $pip = Get-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($pip) { Write-Host 'Reusing the existing host public IP.' } else {
+        $job = New-AzPublicIpAddress -Name "$vmName-pip" -ResourceGroupName $ResourceGroupName -Location $Location -AllocationMethod Static -Sku Standard -AsJob
+        $pip = Wait-LabJob $job 'Create host public IP' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $nsg = Get-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($nsg) { Write-Host 'Reusing the existing host firewall rules.' } else {
+        $rdp = New-AzNetworkSecurityRuleConfig -Name Allow-RDP -Access Allow -Protocol Tcp -Direction Inbound -Priority 100 -SourceAddressPrefix $adminSourceCidrPlain -SourcePortRange '*' -DestinationAddressPrefix '*' -DestinationPortRange 3389
+        $job = New-AzNetworkSecurityGroup -Name "$vmName-nsg" -ResourceGroupName $ResourceGroupName -Location $Location -SecurityRules $rdp -AsJob
+        $nsg = Wait-LabJob $job 'Create host firewall rules' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $nic = Get-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    if ($nic) { Write-Host 'Reusing the existing host network interface.' } else {
+        $job = New-AzNetworkInterface -Name "$vmName-nic" -ResourceGroupName $ResourceGroupName -Location $Location -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $pip.Id -NetworkSecurityGroupId $nsg.Id -EnableAcceleratedNetworking:$hostSku.AcceleratedNetworking -AsJob
+        $nic = Wait-LabJob $job 'Create host network interface' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $existingHostVm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction SilentlyContinue
+    if ($existingHostVm) { Write-Host 'Reusing the existing Azure host; Hyper-V setup is re-verified below.' }
+    else {
+    $vm = New-AzVMConfig -VMName $vmName -VMSize $VMSize -SecurityType Standard
+    $vm = Set-AzVMOperatingSystem -VM $vm -Windows -ComputerName $vmName -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
+    $vm = Set-AzVMSourceImage -VM $vm -PublisherName $windowsImages.Host.Publisher -Offer $windowsImages.Host.Offer -Skus $windowsImages.Host.Sku -Version $windowsImages.Host.Version
+    $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 512
+    $vm = Add-AzVMNetworkInterface -VM $vm -Id $nic.Id
+    $vm = Set-AzVMBootDiagnostic -VM $vm -Enable
+    $job = New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vm -Tag $tags -AsJob
+    $null = Wait-LabJob $job 'Create Azure host' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    # Idempotent on the host: Install-WindowsFeature is a no-op when the role is present.
+    $install = @'
+$ErrorActionPreference = 'Stop'
+$result = Install-WindowsFeature Hyper-V,DHCP -IncludeManagementTools
+if (-not $result.Success) { throw 'Hyper-V installation failed.' }
+Write-Output 'HYPERV_INSTALLED'
+'@
+    $job = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $install -AsJob
+    $result = Wait-LabJob $job 'Install Hyper-V and DHCP' -TimeoutSeconds 1800 -HealthPath $HealthPath
+    $null = Assert-LabRunResult $result 'HYPERV_INSTALLED'
+    $job = Restart-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -AsJob
+    $null = Wait-LabJob $job 'Restart Azure host' -TimeoutSeconds 900 -HealthPath $HealthPath
+    $ready = $false
+    $readinessClock = [Diagnostics.Stopwatch]::StartNew()
+    $deadline = (Get-Date).AddMinutes(15)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 20
+        try {
+            $job = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString "if ((Get-Service vmms).Status -ne 'Running') { throw 'Hyper-V not ready' }; Write-Output 'HYPERV_READY'" -AsJob
+            $probe = Wait-LabJob $job 'Check Hyper-V readiness' -TimeoutSeconds 120 -HealthPath $HealthPath
+            $null = Assert-LabRunResult $probe 'HYPERV_READY'
+            $ready = $true; break
+        } catch {
+            Write-LabHealth 'Check Hyper-V readiness' Warning $readinessClock.Elapsed.TotalSeconds 'VM agent and Hyper-V service are not ready; retrying within the readiness limit.' $HealthPath -TimeoutSeconds 900
+        }
+    }
+    if (-not $ready) { throw 'Hyper-V host did not become ready.' }
+    # The guest VHDs are fixed and consume 140 GB of the OS disk in full. Carve a dedicated
+    # partition for the appliance out of the remainder so the two never compete, and do it
+    # before any guest disk work so a capacity problem surfaces in minutes, not an hour.
+    $storeTemplate = @'
+$ErrorActionPreference = 'Stop'
+$requested = '__DRIVE__'
+$storeBytes = __STOREGB__GB
+$label = 'ApplianceStore'
+$guestReserveBytes = 140GB
+$existing = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($existing) {
+    $letter = $existing.DriveLetter
+} else {
+    # Only the host knows which letters are free. C: is the OS disk, and on a size with no
+    # local temporary disk Windows gives the next letter to the virtual DVD drive, so the
+    # first unassigned letter is normally E:. Nothing is moved or reassigned.
+    $taken = @()
+    $taken += @(Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.TrimEnd(':').ToUpperInvariant() })
+    $taken += @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.Length -eq 1 } | ForEach-Object { $_.Name.ToUpperInvariant() })
+    if ($requested) {
+        $letter = $requested.ToUpperInvariant()
+        if ($letter -in $taken) {
+            $occupant = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${letter}:'" -ErrorAction SilentlyContinue
+            $detail = if ($occupant) { "type $($occupant.DriveType), label '$($occupant.Label)'" } else { 'an existing drive' }
+            throw "Drive ${letter}: is already in use on this host ($detail). Omit -ApplianceStoreDriveLetter to take the first free letter, or choose another."
+        }
+    } else {
+        $letter = @(68..90 | ForEach-Object { [char]$_ }) | Where-Object { $_ -notin $taken } | Select-Object -First 1
+        if (-not $letter) { throw 'No unassigned drive letter is available for the appliance store.' }
+    }
+    $system = Get-Partition -DriveLetter C -ErrorAction Stop
+    $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
+    # Azure creates the OS disk at the requested size but leaves C: at the image's native
+    # size, so most of the disk is normally unallocated. SizeMax is what C: could occupy --
+    # its current size plus the adjacent free space -- so sizing C: to SizeMax minus the
+    # store leaves exactly the store free, whether that means growing C: or shrinking it.
+    $targetSize = $supported.SizeMax - $storeBytes
+    $usedBytes = $system.Size - (Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
+    # C: must still hold Windows, the base images and the 140 GB of fixed guest disks.
+    $needed = $guestReserveBytes + 60GB
+    $toGB = { param($b) [math]::Round($b / 1GB, 1) }
+    if ($targetSize -lt $supported.SizeMin) {
+        $maxStore = & $toGB ($supported.SizeMax - $supported.SizeMin)
+        throw ("Cannot reserve __STOREGB__ GB for the appliance store. C: is $(& $toGB $system.Size) GB and can range from $(& $toGB $supported.SizeMin) GB to $(& $toGB $supported.SizeMax) GB on this disk, so at most $maxStore GB can be set aside. Deploy with a larger OS disk, or pass -ApplianceStoreSizeGB with a value at or below $maxStore.")
+    }
+    if (($targetSize - $usedBytes) -lt $needed) {
+        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140 GB of fixed guest disks and their base images require. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB.")
+    }
+    if ($targetSize -ne $system.Size) {
+        $action = if ($targetSize -gt $system.Size) { 'Extending' } else { 'Shrinking' }
+        Write-Output ("{0} C: from {1} GB to {2} GB to free space for the appliance store." -f $action, (& $toGB $system.Size), (& $toGB $targetSize))
+        Resize-Partition -DriveLetter C -Size $targetSize -ErrorAction Stop
+    }
+    $partition = New-Partition -DiskNumber $system.DiskNumber -UseMaximumSize -DriveLetter $letter -ErrorAction Stop
+    $null = Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force -ErrorAction Stop
+}
+$store = Get-Volume -DriveLetter $letter -ErrorAction Stop
+if ($store.FileSystemLabel -ne $label) { throw "Drive ${letter}: is not the appliance store." }
+New-Item -ItemType Directory -Path "${letter}:\Appliance" -Force | Out-Null
+# Grant the lab administrator explicit rights so a non-elevated browser download can write here.
+& icacls.exe "${letter}:\Appliance" /grant:r '__ADMINUSER__:(OI)(CI)M' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not grant the lab administrator access to the appliance store.' }
+$system = Get-Volume -DriveLetter C -ErrorAction Stop
+Write-Output ("APPLIANCE_STORE_DRIVE|{0}" -f $letter)
+Write-Output ("Appliance store {0}: {1} GB free; system C: {2} GB free before guest disks." -f $letter,
+    [math]::Round($store.SizeRemaining/1GB,1), [math]::Round($system.SizeRemaining/1GB,1))
+Write-Output 'APPLIANCE_STORE_READY'
+'@
+    $storeScript = $storeTemplate.Replace('__DRIVE__', $ApplianceStoreDriveLetter.ToUpperInvariant()).Replace('__STOREGB__', [string]$ApplianceStoreSizeGB).Replace('__ADMINUSER__', $AdminUsername)
+    $job = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $storeScript -AsJob
+    $storeResult = Wait-LabJob $job 'Create appliance store partition' -TimeoutSeconds 1800 -HealthPath $HealthPath
+    $storeOutput = Assert-LabRunResult $storeResult 'APPLIANCE_STORE_READY'
+    $driveMatch = [regex]::Match($storeOutput, '(?m)^APPLIANCE_STORE_DRIVE\|([A-Z])\r?$')
+    if (-not $driveMatch.Success) { throw 'The appliance store step did not report which drive letter it used.' }
+    $storeDrive = $driveMatch.Groups[1].Value
+    $appliancePath = "${storeDrive}:\Appliance"
+    Write-Host "Appliance store created as ${storeDrive}: ($ApplianceStoreSizeGB GB)."
+    $stagingSummary = @($storeOutput -split "`n" | Where-Object { $_ -match 'GB free' } | ForEach-Object { $_.Trim() })[0]
+    if (Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -ErrorAction SilentlyContinue) {
+        Write-Host 'Reusing the existing guest image disk.'
+    } else {
+        $job = New-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Disk $guestDiskConfig -AsJob
+        $null = Wait-LabJob $job 'Create guest image disk' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
+    }
+    $diskCreated = $true
+    $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName -Access Read -DurationInSecond 18000
+    $parameters = @(
+        @{ Name = 'AdminUsername';       Value = $AdminUsername }
+        @{ Name = 'IncludeApplianceVhd'; Value = $IncludeApplianceVhd }
+        @{ Name = 'ApplianceVhdSha256';  Value = $ApplianceVhdSha256 }
+    )
+    $protected = @(@{ Name = 'AdminPassword'; Value = $passwordPlain }, @{ Name = 'WindowsVhdSasUrl'; Value = $access.AccessSAS })
+    # A Run Command left by an interrupted attempt would block the new submission.
+    $staleRun = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction SilentlyContinue
+    if ($staleRun) {
+        Write-Host 'Removing the Run Command left by the previous attempt before resubmitting.'
+        Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction Stop | Out-Null
+    }
+    $runCreated = $true
+    $job = Set-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -Location $Location -RunCommandName $runName `
+        -SourceScript $hostScript -Parameter $parameters -ProtectedParameter $protected -TimeoutInSecond ($GuestSetupTimeoutMinutes * 60) -AsyncExecution -AsJob
+    $null = Wait-LabJob $job 'Submit guest setup' -TimeoutSeconds 900 -HealthPath $HealthPath
+    $null = Wait-LabManagedSetup -ReadStatus {
+        Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
+    } -Observation $setupObservation -TimeoutSeconds (($GuestSetupTimeoutMinutes * 60) + 600) -HealthPath $HealthPath
+    $setupPassed = $true
+    Write-Host "Workload setup verified. Host public IP: $($pip.IpAddress). Host login: $AdminUsername."
+    Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
+    Write-Host 'Contoso Order Desk runs on Tomcat 10.1 / OpenJDK 17 at .13:3000; initial SQL and Nginx proxy readiness passed.'
+    Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
+    if ($stagingSummary) { Write-Host $stagingSummary }
+    Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
+    Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
+    if ($IncludeApplianceVhd -eq 'Yes') {
+        # Rehash the actual ZIP: the completion record may predate a manual replacement.
+        $stagedHash = $null
+        $stagedArchive = $null
+        try {
+            $readHash = @'
+$ErrorActionPreference = 'Stop'
+$root = '__ROOT__'
+$recordPath = Join-Path $root 'download-complete.json'
+$record = $null
+if (Test-Path -LiteralPath $recordPath) { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json }
+$archive = if ($record -and $record.Archive) { [string]$record.Archive } else { Join-Path $root 'MigrateAppl.zip' }
+$prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+$full = [IO.Path]::GetFullPath($archive)
+if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Recorded archive is outside ApplianceStore. Select and verify the correct ZIP manually.' }
+$item = Get-Item -LiteralPath $full -ErrorAction Stop
+if ($item.PSIsContainer -or $item.Extension -ne '.zip' -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Recorded archive is not a regular ZIP file.' }
+$hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+$recorded = if ($record) { [string]$record.ArchiveSha256 } else { '' }
+$result = [ordered]@{ Archive=$item.FullName; Bytes=$item.Length; ActualSha256=$hash; RecordedSha256=$recorded }
+Write-Output ('APPLIANCE_ARCHIVE_JSON|' + ($result | ConvertTo-Json -Compress))
+'@
+            $readHash = $readHash.Replace('__ROOT__', $appliancePath.Replace("'", "''"))
+            $hashResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $readHash -ErrorAction Stop
+            $hashText = (@($hashResult.Value | Where-Object { $_.Code -match 'StdOut' } | ForEach-Object { $_.Message }) -join "`n").Trim()
+            if ($hashText -match '(?m)^APPLIANCE_ARCHIVE_JSON\|([^\r\n]+)') {
+                $stagedArchive = $Matches[1] | ConvertFrom-Json
+                if ($stagedArchive.ActualSha256 -match '^[0-9A-Fa-f]{64}$') { $stagedHash = $stagedArchive.ActualSha256.ToUpperInvariant() }
+            }
+        } catch { Write-Warning 'Could not rehash the exact staged ZIP. Inspect its filename and completion record on the host; verify manually before import.' }
+
+        Write-Host ''
+        if (-not $stagedHash) {
+            Write-Warning 'The actual appliance ZIP could not be rehashed. A missing/renamed ZIP or stale completion record is not proof of corruption. Select the exact file and verify it before import (Module 1, section 3.3).'
+        } else {
+            # Reference value, recorded from the 'Verify security' table in the appliance article
+            # on 2026-09-27, in the same row as the download link the host used. It is ADVISORY,
+            # not authoritative: Microsoft republishes the appliance periodically, and when they
+            # do this value goes stale while the download stays correct. So a mismatch is
+            # reported as ambiguous rather than as a failure - see VersionNotes.md section 41.
+            $referenceHash = 'AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24'
+            $referenceDate = '2026-09-27'
+
+            Write-Host 'Azure Migrate appliance staged on the host.' -ForegroundColor Cyan
+            Write-Host "  ZIP file : $($stagedArchive.Archive)"
+            Write-Host "  Bytes    : $($stagedArchive.Bytes)"
+            Write-Host "  SHA256   : $stagedHash (freshly read from this ZIP)"
+            if (-not $stagedArchive.RecordedSha256) {
+                Write-Host '  Historical record: absent; not used as verification.'
+            } elseif ($stagedHash -eq $stagedArchive.RecordedSha256) {
+                Write-Host '  Historical record: MATCH to the freshly computed ZIP hash (not a current publisher check).'
             } else {
-                Write-Output "WARNING: setup.exe not found in downloaded media. Listing contents:"
-                Get-ChildItem `$sqlMediaPath -Recurse | Select-Object FullName | ForEach-Object { Write-Output `$_.FullName }
+                Write-Warning "Historical record: MISMATCH ($($stagedArchive.RecordedSha256)). The ZIP or record may have been replaced; extraction provenance needs review."
             }
-        } else {
-            Write-Output "SQL Server Express is already installed."
+            if ($stagedHash -eq $referenceHash) {
+                Write-Host "  Matches the appliance published as of $referenceDate." -ForegroundColor Green
+            } else {
+                Write-Host ''
+                Write-Warning "This does not match the appliance recorded on $referenceDate ($($referenceHash.Substring(0,16))...)."
+                Write-Warning 'Possible causes include a different published version, artifact type, download source or changed/incomplete bytes. This comparison alone does not identify the cause.'
+                Write-Host '    Do not import until this exact ZIP matches the current official Hyper-V ZIP hash.' -ForegroundColor White
+            }
+            Write-Host '  Published value, "Verify security" table:' -ForegroundColor Gray
+            Write-Host '  https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security' -ForegroundColor Gray
+            if ($ApplianceVhdSha256) {
+                if ($stagedHash -eq $ApplianceVhdSha256.ToUpperInvariant()) {
+                    Write-Host '  Fresh ZIP comparison against the hash supplied at the command line: MATCH.' -ForegroundColor Green
+                } else {
+                    Write-Warning "Fresh ZIP comparison against the supplied hash: MISMATCH (expected $ApplianceVhdSha256, actual $stagedHash). Do not import; retain the ZIP for inspection."
+                }
+            } elseif ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
+                Write-Host ''
+                $published = (Read-Host '  Paste the published SHA256 to verify now, or press Enter to verify later').Trim()
+                if (-not $published) {
+                    Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
+                } elseif ($published -notmatch '^[0-9A-Fa-f]{64}$') {
+                    Write-Warning 'That is not a 64-character SHA256 value. The archive is unverified; check it before importing.'
+                } elseif ($published.ToUpperInvariant() -eq $stagedHash) {
+                    Write-Host '  MATCH. The staged appliance is the published build.' -ForegroundColor Green
+                    if ($published.ToUpperInvariant() -ne $referenceHash) {
+                        Write-Host "  Note: the supplied value differs from the advisory reference recorded on $referenceDate." -ForegroundColor Gray
+                        Write-Host '  Confirm its current official artifact row before updating the reference.' -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host ''
+                    Write-Warning "MISMATCH (expected $published, actual $stagedHash). Check the current Hyper-V ZIP row, exact artifact and source; the cause is not established."
+                    Write-Warning 'Do not import or bypass verification. Retain the ZIP for inspection; do not delete extracted folders that might contain VM disks (Module 1, section 3.3).'
+                }
+            } else {
+                Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
+            }
         }
-
-        # Create sample database using PowerShell SqlServer module
+    } else {
+        Write-Host "Download and extract the Azure Migrate appliance VHD into $appliancePath on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
+    }
+} catch {
+    try {
+        $lastHealth = Get-Content -LiteralPath $HealthPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($lastHealth.State -ne 'NeedsReview') {
+            Write-LabHealth 'Source deployment' NeedsReview $deploymentClock.Elapsed.TotalSeconds "Deployment stopped after $($lastHealth.Stage). Inspect the terminal and Azure/host diagnostics before retrying." $HealthPath
+        }
+    } catch { Write-Warning 'Could not update the local health summary. Preserve the terminal error and inspect Azure directly.' }
+    throw
+} finally {
+    Complete-LabProgress
+    $passwordPlain = $null
+    $subscriptionIdPlain = $null
+    $adminSourceCidrPlain = $null
+    $protected = $null
+    if ($diskCreated -and (-not $runCreated -or $setupObservation.Terminal)) {
         try {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction SilentlyContinue | Out-Null
-            Install-Module -Name SqlServer -Force -AllowClobber -ErrorAction SilentlyContinue
-
-            Invoke-Sqlcmd -ServerInstance ".\SQLEXPRESS" -Query "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'ContosoApp') CREATE DATABASE ContosoApp;" -ErrorAction Stop
-
-            `$createTables = "USE ContosoApp; IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Customers') BEGIN CREATE TABLE Customers (CustomerID INT PRIMARY KEY IDENTITY(1,1), FirstName NVARCHAR(50), LastName NVARCHAR(50), Email NVARCHAR(100), City NVARCHAR(50), CreatedDate DATETIME DEFAULT GETDATE()); INSERT INTO Customers (FirstName, LastName, Email, City) VALUES ('Alice','Johnson','alice@contoso.com','Seattle'),('Bob','Smith','bob@contoso.com','Portland'),('Carol','Williams','carol@contoso.com','San Francisco'),('Dave','Brown','dave@contoso.com','Los Angeles'),('Eve','Davis','eve@contoso.com','Denver'); END; IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Orders') BEGIN CREATE TABLE Orders (OrderID INT PRIMARY KEY IDENTITY(1,1), CustomerID INT FOREIGN KEY REFERENCES Customers(CustomerID), ProductName NVARCHAR(100), Quantity INT, UnitPrice DECIMAL(10,2), OrderDate DATETIME DEFAULT GETDATE()); INSERT INTO Orders (CustomerID, ProductName, Quantity, UnitPrice) VALUES (1,'Azure Certification Guide',2,49.99),(2,'Cloud Architecture Poster',1,19.99),(3,'DevOps Handbook',3,39.99),(1,'Kubernetes Stickers',10,4.99),(4,'Serverless Cookbook',1,34.99); END;"
-            Invoke-Sqlcmd -ServerInstance ".\SQLEXPRESS" -Query `$createTables -ErrorAction Stop
-            Write-Output "Sample database 'ContosoApp' created with Customers and Orders tables."
-        } catch {
-            Write-Output "WARNING: Could not create sample database: `$_"
-        }
-    } -ArgumentList `$guestAdminPwd -ErrorAction Stop
-
-    Write-Log "OnPrem-SQL configured successfully."
-} catch {
-    Write-Log "ERROR configuring OnPrem-SQL: `$_"
-}
-
-# ---- OnPrem-Linux-Web: Nginx + sample HTML site (deployed via cloud-init) ----
-Write-Log "--- OnPrem-Linux-Web (192.168.0.12): workloads deployed via cloud-init ---"
-Wait-ForGuestVM -VMName "OnPrem-Linux-Web" | Out-Null
-Write-Log "OnPrem-Linux-Web is running. Nginx and sample site configured via cloud-init."
-
-# ---- OnPrem-Linux-App: Node.js 20 + Express.js app (deployed via cloud-init) ----
-Write-Log "--- OnPrem-Linux-App (192.168.0.13): workloads deployed via cloud-init ---"
-Wait-ForGuestVM -VMName "OnPrem-Linux-App" | Out-Null
-Write-Log "OnPrem-Linux-App is running. Node.js app configured via cloud-init."
-
-# =============================================================
-# Done
-# =============================================================
-Write-Log "=========================================="
-Write-Log "  LAB SETUP COMPLETE"
-Write-Log "=========================================="
-Write-Log "Guest VMs:"
-Write-Log "  OnPrem-Web       192.168.0.10  Windows + IIS"
-Write-Log "  OnPrem-SQL       192.168.0.11  Windows + SQL Server 2022 Express"
-Write-Log "  OnPrem-Linux-Web 192.168.0.12  Ubuntu 22.04 + Nginx"
-Write-Log "  OnPrem-Linux-App 192.168.0.13  Ubuntu 22.04 + Node.js"
-Write-Log "=========================================="
-"@
-
-# The script above is very large; Invoke-AzVMRunCommand has a 256 KB limit
-# which is plenty for this script. Run it.
-Write-Log "Running Invoke-AzVMRunCommand for full Hyper-V + VM + workload configuration..."
-Write-Log "This will take 30-45 minutes (image downloads, VM creation, workload installation)."
-try {
-    $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName `
-        -CommandId 'RunPowerShellScript' -ScriptString $configureEverythingScript -ErrorAction Stop
-    foreach ($msg in $result.Value) {
-        Write-Log "  [$($msg.Code)] $($msg.Message)"
+            Revoke-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName | Out-Null
+            Remove-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -Force | Out-Null
+        } catch { Write-Warning 'Temporary disk cleanup failed. Revoke its export access and remove WinServerBase-temp in the source resource group.' }
+    } elseif ($diskCreated) {
+        Write-Warning 'Setup termination is unconfirmed. WinServerBase-temp is retained so a running download is not interrupted. Its export access expires after five hours; revoke access and remove the disk after confirming ConfigureWorkshop has stopped.'
     }
-} catch {
-    Write-Log "WARNING: VM configuration command failed: $_"
-    Write-Log "You can RDP into the VM and check C:\AzMigrateLab\setup-log.txt for details."
-}
-
-# ================================================================
-# SECTION 6 — Cleanup temp resources & Output Connection Info
-# ================================================================
-
-# Cleanup temporary managed disk used for Windows VHD
-try {
-    $tempDisk = Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName "WinServerBase-temp" -ErrorAction SilentlyContinue
-    if ($tempDisk) {
-        Revoke-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName "WinServerBase-temp" -ErrorAction SilentlyContinue | Out-Null
-        Remove-AzDisk -ResourceGroupName $ResourceGroupName -DiskName "WinServerBase-temp" -Force -ErrorAction SilentlyContinue | Out-Null
-        Write-Log "Cleaned up temporary marketplace disk."
+    if ($runCreated -and $setupPassed) {
+        try { Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName | Out-Null }
+        catch { Write-Warning 'Managed Run Command removal failed. Inspect and remove ConfigureWorkshop from the host when it has stopped.' }
+    } elseif ($runCreated) {
+        Write-Warning 'ConfigureWorkshop is retained for failure diagnostics. Inspect its instance view and remove it after it has stopped.'
     }
-} catch {
-    Write-Log "WARNING: Could not cleanup temp disk: $_"
 }
 
-Write-Log "=========================================="
-Write-Log "  DEPLOYMENT COMPLETE"
-Write-Log "=========================================="
-
-$pip = Get-AzPublicIpAddress -Name $publicIpName -ResourceGroupName $ResourceGroupName -ErrorAction Stop
-Write-Log "Host VM Public IP : $($pip.IpAddress)"
-Write-Log "RDP Connection    : mstsc /v:$($pip.IpAddress)"
-Write-Log "Username          : $AdminUsername"
-Write-Log "Password          : (as provided)"
-Write-Log ""
-Write-Log "Guest VMs (inside Hyper-V host via RDP):"
-Write-Log "  OnPrem-Web       192.168.0.10  Windows + IIS              (http://192.168.0.10)"
-Write-Log "  OnPrem-SQL       192.168.0.11  SQL Server 2022 Express    (192.168.0.11:1433)"
-Write-Log "  OnPrem-Linux-Web 192.168.0.12  Ubuntu 22.04 + Nginx       (http://192.168.0.12)"
-Write-Log "  OnPrem-Linux-App 192.168.0.13  Ubuntu 22.04 + Node.js     (http://192.168.0.13:3000)"
-Write-Log ""
-Write-Log "Linux VM credentials:  $AdminUsername / (as provided)"
-Write-Log "Windows guest admin:   Administrator / (as provided)"
-Write-Log ""
-Write-Log "Check detailed logs on the host VM at: C:\AzMigrateLab\setup-log.txt"
-Write-Log "To clean up: .\cleanup-lab.ps1 -ResourceGroupName '$ResourceGroupName'"
-Write-Log "=========================================="
+# A right-click window closes on success just as fast as on failure. The summary above is the
+# point of the run, so hold it until it has been read.
+Wait-LabBeforeExit
