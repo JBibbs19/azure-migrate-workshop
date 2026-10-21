@@ -2,8 +2,6 @@
 
 **TD SYNNEX | Cloud Enablement Services**
 
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Read [PILOT-README](../PILOT-README.md) first. This separate pilot teaches two replication methods and one planned four-VM final cutover. Existing labs, registered appliances, and protected VMs are not reusable pilot sources.
-
 In this module you build the on-premises environment that the rest of the workshop migrates: one Azure VM running Hyper-V, with four nested guest VMs standing in for a small business's servers. A single script provisions all of it, and you finish by verifying that every workload actually responds.
 
 **Where to run:** Run the Azure commands from your own workstation or PowerShell Cloud Shell. Run the Hyper-V commands in an elevated Windows PowerShell session **inside HyperVHost**, the host VM you are about to create.
@@ -80,7 +78,7 @@ Use a non-production subscription such as Dev/Test or Sandbox. Azure Policy can 
 
 The default source host needs **8 Azure vCPUs**. The four nested workloads and the appliance added later consume the host's resources; they are not separate Azure VM allocations. Regional vCPU quota, the selected VM family's quota and VM-count quota all matter. Deallocating an Azure VM does not release its vCPU quota.
 
-The inherited `B2s` / `B2ms` / `B1ms` / `B1ms` examples total **6 vCPUs**; an all-four two-vCPU example totals **8**. These are **not pilot-approved sizes**. In particular, all actual source guests have two vCPUs, so the one-vCPU Linux examples require manual support/downsize review. Calculate actual target/test quota from the approved per-role selections and overlap; do not infer them from the unchanged script menus. Plan the separately approved replication-appliance hosting allocation independently.
+The `B2s` / `B2ms` / `B1ms` / `B1ms` examples total **6 vCPUs**; an all-four two-vCPU example totals **8**. These are **not approved target-size selections**. In particular, all actual source guests have two vCPUs, so the one-vCPU Linux examples require manual support/downsize review. Calculate actual target/test quota from the approved per-role selections and overlap; do not infer them from script menus. Plan the separately approved replication-appliance hosting allocation independently.
 
 You can review quota in the portal or with PowerShell. Use either method.
 
@@ -192,19 +190,21 @@ Setup also needs HTTPS access to the Windows image and package sources, Ubuntu c
 
 **Expected Result:** You have a permitted management path and access to the setup downloads. You can supply one public IPv4 address, optionally with `/32`, for the host's RDP rule.
 
-### 3.6 — Isolated Two-Method Pilot Gate
+### 3.6 — Two-Method Resources and Isolation
 
-The unchanged deployment builds the source lab and reserves storage for the **Module 1 discovery appliance only**. It does not provide Module 3's additional modern replication appliance. The 8-vCPU / 64-GB host has a **512-GB OS disk**, including guests and its 100-GB ApplianceStore partition: that is not capacity for an additional appliance needing a separate 620-GB data disk. Do not resize the host, repartition it, shrink workload disks, or alter deployment scripts for this pilot.
+Deployment builds the source lab and reserves storage for the **Module 1 discovery appliance only**. It does not provide Module 3's additional modern replication appliance. The 8-vCPU / 64-GB host has a **512-GB OS disk**, including guests and its 100-GB ApplianceStore partition: that is not capacity for an additional appliance needing a separate 620-GB data disk. Do not resize the host, repartition it, shrink workload disks, or alter deployment scripts to accommodate that appliance.
 
 #### Hands-On Steps
 
-**Local workstation — student notes:**
+**Local workstation — lab register/worksheet:**
 
-1.  Choose a unique pilot namespace for new source, project, target, and test resources.
+1.  Choose unique names for new source, project, target, and test resources.
 
-2.  Deploy a fresh source resource group and host using the unchanged command below, supplying your new source group name.
+    Use the examples `rg-ces-target-01`, `vnet-ces-target-01`, `nsg-ces-target-01`, `vnet-ces-test-01` and `nsg-ces-test-01` consistently in your register, substituting your approved unique names where needed.
 
-    Keep the four guest names exactly as listed in Section 1, on this separate host. Their VM IDs must be new. Do not reuse, clone, or dual-protect previously replicated source VMs, or clone an already registered discovery/replication appliance. Clearing existing bindings is not verified by this documentation; prefer a clean deployment instead.
+2.  Deploy a fresh source resource group and host using the command below, supplying your new source group name.
+
+    Keep the four guest names exactly as listed in Section 1, on this separate host. Their VM IDs must be new. Do not reuse, clone, or dual-protect previously replicated source VMs, or clone an already registered discovery/replication appliance. Use a clean deployment rather than assuming existing replication bindings can be cleared safely.
 
 3.  Record the new source host resource ID and the four new Hyper-V VM IDs before registration.
 
@@ -212,15 +212,19 @@ The unchanged deployment builds the source lab and reserves storage for the **Mo
 
 5.  Record its actual machine/hosting identity, storage free space, licensing, source-guest connectivity, outbound path, permissions, capacity, and cost approval.
 
-    **STOP before Module 3 appliance deployment if any value is unverified.** Do not count the existing host partition twice, assume the minimum is a larger 16-CPU/32-GB tier, use `MigrateAppl`, or make a workload VM its own replication appliance. Additional capacity is separately reviewed and manually provisioned; this document does not deploy it.
+    **STOP before Module 3 appliance deployment if any value is unverified.** Do not count the existing host partition twice, assume the minimum is a larger 16-CPU/32-GB tier, use `MigrateAppl`, or make a workload VM its own replication appliance. The appliance must meet the current language/Desktop Experience and other prerequisites, without the Hyper-V role. Verify support for the actual hosting placement; minimum resources alone do not establish support. Additional capacity is separately reviewed and manually provisioned; this document does not deploy it.
 
-6.  Review the actual target sizes and test/target overlap in Modules 2–3. Historical B1/B2 examples are not pilot-approved choices: all four sources have two vCPUs. Resolve any downsizing or support conflict manually; neither an assessment recommendation nor a script menu reserves capacity.
+6.  Review the actual target sizes and test/target overlap in Modules 2–3. B1/B2 examples are not approved choices: all four sources have two vCPUs. Resolve any downsizing or support conflict manually; neither an assessment recommendation nor a script menu reserves capacity.
 
 7.  Before **either** method enables protection, obtain owner verification of the intended project, provider/appliance registrations, Migrate-managed vault associations and **current mixed-method compatibility**.
 
-    This is **UNKNOWN / STOP** in this documentation-only pilot. Do not force both methods into a shared vault, declare them incompatible, silently create separate projects, guess a blank vault ID, or patch bindings/scripts. Any required architecture change is separately approved owner work.
+    **Stop if the intended associations or compatibility cannot be verified.** Do not force both methods into a shared vault, declare them incompatible, silently create separate projects, guess a blank vault ID, or patch bindings/scripts. Resolve any required architecture change with the owner before proceeding.
 
-**Expected Result:** A separate pilot scope is recorded, and the extra appliance capacity is either explicitly approved or marked **DEFERRED / STOP**.
+8.  Before installing Mobility Service, verify each SQL/App source's actual OS, architecture, guest storage/boot/security configuration and supported Mobility version; for Linux, include the exact running `uname -r` kernel. Follow Module 3's current support checks rather than assuming Ubuntu 24.04 or an assessment's Ready result is sufficient.
+
+9.  Keep the test VNet isolated from source and final-target networks **before any test VM first boots**. Record actual test VM/NIC identities and permit only approved test peers; stop/disarm inherited network generators and CPU workers before functional tests.
+
+**Expected Result:** The lab register identifies fresh resources, approved extra appliance hosting and the support, association and isolation checks required before replication or testing. Stop at any unmet prerequisite.
 
 **CSA Why:** Two replication methods need separate supported components and identities; spare memory does not create the additional appliance's required disk capacity.
 
@@ -356,7 +360,7 @@ Azure commands act on the active subscription. Select it explicitly before creat
 
 ### Step 4: Deploy the Lab Environment
 
-Running `deploy-lab.ps1` is your deployment action. It creates the source host, networking and four workloads; you do not manually recreate those guests. The target landing zone is left for Module 2, and the appliance download and import are left for Module 1.
+Running `deploy-lab.ps1` is your deployment action. It creates the source host, networking and four workloads; you do not manually recreate those guests. The target landing zone is left for Module 2. Appliance download/extraction can be selected during deployment; import and registration remain manual in Module 1.
 
 #### Values You Decide in This Step
 
@@ -423,7 +427,9 @@ Choose **one** of the two options below.
 
 8.  When asked **Stage the Azure Migrate appliance VHD on the host during deployment?**, answer **No** or press Enter.
 
-    Module 1 downloads the appliance when it is needed.
+    Module 1 downloads the appliance when it is needed. For instructor preparation, answer **Yes** (or use `-IncludeApplianceVhd Yes`) to stage it during deployment instead. Its background download/extraction starts in the OS image phase and overlaps ADK/QEMU and workload setup; deployment collects the staging result before final host readiness. **No** starts no appliance download or staging job.
+
+    There is no end-of-deployment checksum prompt. The host still computes SHA256 and enforces `-ApplianceVhdSha256` if supplied; otherwise the archive is staged **unverified**, not publisher-verified. The recommended manual publisher check remains optional in Module 1 §2.1.
 
 9.  Follow the deployment's progress to completion.
 
@@ -464,11 +470,13 @@ Instead of answering the prompts, you can set the values as variables first and 
 | Infrastructure | Creates the source group, VNet, NSG, public IP, NIC and Windows HyperVHost. |
 | Hyper-V installation | Installs Hyper-V and restarts the host. |
 | Network setup | Creates `intSwitch`, host NAT and DHCP reservations for the guests. |
-| Appliance storage | Creates the 100 GB appliance store partition on the host OS disk. No appliance VM is imported. |
+| Appliance storage | Creates the 100 GB appliance store partition on the host OS disk. If selected, appliance download/extraction starts during image preparation and its result is collected before final readiness. No appliance VM is imported. |
 | Guest provisioning | Creates the four fixed-disk guests and installs IIS, SQL Server, Nginx and the SQL-connected Tomcat order desk. |
-| Traffic generator | Places the optional sample-traffic script on the host for Section 6. Nothing starts it. |
+| Traffic generator | Stages the source controller, settings and CPU assets on the host for Section 6. After deployment preparation and cleanup finish, interactive deployment offers network traffic, then independent optional CPU simulation; both prompts default to No. |
 
 **Expected Result:** Deployment completes and prints the host's public IP. Detailed setup progress is recorded at `C:\AzMigrateLab\setup-log.txt` on the host. Do not interrupt a progressing deployment merely because a stage is slow.
+
+> **Wait before RDP:** Do not access HyperVHost while deployment is preparing it. Wait for the four-workload readiness summary, the selected appliance staging result, and the **Deployment process ended** timing message (cleanup included). A successful selected stage means download, extraction and recording finished before host readiness; a **NOT COMPLETE** warning means staging failed or could not be confirmed, not success. Let deployment finish first, then resolve staging through Module 1 §2.1 before manual import. An existing ZIP rehash alone does not verify previously extracted files.
 
 ### Step 5: Connect to the Hyper-V Host
 
@@ -627,85 +635,70 @@ Only if a check fails, read the recent setup entries and identify the failed wor
 
 ## 6. Start the Sample Business Traffic
 
-Network sample traffic and CPU simulation are **independent, optional choices**. The
-learning objective is to distinguish application dependencies from CPU utilization:
-network activity can make connections easier to observe, while local CPU calculations
-add no network dependency. You may decline either or both and continue the workshop.
-Feature availability, installation and control are covered in the
-[operator guide](Lab-Traffic.md); applying documentation alone does not install CPU support.
+**Network lab traffic is required before discovery. CPU simulation is optional and independent.** Initial deployment already connects Tomcat to SQL and supplies the Nginx proxy, but dependency results will not appear correctly without the lab traffic that exercises those connections. An empty or partial map is not proof that no dependency exists. Azure Migrate still needs its collection/upload window; starting traffic does not produce an instant complete map.
 
-Initial deployment already connects the Tomcat order desk to SQL and supplies the Nginx proxy. Without traffic, most HTTP connections between the workloads are idle, and Azure Migrate's dependency analysis can miss them; an empty or partial map is not proof that no dependency exists.
+The network generator sends low-rate HTTP through Nginx → Tomcat → SQL, including real sample-order writes. The Windows task reads SQL orders and checks application health. Python does not connect directly to SQL; Tomcat performs the application's database reads and writes.
 
-The traffic script generates low-rate HTTP through Nginx into Tomcat and adds a scheduled task on `OnPrem-Web` that reads orders from SQL and calls the order desk's health check. Database reads and writes for the Linux application stay in the Tomcat application itself; the generator never connects directly to SQL. `OnPrem-SQL` then appears as a shared dependency of both application tiers — which is the conversation a customer needs to have before moving anything.
-
-If you choose either optional component, use the startup steps below after the checks in Section 5 pass and before you begin Module 1. With network traffic enabled, requests can be flowing when discovery starts. Dependency analysis samples active connections on a polling interval rather than recording continuously, so traffic that starts minutes before you open the map may not appear in it.
+> **If you declined the deployment network offer, complete this section before Module 1 discovery.** The prompt defaults to No for consent; that default does not make the student traffic exercise optional.
 
 #### Hands-On Steps
 
-**HyperVHost — browser:**
+**HyperVHost — elevated Windows PowerShell, after deployment and Section 5 checks:**
 
-1.  Open `http://192.168.0.12:8080/` and inspect the source Order Desk through Nginx.
+1.  Confirm that deployment preparation and cleanup have ended and that all Section 5 checks pass. Normal interactive deployment offers **network lab traffic [No]**, then **optional CPU Simulation [No]**, after its end/elapsed messages. Answer **Yes** to network traffic for this lab; CPU may remain No. No Azure Migrate project or appliance download is needed for source startup.
 
-2.  For an approved manual activity check, select an existing customer and submit **one** clearly identified sample order; record its ID and read it back.
-
-    Do not repeatedly submit an uncertain result. This is a real SQL write, not a load-test tool.
-
-**Source OnPrem-Web — approved Windows PowerShell:**
-
-3.  If the optional generator has already been provisioned under separate instructor approval, inspect its existing task:
+2.  If you already accepted network startup and its result was confirmed successful, **do not repeat Start**; continue to Step 3. Otherwise, if it was declined or skipped, start the already staged source controller explicitly:
 
     ```powershell
-    Get-ScheduledTask -TaskName 'LabOrderDeskTraffic' -ErrorAction SilentlyContinue |
-        Select-Object TaskName,State
+    C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Start -Component Network -CpuSimulation Skip
     ```
 
-4.  Only if that exact existing source task is approved and intended to run, use Task Scheduler to enable/start it. If absent, record **not provisioned**; do not install new generators or run workshop helpers to satisfy this pilot.
+    Enter the existing lab password privately at the controller's masked prompt. Do not put a password literal in the command. This starts network activity only, without starting or renewing CPU simulation. An unknown/partial deployment result may already have started generators: inspect Status and use Stop if needed **before any retry**. Do not rerun deployment or run this source controller on test/target VMs or retired sources.
 
-**Source OnPrem-Linux-App — SSH session:**
-
-5.  Inspect the existing optional source traffic unit, if present:
-
-    ```bash
-    systemctl status contoso-orderdesk-traffic.service --no-pager
-    ```
-
-6.  Only if the exact installed unit and source aliases are verified and approved, use `sudo systemctl start contoso-orderdesk-traffic.service` for that existing source unit. If absent, record **not provisioned** and continue; no runtime retrofit is part of this exercise.
-
-**HyperVHost — Windows PowerShell:**
-
-7.  Read source readiness and the **total** order count:
+3.  Inspect source network traffic without restarting it:
 
     ```powershell
+    C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Network
+    ```
+
+    Confirm the Windows network task is running and the Linux network generator is active. If either is partial or unknown, resolve it before discovery; do not treat a controller exit message alone as sustained application health.
+
+4.  Check direct and proxied readiness, then read the **total** order count:
+
+    ```powershell
+    Invoke-RestMethod http://192.168.0.13:3000/api/ready
     Invoke-RestMethod http://192.168.0.12:8080/api/ready
     $orders = Invoke-RestMethod http://192.168.0.13:3000/api/orders
     $orders | Select-Object count,customerCount
     ```
 
-8.  If synthetic orders are active, wait a minute or two and repeat the read. Use API `count`, not `.orders.Count`: the returned `orders` array contains at most 20 recent rows.
+5.  Wait a minute or two and repeat Step 4. Confirm readiness remains `ready` and API `count` rises. Record both totals in your lab register/worksheet. Use API `count`, not `.orders.Count`: the returned `orders` array contains at most 20 recent rows.
 
-**Expected Result:** Manual source order entry works; any already-provisioned optional traffic is either verified active or honestly recorded absent/declined. No migration helper or new generator installation was used. The database and proxy remain available.
+6.  Only for an approved troubleshooting stop, stop network generators without stopping applications or changing CPU simulation:
+
+    ```powershell
+    C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Stop -Component Network
+    ```
+
+    SQL, Tomcat, Nginx, IIS and existing data remain in place. Restore and verify required source network traffic before continuing discovery.
+
+**Expected Result:** Source network generators are active, direct/proxy readiness succeeds and two total-order reads demonstrate ongoing activity before Module 1. Keep the traffic running while Azure Migrate collects dependencies. See [README — Lab Traffic](../README.md#lab-traffic) for settings, credentials and detailed outcomes.
 
 > **Traffic boundary:** Keep all four source workloads serving, including already enabled synthetic orders, during discovery and both methods' initial/delta replication and isolated tests. Stop/disarm **copied** generators in test guests before functional traffic. Freeze source manual and synthetic writes only at Module 3's final planned cutover boundary (or an explicitly approved troubleshooting stop), not because replication starts. Use Module 3's ordinary per-guest stop controls, not a workshop helper.
 
-**Optional CPU observation:** In each Windows guest, open **Task Manager > Performance >
-CPU**. In each Linux guest, use `top` and inspect the aggregate CPU summary, not an
-individual process percentage. Observe over several minutes and note UTC time.
-Across each existing two-vCPU guest, the approximate **total** CPU targets are **15%
-from 06:00–22:00 UTC** (16 hours) and **2% from 22:00–06:00 UTC** (8 hours), with no
-peak period. Existing application/OS activity can exceed these targets: synthetic work
-then rests and cannot cap real application CPU.
+### Optional CPU Simulation
 
-CPU simulation defaults to a bounded 24-hour run and does not resume after reboot,
-unlike the network generator. For the full 16/8-hour profile, collect a complete
-24 hours while appliance performance collection is active, and match the full selected
-history window to captured data for the [optional second performance-based portal
-assessment in Module 1](Module-1-Discovery.md#56--optional-performance-comparison-and-business-case).
-Earlier data may be partial; the required **As on-premises** assessment does not use CPU
-history. This is educational CPU history, not a production benchmark or RAM/I/O simulation.
+CPU simulation adds local calculation work, **not network dependencies**, and is not required for the dependency exercise. If wanted, use the following in **HyperVHost — elevated Windows PowerShell**; do not repeat a confirmed deployment CPU Start or renew it unintentionally:
 
-No additional VM, resizing or paid service is created. CPU activity on the existing
-fixed-price VM has no separate usage fee, but keeping the lab running longer continues
-normal compute/storage charges.
+Run only the action needed; these are not a sequence. Stop ends the CPU run.
+
+```powershell
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Start -Component Cpu -CpuDurationHours 24
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Cpu
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Stop -Component Cpu
+```
+
+The default is 24 hours, with no reboot auto-resume. Stop source CPU simulation before migration testing or cutover. See [README — Optional CPU Simulation](../README.md#optional-cpu-simulation) for the UTC profile, guards, parameters, expiry and the full 24-hour collection guidance. Keeping the lab running longer continues normal compute/storage charges.
 
 ---
 
@@ -803,7 +796,7 @@ A running guest is not proof that its application has finished provisioning. Rea
 
 2.  If setup did not complete, follow **Workloads Not Ready or Setup Incomplete** above.
 
-**Expected Result:** The baseline staging status is understood. This is not permission to run a traffic helper in the pilot; Section 6 uses manual activity and ordinary controls for already-provisioned generators, or records them absent.
+**Expected Result:** The staging status is understood. After a successful deployment and the Section 5 checks, use the staged source controller in Section 6 to start and verify required network traffic. Do not continue discovery with the controller absent or traffic unconfirmed; resolve the setup failure without replaying a completed deployment.
 
 ---
 

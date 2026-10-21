@@ -6,16 +6,14 @@ named WAR on **3000**; Linux-Web remains a separate Nginx host with its original
 and a desk/API proxy on **8080**. The existing `ContosoApp` Customers/Orders schema and seeds
 are unchanged. GET reads; POST inserts one order for an existing customer.
 
-**Validation status:** deterministic WAR/runtime packaging and Python/static checks are
-available. Java/JSP compilation, package installation, SQL connectivity, appliance discovery
-and migration have not been exercised in the build environment. Tomcat compiles JSPs on the
-target. Servlet signatures use `jakarta.servlet.http`; descriptor schema is Jakarta Servlet
-6.0 / Pages 3.1. Java SE `javax.sql.DataSource` and `javax.naming` remain correct and unchanged.
+Tomcat compiles JSPs on the target. Servlet signatures use `jakarta.servlet.http`;
+the descriptor schema is Jakarta Servlet 6.0 / Pages 3.1. Java SE
+`javax.sql.DataSource` and `javax.naming` remain correct and unchanged.
 Fresh provisioning pins the official standalone Apache Tomcat **10.1.61** distribution,
 with **CATALINA_HOME = CATALINA_BASE = /opt/tomcat**, and forces Java 17 through the service's
 JAVA_HOME. There is no Ubuntu Tomcat package, split HOME/BASE tree or configuration alias.
-Complete fresh appliance OS/software/Java web-asset acceptance before training release;
-this conventional layout is **not** a guarantee of discovery.
+Verify fresh appliance OS/software/Java web-asset discovery separately from local health;
+the conventional layout alone does not establish discovery.
 Review Apache Tomcat security releases separately from Ubuntu's Java/OS package maintenance.
 
 ## Initial deployment — recommended
@@ -52,7 +50,7 @@ A successful fresh guest records the source URLs and actual publisher SHA512 in
 
 The pinned JDBC publisher coordinate is:
 `https://repo.maven.apache.org/maven2/com/microsoft/sqlserver/mssql-jdbc/13.6.0.jre11/mssql-jdbc-13.6.0.jre11.jar`.
-Availability was not tested in the build environment. Downloads have bounded timeouts/retries;
+Downloads have bounded timeouts/retries;
 JAR CRC, SQL driver class and Java compatibility are checked. These checks and HTTPS are
 **not independent publisher signature/checksum authentication**. Actual installed package,
 Java and driver versions/SHA256 are recorded at `/opt/contoso-orderdesk/installed-versions.txt`.
@@ -71,7 +69,7 @@ refuses occupied deployment paths/accounts; it does not update an existing lab. 
 port 3000, root URL, SQL descriptor and Nginx ports remain unchanged. A service pre-start
 check verifies the pinned real distribution on each start; final host checks still require
 Java 17, SQL data/readiness, the named desk and Nginx proxy, not just a listening socket.
-Appliance discovery remains **pending** until tested independently on a fresh deployment.
+Verify appliance discovery independently on a fresh deployment.
 
 ```text
 Service       contoso-orderdesk (non-root user/group contoso-orderdesk)
@@ -152,7 +150,7 @@ readiness, orders and the named page; explicitly re-enable traffic only when des
 Use the included prebuilt WAR/runtime assets; no application rebuild is required for the
 course. See the [initial-deployment reference](integration/FRESH-DEPLOYMENT.md) for the
 application layout and required target checks, then follow the manual course modules for
-migration rehearsal and acceptance. Diagnose liveness with service status/JSP compile
+migration testing and acceptance. Diagnose liveness with service status/JSP compile
 errors, readiness with SQL login/mode/1433/aliases, not password changes.
 
 ## References

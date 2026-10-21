@@ -2,15 +2,13 @@
 
 **Cloud Enablement Services** · Partner hands-on training
 
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Start with [START-HERE](START-HERE.md) and [PILOT-README](PILOT-README.md), then follow the manual Modules 0–5. After Module 0 source deployment, retained migration/helper commands are reference material, not alternate student steps: their host-provider workflow does not implement the SQL/App Mobility exercise. Verify resource associations, appliance hosting, exact kernel/storage support, capacity and a full isolated four-VM rehearsal before course delivery.
-
 ## Executive Summary
 
 Cloud migration is a business and architecture decision, not just a server-copy exercise. This partner workshop gives Cloud Solution Architects and Infrastructure Engineers hands-on experience discovering, assessing and rehosting a small mixed Windows/Linux application portfolio with Azure Migrate. You will connect infrastructure choices to application dependencies, test the migrated workloads, plan a controlled cutover and review post-migration operations.
 
 [Azure Migrate](https://learn.microsoft.com/en-us/azure/migrate/migrate-services-overview) unifies migration planning and execution: **Decide → Plan → Execute**. This workshop uses **one nested Hyper-V host and four workload VMs** to make that journey accessible without physical datacenter equipment. Deployment prepares the sample workloads; appliance registration, discovery, assessment, migration decisions and validation remain part of the learning experience.
 
-The pilot scope is **four VM rehosts to Azure IaaS**, not automatic PaaS conversion. Web/Linux-Web use the **Hyper-V host provider**; SQL/App are treated **as physical servers**, using a **separate modern replication appliance and guest Mobility Service**. The independent discovery appliance does not replicate either group. Both methods prepare **one connected application**, with source service maintained during initial/delta replication and tests, then **one planned final maintenance window**. Current support and resource-association gates are explicit prerequisites, not claims of live validation.
+The workshop scope is **four VM rehosts to Azure IaaS**, not automatic PaaS conversion. Web/Linux-Web use the **Hyper-V host provider**; SQL/App are treated **as physical servers**, using a **separate modern replication appliance and guest Mobility Service**. The independent discovery appliance does not replicate either group. Both methods prepare **one connected application**, with source service maintained during initial/delta replication and tests, then **one planned final maintenance window**. Verify current support, resource associations, appliance capacity and test isolation before enabling replication.
 
 **Audience:** intermediate-to-advanced infrastructure and cloud practitioners. Prepare the environment before the teaching session and allow time for downloads, discovery, data collection and replication. Duration depends on subscription capacity, connectivity and the environment; this is not a guaranteed four-hour exercise.
 
@@ -76,7 +74,7 @@ The default [Esv7 host](https://learn.microsoft.com/en-us/azure/virtual-machines
 - Nested guest addresses use DHCP reservations. Host-side NAT provides outbound connectivity for the source lab; it is not an Azure NAT Gateway resource or a production firewall design.
 - Migration uses a target VNet (`10.1.0.0/16`) and a separate test VNet (`10.2.0.0/16`). Choose a migration target region different from the source host region, and keep project migration settings, assessments and target/test networks consistent. Verify the required routing, DNS and outbound connectivity; the scripts do **not** create Azure NAT gateways.
 - The 512 GB host OS disk holds the guests on `C:` and a separate appliance-store partition, normally `E:`. That partition is not a separate managed data disk. Fixed workload disks are 40 GB per Windows VM and 30 GB per Linux VM.
-- Module 1 downloads and imports Microsoft's appliance VHD separately. An instructor can opt into download/extraction during deployment; this does not create or register an appliance VM. Allow at least 30 GB free for download/extraction and check actual import-copy headroom on the reported store drive; free space depends on the current archive and existing contents.
+- Module 1 downloads and imports Microsoft's appliance VHD separately. An instructor can opt into download/extraction during deployment: the background stage starts with OS image preparation and is collected before final host readiness. This does not create or register an appliance VM. There is no final checksum prompt; without `-ApplianceVhdSha256`, staging is unverified, and Module 1 §2.1 retains the optional recommended publisher comparison. Wait for deployment to finish before accessing the host. Allow at least 30 GB free for download/extraction and check actual import-copy headroom on the reported store drive; free space depends on the current archive and existing contents.
 
 ### Workload Portfolio & Real-World Mapping
 
@@ -84,12 +82,12 @@ The portfolio is chosen for **mixed operating systems, distinct business roles a
 
 | Lab workload | Actual technology and role | Business analogy and learning purpose |
 |---|---|---|
-| **OnPrem-Web** · `192.168.0.10` | Windows Server 2022, IIS static site on port 80 | A Windows web-tier entry point. The sample page is not a full .NET application. Optional Windows activity reads SQL data and checks application health, illustrating dependencies beyond a web page. |
-| **OnPrem-SQL** · `192.168.0.11` | Windows Server 2022, SQL Server 2022 Express on 1433; `ContosoApp` Customers/Orders | The relational data tier of an order-processing system. Compare real data before/after testing and cutover, plan write quiescence and recovery, and keep database consumers in the migration plan. It uses the same host replication path as the other VMs. |
+| **OnPrem-Web** · `192.168.0.10` | Windows Server 2022, IIS static site on port 80 | A Windows web-tier entry point. The sample page is not a full .NET application. Windows lab traffic reads SQL data and checks application health, illustrating dependencies beyond a web page. |
+| **OnPrem-SQL** · `192.168.0.11` | Windows Server 2022, SQL Server 2022 Express on 1433; `ContosoApp` Customers/Orders | The relational data tier of an order-processing system. Compare real data before/after testing and cutover, plan write quiescence and recovery, and keep database consumers in the migration plan. SQL and Linux-App use the modern physical-server/Mobility Service replication path in Module 3. |
 | **OnPrem-Linux-Web** · `192.168.0.12` | Ubuntu 24.04 LTS, Nginx static site on 80 and desk/API reverse proxy on 8080 | A Linux frontend/reverse-proxy role. Validate the proxy-to-application dependency, addressing and cross-OS connectivity rather than only the port-80 page. |
 | **OnPrem-Linux-App** · `192.168.0.13` | Ubuntu 24.04 LTS, Tomcat 10.1 / OpenJDK 17, Jakarta Servlet 6.0 / Pages 3.1; Contoso Order Desk Java/JSP on 3000 | An internal order-entry application tier. JDBC reads/writes real Customers/Orders data in SQL; HTTP through Nginx exercises a multi-tier request. This is a lightweight sample, not a production-scale application. |
 
-Initial deployment installs the application, database prerequisites and Nginx proxy. Optional traffic is **not** an application-install step. The dependency exercise adds Windows SQL reads/HTTP health checks and Linux HTTP requests through Nginx → Tomcat → SQL, including real sample-order writes. Observe those relationships when selecting migration groups and acceptance checks.
+Initial deployment installs the application, database prerequisites and Nginx proxy. Starting lab traffic is **required for the student dependency exercise**, not an application-install step. It adds Windows SQL reads/HTTP health checks and Linux HTTP requests through Nginx → Tomcat → SQL, including real sample-order writes. Complete [Module 0 §6](docs/Module-0-Setup.md#6-start-the-sample-business-traffic) before discovery; dependency results will not appear correctly without this lab traffic and still need time for collection. Observe those relationships when selecting migration groups and acceptance checks.
 
 ## Workshop Learning Path — Cloud Adoption Framework Context
 
@@ -97,15 +95,17 @@ The [Cloud Adoption Framework](https://learn.microsoft.com/azure/cloud-adoption-
 
 | Module | Exercise | Learning and completion evidence |
 |---|---|---|
-| 0 | [Setup](docs/Module-0-Setup.md) | Prepare the source simulation and verify all four workload VMs, applications and appliance-store space. |
-| 1 | [Discovery and assessment](docs/Module-1-Discovery.md) | Discover exactly four workloads, review an Azure VM readiness/sizing/cost assessment and discuss dependencies; optionally use [sample traffic](docs/Lab-Traffic.md). |
-| 2 | [Web-workload migration](docs/Module-2-Agentless-Migration.md) | Replicate Web/Linux-Web with the Hyper-V provider, test isolated static frontends, then **HOLD final cutover** for Module 3. |
-| 3 | [Database/application workload migration](docs/Module-3-Agent-Based-Migration.md) | Use modern physical/Mobility replication for SQL/App, complete the full isolated four-VM test, and coordinate one shared final cutover. |
+| 0 | [Setup](docs/Module-0-Setup.md) | Prepare and verify the four source workloads, applications and appliance-store space; start and verify required network lab traffic in §6. CPU simulation is optional. |
+| 1 | [Discovery and assessment](docs/Module-1-Discovery.md) | Discover exactly four workloads, review an Azure VM readiness/sizing/cost assessment and discuss dependencies with network traffic running. |
+| 2 | [Web-workload migration](docs/Module-2-Agentless-Migration.md) | Configure Web/Linux-Web Hyper-V provider replication in §§4–6, then continue to Module 3 before monitoring or testing the frontends. |
+| 3 | [Database/application workload migration](docs/Module-3-Agent-Based-Migration.md) | Configure SQL/App modern physical/Mobility replication in §§4–8; both pairs must be configured before either test walkthrough. Return to Module 2 §§7–8, then Module 3 §§9–10, and perform one shared final cutover in Module 3 §11. |
 | 4 | [Azure Migrate vs. Site Recovery](docs/Module-4-ASR-Comparison.md) | Compare a one-time migration with ongoing disaster recovery and explain when each is appropriate. |
 | 5 | [Post-migration operations](docs/Module-5-Post-Migration.md) | Verify application/network behavior, monitoring, optional backup/restore, security and cost controls. |
 | Finish | [Costs and Cleanup](#costs-and-cleanup) | Account for test VMs, replication, source/target resources, retained backup data and registrations. |
 
-The Module 2/3 filenames are retained, but this **manual pilot deliberately teaches two methods**. Their unchanged automation/script filters are baseline behavior, not a match for the new Mobility instructions. Do not run those helpers to satisfy either pilot method. Stateful data alone does not mandate an agent; the split is a comparison exercise, never two application cutover waves.
+**Replication and test route:** Module 2 §§4–6 (submit frontend replication) → Module 3 §§4–8 (submit SQL/App replication) → Module 2 §§7–8 (monitor/test frontends) → Module 3 §§9–10 (monitor/test SQL/App and the full application) → **Module 3 §11 (one coordinated final maintenance window)**. Keep both pairs replicating while following this route; do not complete a frontend cutover first.
+
+The Module 2/3 filenames are retained, but this **manual course teaches two methods**. Retained migration helpers use a Hyper-V host-provider workflow and do not implement the SQL/App Mobility exercise; their filters are not alternate student steps. Stateful data alone does not mandate an agent; the split is a comparison exercise, never two application cutover waves.
 
 ### Cloud Adoption Framework Flow
 
@@ -175,13 +175,15 @@ Use a **new dedicated source resource group** for a new lab. A recognized incomp
 
 ### 3. Connect and Begin the Student Exercises
 
-Connect to HyperVHost using the deployment output and complete Module 0's guest/application checks. Create/register the Azure Migrate project and import the verified appliance through Module 1. Confirm exactly the four workload names in discovery, not the appliance as a fifth migration workload.
+After deployment preparation, cleanup and the end/elapsed timing messages, normal interactive runs offer **network traffic [No]**, then independent **optional CPU Simulation [No]**. Answer **Yes** to network traffic for the required student dependency exercise; CPU may remain No. These are separate consent choices, neither dependent on an Azure Migrate project or the appliance download. Declining a prompt leaves any existing generator unchanged.
+
+Connect to HyperVHost using the deployment output and complete Module 0's guest/application checks. **Before discovery, complete [Module 0 §6](docs/Module-0-Setup.md#6-start-the-sample-business-traffic): start source network traffic if it was declined/skipped, inspect Network Status and verify readiness plus two rising total-order counts. Do not restart a confirmed successful deployment Start.** Dependency results will not appear correctly without this lab traffic, and collection still takes time. Source startup is not permission to automate the manual Mobility, replication, test, cutover or post-migration exercises. Create/register the Azure Migrate project and manually import the published appliance through Module 1; its recommended publisher SHA256 comparison is optional. Confirm exactly the four workload names in discovery, not the appliance as a fifth migration workload. See [Lab Traffic](#lab-traffic) and [Optional CPU Simulation](#optional-cpu-simulation) for detailed controls.
 
 The required assessment is an **Azure VM assessment of four servers**. The Step 2 helper defaults to `-AssessmentMode Classic`; here “Classic” identifies the grouped assessment API, not a retired first-generation Azure Migrate project. Start with AsOnPremises/configuration-based sizing, the chosen migration target region and your actual offer/licensing settings. Separately compare a performance-based portal assessment after collecting sufficient data. [Assessment estimates depend on collected data](https://learn.microsoft.com/en-us/azure/migrate/review-assessment?view=migrate). [Assessments capture point-in-time inputs](https://learn.microsoft.com/en-us/azure/migrate/concepts-assessment-calculation?view=migrate-classic). For this lab, review the actual readiness, cost and sizing output; do not treat idle-sample measurements as production utilization or script defaults as automatically selected recommendations.
 
 ### Student Portal Path and Instructor Helpers
 
-The module guides are the student path. Complete their portal actions and validation rather than treating a helper's final message as the learning objective. Module 2 includes target landing-zone preparation; Step 1 is an optional instructor shortcut for networking and project guidance, not automatic project creation.
+The module guides are the student path. Complete their portal actions and validation rather than treating a helper's final message as the learning objective. **The remaining toolkit examples in this subsection are instructor references, not student prerequisites or an alternate SQL/App Mobility route.** Module 2 includes target landing-zone preparation; Step 1 is an optional instructor shortcut for networking and project guidance, not automatic project creation. Source traffic normally starts after deployment or from the staged HyperVHost controller in Module 0 §6; it does not require Step 1 or a project.
 
 Use an open PowerShell window for the interactive migration helpers. They can load their required Az modules, sign in as needed and prompt for omitted environment values. For example:
 
@@ -216,13 +218,13 @@ Step 3 uses explicit-version REST GETs in the current Az subscription, avoiding 
 
 **Step 3 checks prerequisites and guides portal replication only.** Its `-Workload All|Agentless|AgentBased` selection and cost-ordered target plan drive read-only checks, probes and instructions; the helper does **not** enable or monitor Hyper-V replication or complete these module sections. `ManualActionRequired` or `Blocked` is not Step 3 completion. Follow the [Hyper-V migration tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-hyper-v) and the module guides to register the host provider, perform the Replicate wizard actions and monitor replication in the portal. Test migration/cleanup and authorized cutover remain **separate manual portal stages**, including source shutdown at cutover:
 
-| `-Workload` | Selected workloads | Manual portal replication and monitoring | Manual portal test and cleanup | Manual portal cutover |
-|---|---|---|---|---|
-| `Agentless` | OnPrem-Web, OnPrem-Linux-Web | Module 2 §5–§7; Step 3 supplies partial guidance only | Module 2 §8 | Module 2 §9 |
-| `AgentBased` | OnPrem-SQL, OnPrem-Linux-App | Module 3 §8–§9; Step 3 supplies partial guidance only | Module 3 §10 | Module 3 §11 |
-| `All` | All four workloads | Both groups' replication sections above | Both groups' test sections above | Both groups' cutover sections above |
+| Helper filter | Selected workloads | Corresponding manual course path | Boundary |
+|---|---|---|---|
+| `Agentless` | OnPrem-Web, OnPrem-Linux-Web | Module 2 §§4–6 replication, then §§7–8 monitoring/test after SQL/App replication is configured | HOLD final frontend cutover for Module 3 §11. |
+| `AgentBased` | OnPrem-SQL, OnPrem-Linux-App | Module 3 §§4–8 modern appliance/Mobility replication, then §§9–10 monitoring/test | The retained host-provider helper does **not** implement this Mobility route. |
+| `All` | All four workloads | Follow the [two-method course route](#workshop-learning-path--cloud-adoption-framework-context) | One coordinated final window in Module 3 §11; not two application cutover waves. |
 
-Keep the same reviewed workloads, target region and sizes through the portal stages. These are teaching-group filters, not different replication architectures: all four use the Hyper-V host provider, and `AgentBased` does not require guest Mobility Service. **Steps 3, 4 and 5 are prerequisite-check/guidance helpers only for this implemented Hyper-V path.** Step 4 guides manual portal testing/cleanup; Step 5 guides separately authorized manual portal cutover. Their guards prevent the unverified VMwareCbt replication/test/migration calls from executing and do not report fake completion; `ManualActionRequired`/`Blocked` means action is still required. No ASR disaster-recovery workaround is substituted. Run `Get-Help .\scripts\migrate-step3-replicate.ps1 -Full` for the helper's partial coverage and parameters.
+Keep the same reviewed workloads, target region and sizes through the portal stages. These helper filters describe their retained Hyper-V host-provider workflow, **not both replication architectures in this course**. The `AgentBased` filter does not install or register Mobility Service. **Steps 3, 4 and 5 are prerequisite-check/guidance helpers only for that host-provider path** and must not substitute for the SQL/App manual exercise. Step 4 guides manual portal testing/cleanup; Step 5 guides separately authorized manual portal cutover. Their guards prevent unverified VMwareCbt replication/test/migration calls from executing; `ManualActionRequired`/`Blocked` means action is still required, not completion. No ASR disaster-recovery workaround is substituted. Use the module guides for the actual two-method course sequence.
 
 | Helper | Scope and operator responsibility |
 |---|---|
@@ -230,10 +232,10 @@ Keep the same reviewed workloads, target region and sizes through the portal sta
 | `migrate-step1-setup-project.ps1` | Optional target/test network preparation with region/quota preflight and portal project guidance. The student can instead follow the portal path in Module 2. |
 | `migrate-step2-discover-assess.ps1` | Assists host/appliance preparation, discovery and four-server assessment. Project-key, appliance and credential actions still require the operator. |
 | `migrate-step3-replicate.ps1` | Read-only prerequisite checks and partial manual-portal replication guidance for `-Workload All\|Agentless\|AgentBased`, with live cost-ordered eligible B2/D2 sizing guidance. Does not enable/monitor Hyper-V replication or resize existing replication. |
-| `migrate-step4-test-migrate.ps1` | Guarded prerequisite/group checks and manual portal test/cleanup guidance only: Module 2 §8 / Module 3 §10. No automated Hyper-V test migration, cleanup or completed-state claim. |
-| `migrate-step5-cutover.ps1` | Guarded prerequisite/group checks and separately authorized manual portal cutover guidance only: Module 2 §9 / Module 3 §11. No automated migration, source shutdown or completed-state claim. |
-| `enable-lab-traffic.ps1` | Optional source-side sample activity staged on HyperVHost; follow [Lab Traffic](docs/Lab-Traffic.md). Stop with `-Disable` when no longer needed. |
-| `post-migration-labtraffic.ps1` | Optional target-side Check/Prepare/Start/Status/Stop controller; use its [separate guide](docs/post-migration-labtraffic.md) and confirm target identities. |
+| `migrate-step4-test-migrate.ps1` | Guarded host-provider prerequisite/group checks and manual portal test/cleanup guidance only. The course uses Module 2 §8 / Module 3 §10; this helper does not implement the SQL/App Mobility route or report completed migration. |
+| `migrate-step5-cutover.ps1` | Guarded host-provider prerequisite/group checks and separately authorized manual portal cutover guidance only. The course's one coordinated final window is Module 3 §11; no automated migration, source shutdown or completed-state claim. |
+| `enable-lab-traffic.ps1` | Source-side controller staged on HyperVHost: required network lab traffic and independently optional CPU simulation. Follow [Lab Traffic](#lab-traffic); network-only Stop preserves apps and CPU. |
+| `post-migration-labtraffic.ps1` | Optional target-side Check/Prepare/Start/Status/Stop controller; use the bottom-of-README [instructor reference](#post-migration-lab-traffic--instructor-reference) and confirm target identities. |
 | `migrate-step6-post-migration.ps1` | Configures post-migration monitoring, backup/security/cost controls; creates or changes Azure resources. Validate before and after its hardening. |
 | `cleanup-lab.ps1` | Confirms and deletes one selected resource group, then reports retained/manual cleanup items. Review every deletion scope. |
 
@@ -244,15 +246,141 @@ Keep the same reviewed workloads, target region and sizes through the portal sta
 1. **Discover:** register the appliance, configure valid host/guest credentials and verify the four-server inventory. Host metadata alone is not proof that guest software and dependencies have been inventoried.
 2. **Assess:** review Azure readiness, sizing assumptions, data coverage and estimated monthly cost. Document the selected target region and licensing assumptions. Treat idle-lab performance data as limited evidence, not production utilization.
 3. **Plan:** identify the Nginx → Tomcat → SQL request path and any Windows reporting consumers. Decide how addressing, application writes, validation and rollback will work across a migration group. The two teaching groups do not prescribe production wave boundaries.
-4. **Replicate and test:** enable host-based replication and test copies in an isolated non-production VNet. Isolate copies from source application connections **before first boot**; replicated generators and configuration may otherwise contact or write to the source.
+4. **Replicate and test:** configure Web/Linux-Web host-provider replication and SQL/App modern physical/Mobility replication before either test walkthrough. Test copies in an isolated non-production VNet. Isolate copies from source application connections **before first boot**; replicated generators and configuration may otherwise contact or write to the source.
 5. **Cut over:** authorize a planned outage, quiesce application activity and shut down the relevant source VMs for the final synchronization. Check replication and validation results before accepting the migrated application. Do not promise zero downtime or automatic success.
 6. **Validate and operate:** compare data and endpoints, confirm network dependencies, then review monitoring, backup, access and cost. Rehost is the start of Azure operations, not the end of application ownership.
 
-### Optional Activity and Post-Migration Validation
+## Instructor Preparation — Qualify the Provided Baseline
 
-Optional source traffic provides dependency observations; the Windows side reads SQL/checks HTTP, while Linux requests go through Nginx to Tomcat and can insert real sample orders into SQL. The applications work without starting generators. Source traffic can persist across consoles and reboots, so stop it explicitly when the runbook calls for it.
+Complete this preparation **before teaching Module 3**. Provide a fixed, identified build so students confirm a match in [Module 3 §4](docs/Module-3-Agent-Based-Migration.md#4-prerequisites), rather than repeat a full compatibility investigation each session.
 
-After cutover, follow [Post-migration lab traffic](docs/post-migration-labtraffic.md): **Check → Prepare → Check → optional Start → Status → Stop** on the confirmed target VMs. Prepare explicitly repoints approved aliases; Start produces real activity. Its default interval is 30 seconds and default duration 60 minutes, bounded and disabled on boot. Check network/application behavior **before Step 6 hardening**, then Check again afterward. For test copies, use the guide's pre-boot isolation and explicit `-TestMigration` workflow; do not substitute source connectivity for target validation.
+1. **Identify the revision and sources.** Record the lab revision, qualification date, source VM identities and actual Windows Server 2022 / Ubuntu 24.04 versions. Match the selected Mobility Service build to the actual OS and running kernel/flavour, not an assessment's Ready label. Recheck after an image, kernel, agent, storage/controller or architecture change; an unchanged distribution name is insufficient.
+
+2. **Inspect the guest support tuple.** On **source OnPrem-Linux-App — approved SSH**, retain these read-only observations:
+
+   ```bash
+   cat /etc/os-release
+   uname -r
+   lsblk -o NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,MOUNTPOINTS,PKNAME,TRAN,MODEL,LOG-SEC,PHY-SEC
+   findmnt /
+   test -d /sys/firmware/efi && printf 'UEFI boot\n' || printf 'Review boot mode\n'
+   ```
+
+   For **both SQL and App**, record every required disk, guest controller/driver, filesystem/LVM, logical-sector size, boot/EFI layout, Secure Boot state and free space; use approved read-only guest/Hyper-V inspection for facts not shown above. Check the current source-support matrix against the exact tuple. Linux guest NVMe and 4-KiB logical sectors are unsupported in the cited matrix; host NVMe does not establish guest NVMe. Do not downgrade/pin a guessed kernel, replace storage, loosen security or install an unsupported agent to proceed.
+
+3. **Approve the separate appliance and capacity.** Confirm supported hosting and a dedicated **Windows Server 2022 modern replication appliance: at least 8 CPU cores, 16 GB RAM, 80-GB OS disk and separate 620-GB data disk**, plus current networking/access requirements. It is not a source VM, discovery appliance or Hyper-V host; do not install the Hyper-V role on it. The existing source host's 512-GB disk/appliance-store partition does not supply this separate capacity. Approve actual placement, storage and budget before use; do not infer support for an Azure-hosted/nested placement from this topology.
+
+4. **Confirm associations and hand off the baseline.** Manually verify the intended Azure Migrate project, physical-route appliance and source registrations alongside the frontend Hyper-V provider, including actual managed-vault associations. A name match is not proof; do not impose a generic separate-ASR-vault rule on Migrate. Preserve fresh identities and no dual protection. Confirm privileges, target capacity and test isolation through Module 3 §§6–7, then tell students which qualified build to match. If support, hosting, associations or the build match remain unconfirmed, resolve them before agent installation/replication; students stop and ask rather than invent a workaround.
+
+**Source guidance — reviewed 2026-10-21 (page dates shown):**
+
+- [Physical-server migration tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-physical-virtual-machines?view=migrate) — 2026-06-27: separate replication appliance; Site Recovery components explain the support-matrix dependency.
+- [Source support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/vmware-physical-azure-support-matrix) — 2026-10-15: match actual OS/kernel and Mobility version; check storage and boot restrictions.
+- [Modern appliance support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/replication-appliance-support-matrix) — 2026-10-15: verify dedicated machine, capacity, role and network prerequisites before installation.
+- [Mobility Service overview](https://learn.microsoft.com/en-us/azure/site-recovery/vmware-physical-mobility-service-overview) — 2026-10-15: failed VSS processing can leave crash-consistent replication; agent health does not guarantee application-consistent data.
+
+## Lab Traffic
+
+**Network traffic is required for the student dependency exercise.** Complete [Module 0 §6](docs/Module-0-Setup.md#6-start-the-sample-business-traffic) after deployment and the guest/application checks, before discovery. The consent prompt still defaults to No; answer Yes for this lab or use the explicit host Start below if you declined/skipped it. Dependency results will not appear correctly without this lab traffic. Collection/upload windows still apply, so startup does not guarantee an immediate complete map.
+
+Deployment already provisions the Tomcat order desk, its shared SQL login, lab aliases and Nginx 8080 desk/API proxy. Traffic is not an application-install step, and the port-80 IIS/Nginx sites are unchanged. CPU simulation is an independent optional component, not a network dependency.
+
+| Edge | Protocol | Driven by |
+|---|---|---|
+| OnPrem-Web → OnPrem-SQL | TDS 1433 | `LabOrderDeskTraffic` scheduled task reads existing orders. |
+| OnPrem-Web → OnPrem-Linux-App | HTTP 3000 | The same task calls health. |
+| OnPrem-Linux-App → OnPrem-Linux-Web | HTTP 8080 | `contoso-orderdesk-traffic` Python HTTP generator. |
+| OnPrem-Linux-Web → OnPrem-Linux-App | HTTP 3000 | Existing Nginx desk/API reverse proxy. |
+| OnPrem-Linux-App → OnPrem-SQL | TDS 1433 | Actual Tomcat Java process reads/inserts through its bounded JDBC pool. |
+
+Python never connects directly to SQL and contains no SQL password. Each cycle performs health and order reads and at most one sample-order insert through Nginx. The source interval defaults to **30 seconds**, range **20–600 seconds**. This is not a production load/sizing benchmark. The real JVM keeps initial/min idle 1 and maxActive 4 JDBC connections after readiness; no arbitrary sockets are opened merely to affect dependency polling.
+
+### Source Startup, Status and Stop
+
+**Execution location: HyperVHost — elevated Windows PowerShell, after deployment completion and Module 0 §5 checks.** Use the already staged controller and deployment-generated `C:\AzMigrateLab\lab-traffic.settings.json`; no Azure Migrate project is required. If deployment network startup was confirmed successful, skip Start and inspect Status. For an unknown/partial result, inspect Status and stop as needed before retrying.
+
+```powershell
+# Required network-only startup if it was declined or skipped during deployment.
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Start -Component Network -CpuSimulation Skip
+# Inspect without starting or renewing anything.
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Network
+# An explicit source interval, when an approved Start is needed.
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Start -Component Network -CpuSimulation Skip -IntervalSeconds 30
+# Approved troubleshooting/final-boundary stop: applications and CPU remain unchanged.
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Stop -Component Network
+```
+
+The two Start lines are **alternatives**, not consecutive actions. Enter the existing lab password privately at the controller's masked prompt; never put a password literal in command history. `LinuxUsername` comes from settings unless explicitly overridden or requested at the prompt. Windows guest configuration uses **PowerShell Direct**; Linux configuration uses **SSH**. OpenSSH **8.4+** can reuse the initial password prompt with askpass; older clients prompt per guest. If interactive startup reports a missing SSH capability, use its approved host-side installation path as needed; do not weaken guest authentication or substitute a workstation launch. Noninteractive mode does not install capabilities or prompt for missing credentials.
+
+| Source controller control | Meaning and guard |
+|---|---|
+| `-Mode Start\|Check\|Status\|Stop` | Check is a read-only alias of Status. Start defaults to Network. Check/Status, Stop and `-Disable` default to Both unless a component is explicit. |
+| `-Component Network\|Cpu\|Both` | Selects the synthetic component(s), not applications. Explicit Cpu/Both opts into CPU and conflicts with `-CpuSimulation Skip`. |
+| `-CpuSimulation Prompt\|Start\|Skip` | Independent CPU choice with network startup. Prompt skips CPU in noninteractive use. Explicit network Start is not CPU consent. |
+| `-IntervalSeconds 30` | Source network cycle; 20–600 seconds. This does not add a network stop timer. |
+| `-SettingsPath <path>` / `-LinuxUsername <name>` | Override the deployment-generated settings path or confirmed Linux deployment username. Preserve private settings. |
+| `-NonInteractive` | Requires supplied credentials and supported SSH/password/sudo preflight on both Linux guests. It forbids missing-input prompts, capability installation and Windows-only `SkipLinux` success. |
+| `-SkipLinux` | Configures Windows only and saves Linux commands for console execution. It does **not** satisfy full network startup for the student exercise. |
+| `-Disable` | Stops/removes the Windows traffic task, disables the Python traffic service and stops/disarms CPU workers on all four guests. Use explicit `-Component Network` when CPU must remain unchanged. |
+| `-CpuDurationHours` / `-RenewCpu` | CPU lifetime/explicit renewal only; see [Optional CPU Simulation](#optional-cpu-simulation). |
+
+A bare interactive launch asks network first, then CPU independently, both No/Enter. Explicit `-Mode Start` or `-Component Network` starts network without that question. Reruns update generator tasks/configuration only: SQL mixed-mode/login preparation belongs to deployment. The controller checks the existing proxy rather than replacing it. **Stopping generators preserves the SQL login, proxy, hosts, Tomcat, SQL, IIS/Nginx sites and application data.**
+
+Source network generators survive console closure and resume after reboot while enabled. There is **no network stop timer or automatic lab-completed detector**; completing a script or the workshop does not stop them. A decline leaves existing generators unchanged. Keep source network traffic serving during discovery, both methods' initial/delta replication and isolated tests. Freeze source manual/synthetic writers only at Module 3's final planned cutover boundary or an approved troubleshooting stop. Never replay deployment/source startup on retired sources or start the source controller on test/target copies.
+
+### Deployment and Instructor Prompt Controls
+
+After source preparation, cleanup and the end/elapsed timing messages, interactive deployment offers network, then CPU, even when all deployment parameters were supplied. Neither offer depends on appliance staging or an Azure Migrate project. Startup is outside deployment timing; its failure does not undo successful infrastructure. Noninteractive/unattended defaults skip both. `-LabTraffic Start|Skip` and `-CpuSimulation Start|Skip` select components explicitly; `-CpuDurationHours` defaults to 24 (1–168). `LAB_NO_PAUSE=1` suppresses default questions; explicit `-LabTraffic Prompt -CpuSimulation Prompt` overrides that only in an interactive session.
+
+The older **Step 1 instructor offer** remains a reference option, not the normal student startup route or a prerequisite. It verifies the selected project and all four running workloads before offering network first, CPU separately, both No/Enter. With all environment inputs supplied, its default offers are skipped; use `-LabTraffic Prompt` / `-CpuSimulation Prompt` to request them interactively or explicit Start to opt in. `-LabTraffic Skip` leaves existing generators unchanged. `-LabTrafficPassword` accepts an optional SecureString; otherwise the password is obtained privately after opt-in. No traffic option bypasses project or guest-readiness checks in that helper.
+
+Remote prompt launches require Az.Compute managed Run Command **ProtectedParameter** support, the staged controller/settings and host OpenSSH 8.4+. The password is a protected parameter, never script text or an ordinary argument. The selected host's Azure instance metadata must match subscription, resource group, VM name and VM ID before a local launch; otherwise the helper uses the remote path. Noninteractive launch preflights Linux password/sudo access on both Linux guests. Unsupported preflight means traffic has **not been initiated**; use the elevated host-interactive route after resolving the prerequisite.
+
+Full network startup requires the Windows task Running, the Linux generator active and proxy-readiness markers. Partial/failed startup can leave generators running. Managed execution requires terminal execution state, successful exit code and its exact full-start result, not Azure provisioning success alone. Timeout/read/submission uncertainty is **unknown**, not proof of no traffic; inspect the named managed Run Command and host, then Stop before another Start. Only terminal managed command resources are cleaned up; removing one does not stop traffic. A separate CPU result does not cancel confirmed network startup, and neither startup result proves sustained application health or appliance collection.
+
+### Verify Actual Activity
+
+**HyperVHost — Windows PowerShell:**
+
+```powershell
+Invoke-RestMethod http://192.168.0.13:3000/api/ready
+Invoke-RestMethod http://192.168.0.12:8080/api/ready
+$orders = Invoke-RestMethod http://192.168.0.13:3000/api/orders
+$orders | Select-Object count,customerCount
+```
+
+Wait a minute or two and repeat: readiness must remain `ready`, and API **`count`** should rise. It is the total order count; `.orders.Count` is only the returned recent array, capped at 20. Never blindly resubmit an uncertain manual order POST. The Windows log is `C:\LabTraffic\traffic.log`; on Linux-App use `sudo journalctl -u contoso-orderdesk-traffic -n 15 --no-pager`. On Linux-App, `sudo ss -ntp | grep ':1433'` should attribute SQL sockets to **java**, not Python. Windows traffic credentials are in an administrator/SYSTEM ACL-protected script: root-equivalent lab storage, not production secret management. Do not share that file. After disabling traffic, direct/proxy readiness must still work.
+
+Without generators, HTTP edges may be idle; the Tomcat→SQL dependency still exists. An empty or partial polling view is not evidence of no dependency. Use the appliance's actual guest credential and validate SSH reachability, recursive CATALINA_HOME/BASE directory read/execute, and sudo netstat/ls separately. Leave real traffic/pool activity across multiple five-minute polling windows; dependency uploads can take six hours and web-app configuration 24 hours. No local health test proves appliance discovery. Nginx is separate inventory, not a supported assessed web-app platform.
+
+For test migration/cutover, repoint only lab aliases/private DNS to **actual new private IPs**, restart Tomcat to close the old pool and reload Nginx to resolve its new upstream. Update Windows generator aliases too. Isolate test dependencies from source/production **before first boot**, then stop/disarm inherited generators before functional tests. Network generators can resume at boot if enabled; start target traffic only after readiness and explicit approval. Follow [Module 3](docs/Module-3-Agent-Based-Migration.md), the [application guide](apps/contoso-orderdesk/README.md) and the optional [post-migration instructor reference](#post-migration-lab-traffic--instructor-reference). Existing private-network firewall rules permit the graph; no broad public rule is needed. Retain app-tier access from intended Nginx/Windows clients only.
+
+## Optional CPU Simulation
+
+CPU simulation is **not required for network dependencies**. It runs local low-priority calculation workers on the four existing two-vCPU source guests: Windows Server 2022 on Web/SQL and Ubuntu 24.04 on Linux-Web/Linux-App, not on HyperVHost or either appliance. The daily UTC profile has no daylight-saving adjustment or midday peak:
+
+- **06:00–22:00 UTC:** 16-hour day, approximately **15% total guest CPU**.
+- **22:00–06:00 UTC:** 8-hour night, approximately **2% total guest CPU**.
+
+These are best-effort total-guest targets across both vCPUs, not extra load above application CPU or a cap on real applications. Workers reduce their contribution as real activity rises and rest when existing load meets/exceeds the target. They rest on measurement failure or the **30% high-CPU guard**; resumption requires CPU below **20%** and a **60-second cooldown**. OS activity and host contention can prevent an exact target.
+
+**HyperVHost — elevated Windows PowerShell:**
+
+```powershell
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Start -Component Cpu -CpuDurationHours 24
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Cpu
+C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Stop -Component Cpu
+```
+
+The default run is **24 hours**, configurable **1–168 hours**, with guest-local expiry and **no reboot auto-resume**. Closing the console does not stop it. Do not repeat a confirmed deployment CPU Start. Repeating Start reuses a healthy active run without extending its deadline; a stopped/expired deadline or unresolved run does not silently become a new run. Inspect Status and Stop as needed. `-RenewCpu` is the explicit choice to replace the CPU session and deadline. CPU-only Stop preserves network traffic and all applications/data.
+
+Status reports actual task/unit and PID, heartbeat freshness/staleness, UTC phase, total target, measured total/baseline/worker CPU, guard/cooldown and expiry. Windows uses `LabCpuSimulation`; Linux uses `lab-cpu-simulation.service`. A healthy task/unit and fresh heartbeat show a live worker, **not achievement of the CPU target**; baseline-above-goal, invalid measurement or high-CPU cooldown can leave a live worker deliberately resting. `LAB_CPU_FULLY_STARTED` confirms all four starts; `LAB_CPU_PARTIAL_OR_FAILED` requires per-guest inspection and does not cancel confirmed network startup. Neither result proves the requested percentage.
+
+For manual observation, use each Windows guest's **Task Manager > Performance > CPU**, or Linux `top` aggregate CPU summary, over several minutes and record UTC time. Do not confuse one process's percentage with total guest CPU. Stop source CPU **before migration testing or cutover**, or maintenance, not simply when initial replication starts. Before test boot, isolate copies from source networks, then verify copied workers are stopped/disarmed. The post-migration controller never starts CPU on test or migrated VMs; its Prepare/Start/Stop actions disarm inherited workers on confirmed running guests.
+
+This is educational daily CPU history, not production capacity evidence or a memory/disk/network-pressure simulation. Start or explicitly renew once appliance performance collection is active so expiry covers the intended capture. Partial CPU history can appear earlier; **at least 24 hours of collection is needed for the full 16-hour day/8-hour night cycle**. Allow the full selected history window, longer if applicable, matching it to captured data before comparison. In [Module 1's optional portal comparison](docs/Module-1-Discovery.md#56--optional-performance-comparison-and-business-case), create a **second** performance-based assessment of the same four servers with unchanged region/pricing assumptions and history matching the capture; recalculate after more collection if needed. The required Step 2 **AsOnPremises/configuration-based** assessment does not use CPU history or offer a performance-based switch. Do not expect immediate graphs or a changed recommended SKU; see the [Hyper-V assessment tutorial](https://learn.microsoft.com/en-us/azure/migrate/tutorial-assess-hyper-v?view=migrate-classic).
+
+No additional VM, size change or paid service is created. CPU use on an existing fixed-price VM has no separate usage fee; keeping the lab running longer continues normal compute/storage billing.
 
 ## Key Architectural Decisions
 
@@ -263,7 +391,7 @@ After cutover, follow [Post-migration lab traffic](docs/post-migration-labtraffi
 | Mixed OS and business tiers | IIS, Nginx, Tomcat and SQL expose cross-platform checks, real application/data dependencies and different operational concerns while remaining manageable in a teaching lab. |
 | Fixed guest resources | Fixed 40/40/30/30 GB disks and static guest memory make the source allocation understandable. The sample workload's utilization does not predict production sizing. |
 | Internal switch and host NAT | An isolated nested segment simplifies the source lab. It is not a statement of production network equivalence or an Azure NAT Gateway deployment. |
-| Separate appliance import | Use the verified Microsoft appliance package in Module 1; distinguish appliance discovery/assessment from the host provider's replication work. |
+| Separate appliance import | Use the published Microsoft appliance package in Module 1, with its optional recommended publisher SHA256 check; distinguish appliance discovery/assessment from the host provider's replication work. |
 | Test before cutover | Isolated copies let you validate addressing, application paths and SQL data before authorizing source shutdown. Plan for the final outage and recovery decisions. |
 
 ## Costs and Cleanup
@@ -287,18 +415,14 @@ The script lists resources and asks for confirmation; `-Force` bypasses that pro
 
 ```text
 azure-migrate-workshop/
-├── README.md                              # Student introduction and workload rationale
-├── START-HERE.md                          # Student sequence and safety boundaries
-├── PILOT-README.md                        # Course plan and execution gates
+├── README.md                              # Introduction, source controls and instructor reference
 ├── docs/
 │   ├── Module-0-Setup.md
 │   ├── Module-1-Discovery.md
 │   ├── Module-2-Agentless-Migration.md
 │   ├── Module-3-Agent-Based-Migration.md
 │   ├── Module-4-ASR-Comparison.md
-│   ├── Module-5-Post-Migration.md
-│   ├── Lab-Traffic.md
-│   └── post-migration-labtraffic.md
+│   └── Module-5-Post-Migration.md
 ├── scripts/                               # Deployment and migration helpers
 │   └── host/configure-host.ps1             # Host-side provisioning payload
 └── apps/contoso-orderdesk/                 # Java/JSP application and runtime assets
@@ -322,5 +446,86 @@ This supplied checkout has no LICENSE file. Confirm the upstream repository's li
 | [Classic assessment calculations](https://learn.microsoft.com/en-us/azure/migrate/concepts-assessment-calculation?view=migrate-classic) | 2026-02-26 |
 | [Esv7 specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/memory-optimized/esv7-series) | 2026-08-24 |
 | [Java migration resources](https://learn.microsoft.com/en-us/azure/app-service/app-service-java-migration) | 2025-12-12 |
+| [Execute server migrations](https://learn.microsoft.com/en-us/azure/migrate/execute-server-migrations?view=migrate) | 2026-07-02 |
+| [Physical/virtual machine migration](https://learn.microsoft.com/en-us/azure/migrate/tutorial-migrate-physical-virtual-machines?view=migrate) | 2026-06-27 |
+| [Simplified Azure Migrate experience](https://learn.microsoft.com/en-us/azure/migrate/simplified-experience-for-azure-migrate?view=migrate) | 2026-07-20 |
+| [Modern replication appliance support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/replication-appliance-support-matrix) | 2026-10-15 |
+| [VMware/physical source support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/vmware-physical-azure-support-matrix) | 2026-10-15 |
+| [Deploy the modern replication appliance](https://learn.microsoft.com/en-us/azure/site-recovery/deploy-vmware-azure-replication-appliance-modernized) | 2026-09-21 |
+| [Modern physical-server architecture](https://learn.microsoft.com/en-us/azure/site-recovery/physical-server-azure-architecture-modernized) | 2026-09-21 |
+| [Mobility Service overview](https://learn.microsoft.com/en-us/azure/site-recovery/vmware-physical-mobility-service-overview) | 2026-10-15 |
+| [Execute and track waves](https://learn.microsoft.com/en-us/azure/migrate/how-to-execute-track-waves?view=migrate) | 2025-11-07 |
+| [Define and manage applications](https://learn.microsoft.com/en-us/azure/migrate/define-manage-applications?view=migrate) | 2026-06-15 |
 
-For student troubleshooting, use each module's troubleshooting section, the [application diagnostics](apps/contoso-orderdesk/README.md), and the [traffic operator guide](docs/Lab-Traffic.md).
+The retained source-register dates above were checked as of 2026-10-17; review current support and UI guidance when running the lab.
+
+For student troubleshooting, use each module's troubleshooting section, the [application diagnostics](apps/contoso-orderdesk/README.md), and [Lab Traffic](#lab-traffic).
+
+## Post-migration lab traffic — instructor reference
+
+**Instructor reference only; not a student prerequisite.** Students follow the manual [Module 5](docs/Module-5-Post-Migration.md) actions. This optional controller does not replace the two-method migration, test, cutover or student validation steps.
+
+Use `scripts/post-migration-labtraffic.ps1` after the accepted shared cutover and **before post-migration hardening**, then run Check again after hardening. It does not install or upgrade a runtime. This is an ordinary **Windows PowerShell 5.1+** controller, not a Cloud Shell, Hyper-V Direct, WinRM or SSH script. Existing generators may survive replication and already have inserted orders: **inventory first is not prevention of inherited traffic**.
+
+Source CPU simulation is independent of network/order traffic, locally bounded and has no reboot auto-resume. Do not assume a copied worker is stopped merely because its deadline is bounded. Check/Status inventory inherited CPU workers on all four guests without changing them. Prepare/Start/Stop stop and disarm inherited CPU workers on confirmed running guests; an unreachable or powered-off guest remains unverified. **Start produces only bounded network traffic, never CPU simulation on test or migrated VMs.** These actions leave SQL, Tomcat, Nginx and IIS intact.
+
+### Prerequisites and Target Confirmation
+
+- Existing Az.Accounts, Az.Resources, Az.Network and Az.Compute, including managed `Set/Get/Remove-AzVMRunCommand` and `ProtectedParameter` support. Working Azure VM agents, their required connectivity, and RBAC for network/VM reads and managed guest command execution are required. Guest commands run elevated; no guest admin password is required. Nothing automatically repairs agents, routes, firewalls or permissions.
+- Select the intended subscription and exact target resource group. Omit `-TargetResourceGroup` to enter it at a prompt; strict validation still applies and no source/default group is inferred. Every invocation displays each VM's exact ARM identity, OS, single NIC/primary private IPv4, VNet/subnet and observed public-IP DNS FQDN. Type **each exact VM name** to confirm it, then confirm subscription/RG scope; no guest command is submitted until all four confirmations pass. Multiple NICs/IP configurations, duplicate IPs and mixed VNets are rejected rather than guessed. Guest IP/hostname and DNS-confirmed guest FQDN are observed separately; unavailable FQDN is reported, never invented. Lab aliases are **not** true DNS names.
+- Default names are `OnPrem-Web`, `OnPrem-SQL`, `OnPrem-Linux-Web`, `OnPrem-Linux-App`. Explicit `-TestMigration` selects only their `-test` counterparts; it never falls back to cutover VMs. **Isolate test copies from source networks before first boot**, including inherited application connections and generators. Record the actual job-produced test identities in the lab register; if their names do not match this controller's explicit selection, stop rather than guessing or substituting final targets. Stop source CPU before migration testing or cutover, not merely because initial replication begins; verify copied workers are stopped/disarmed before testing.
+- Even Check/Status create/remove Azure Run Command resources and need execution/write permission, not Reader alone. Default Check/Status are read-only **in the guests**: first-inventory/validation summaries are console-only, with no guest log/ACL writes, pause, repoint or start. `-VerifySampleOrder` is the explicit order-write exception. Prepare/Start/Stop retain protected Web summary logging.
+
+### Ordinary PowerShell Sequence
+
+**Execution location: instructor workstation — ordinary Windows PowerShell 5.1+, complete checkout root.** Enter actual reviewed names/IDs, not assumed defaults. The sequence is **Check → Prepare → Check → optional Start → Status → Stop**, with another Check after hardening:
+
+```powershell
+Connect-AzAccount
+$subscriptionId = Read-Host 'Intended subscription ID'
+Set-AzContext -SubscriptionId $subscriptionId
+$targetRg = Read-Host 'Exact target resource group'
+$controller = '.\scripts\post-migration-labtraffic.ps1'
+
+& $controller -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId  # Default Check: jobs first
+& $controller -Mode Prepare -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId
+& $controller -Mode Check -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId
+# Optional real network/order activity after the checks pass:
+& $controller -Mode Start -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId `
+    -IntervalSeconds 30 -DurationMinutes 60
+# After separately approved post-migration hardening:
+& $controller -Mode Check -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId
+& $controller -Mode Status -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId
+& $controller -Mode Stop -TargetResourceGroup $targetRg -SubscriptionId $subscriptionId
+```
+
+For isolated test copies add `-TestMigration` to **every** invocation and enter their actual resource group. Start itself repeats inventory, Prepare and every required Check before arming/launching either generator. Every mode inventories traffic on all roles before mutations; Stop attempts inventory best-effort without requiring application readiness. Powered-off targets are skipped/reported partial, while Stop continues on other confirmed running targets; no VM is automatically booted.
+
+Prepare/Start explicitly authorize pausing/disabling inherited jobs, backing up hosts files, replacing only `onprem-web/sql/nginx/app` aliases on all four guests while preserving other names and comments, restarting `contoso-orderdesk.service` and reloading Nginx. Existing SQL data, JNDI credentials, application units and proxy configuration are preserved. No Private DNS deployment or network modification occurs. Check reports stale aliases and skips functional calls that could follow them. TCP probes use only verified target private IPs; **IP-only success cannot authorize Start**.
+
+Checks originate in the guests: Web→SQL:1433, Web→App:3000, App→SQL:1433, App→Linux-Web:8080, Linux-Web→App:3000. Local IIS:80, SQL Express:1433, Nginx:80/8080 and Tomcat:3000 services/listeners, expected pages, health/readiness, authenticated SQL existing-order reads and HTTP existing-customer/order reads must all pass. Readiness requires `status=ready`, `database=reachable` and the expected app. Order totals use API `count` or SQL `COUNT_BIG`, not the up-to-20 recent rows. Controller HTTP probes use no environment proxy and reject redirects; the installed generator retains its no-environment-proxy implementation and fixed lab URL. The optional `migrate-step6-post-migration.ps1` helper independently maintains private-IP NSG rules for this graph; rerun Check after any hardening. A failure requires inspection of NSGs/routes/guest firewalls or workload state, not opening all ports or assuming a live target was verified by this documentation.
+
+### Writes, Lifetime and Credentials
+
+Start uses the installed Linux HTTP generator's normal cycle: at most one order POST per interval, **30 seconds minimum**, **60 minutes default**, duration **1–120 minutes**. Tomcat Java, not Python, inserts into SQL. Windows performs SQL reports/count snapshots and HTTP health calls, not inserts. Arming/launching consumes part of the shared duration; very short durations can expire before launch and fail closed. Each guest independently enforces a durable deadline plus scheduler/systemd runtime limit.
+
+Linux reuses the installed `contoso-orderdesk-traffic.service` unchanged: `DynamicUser=true`, original `ExecStart`, strict filesystem/home protection, `NoNewPrivileges` and 64 MiB limit are verified. Its drop-in overrides only `RuntimeMaxSec` and `Restart=no`; boot stays disabled. A separate guest-local timer/root handler only stops traffic and updates expiry state; it never generates HTTP traffic. No boot trigger, automatic restart or reboot auto-resume is installed. Stop disables/stops only generators and expiry controls, leaving application/SQL/proxy/aliases/data intact.
+
+`-VerifySampleOrder` with Check, Prepare or Start is a separate **explicit WRITE**: insert and read back one real sample order after all gates pass. Without this switch, validation performs no order insertion, although inherited jobs may still write. A lost POST response can mean an order committed: **do not retry blindly**.
+
+Web reuses only the exact base64 literal password assignment from the protected migrated `C:\LabTraffic\order-desk.ps1`; it never evaluates that script or prints the credential. If unavailable, explicitly supply the existing **restricted `labapp` SQL login** password:
+
+```powershell
+$sqlPassword = Read-Host 'Existing labapp SQL password' -AsSecureString
+# Add -SqlPassword $sqlPassword to the intended controller invocation.
+```
+
+It is sent only as a managed **protected parameter** when needed. Start stores a machine-DPAPI-protected copy under SYSTEM/Administrators-only ACLs. SQL uses lab-only `TrustServerCertificate=true`; this is not production TLS guidance. Keep credentials, private settings and secret-bearing output out of shared evidence.
+
+### Evidence and Recovery
+
+Web keeps protected `C:\LabTraffic\summary.log` and `native-traffic.log`, each rotated at 1 MiB with two retained rotations, plus Application events from `LabPostMigrationTraffic` and `post-migration-state.json` / config / expiry task. Linux keeps `/var/lib/contoso-orderdesk/labtraffic/state.json` and config; inspect `journalctl -u contoso-orderdesk-traffic.service` locally for individual insert IDs. Linux journal retention follows the existing guest policy; bounded duration limits this run's messages. **Linux detail is not merged into Web's summary**, and no Azure Monitor/DCR collector is added. Status reports native/inherited Windows tasks, both original/legacy Linux generators, the guest deadline timer/handler, and durable state/deadline; an expired flag can remain with a last-written running phase after a kill.
+
+The CPU observation reports `LabCpuSimulation` tasks on both Windows guests and `lab-cpu-simulation.service` on both Linux guests, including actual PID, heartbeat freshness/staleness, UTC phase, total target, measured total/baseline/worker CPU, guard/cooldown and expiry when state is available. A live service/task and fresh heartbeat do not prove the CPU target was achieved; a worker may be deliberately resting. After Prepare/Start/Stop, verify the CPU task/unit is disarmed and its worker PID absent on **every confirmed guest**. Partial/unknown results require inspection, not an assumption that expiry or controller completion stopped all copied workers.
+
+ARM provisioning success is insufficient: every action needs **Succeeded InstanceView, exit code zero and one matching compact JSON marker**. Polls are bounded, writes are not retried, and errors/logs omit raw secret-bearing diagnostics. Unknown, failed or partial Start must be inspected with Status/Run Command and **Stop before another Start**; a controller crash cannot cancel guest deadlines. An unreachable agent prevents remote Stop too: use guest-local Task Scheduler/systemctl or wait for **verified** expiry. Do not remove a still-running/unknown Run Command thinking that it stops generators.

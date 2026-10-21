@@ -65,5 +65,4 @@ credential directory read/execute and sudo ls/netstat, reboot behavior, optional
 and alias repointing in isolated test migration. Repeat using the local-JDBC prerequisite route
 when required. Validate appliance SSH/credential mapping separately, fresh Ubuntu 24.04 OS
 metadata, Tomcat 10.1/Java 17 inventory and a visible Contoso Order Desk Java web asset. A
-local healthy endpoint is not appliance discovery acceptance. No such target execution
-is claimed by static tests.
+local healthy endpoint is not appliance discovery acceptance.

@@ -356,25 +356,26 @@ Write-Log "PHASE 2: Downloading OS images..."
 # alongside the OS images instead of costing the instructor a separate wait in Module 1.
 # The store partition is created by deploy-lab.ps1 before this script runs, so it already
 # exists; it is found by its volume label rather than by assuming a drive letter.
-# This is best-effort. Nothing later in this script depends on it, and Module 1 section 3.3
-# still works unchanged if it did not run.
-# The download link published by Microsoft in the appliance article, in the same table row as
-# the SHA256 it is checked against - so the link and its expected hash are maintained together.
-# The previous source, aka.ms/migrate/appliance/hyperv, came from the lab this was forked from,
-# appears in no Microsoft documentation, and was observed serving a years-old Windows Server 2016
-# build. See VersionNotes.md section 41.
+# Staging is best-effort, but its job is collected before final host readiness is reported.
+# Module 1 section 2.1 remains the manual fallback; import and registration stay manual.
+# The download link is published in Microsoft's appliance article. A supplied expected
+# SHA256 is enforced before extraction; without one, staging is explicitly unverified.
 $applianceUrl = 'https://go.microsoft.com/fwlink/?linkid=2191848'
 $applianceJob = $null
 $applianceRoot = $null
+$applianceStatus = 'NotSelected'
+$applianceHashCheck = 'NotChecked'
+$applianceArchiveSha256 = ''
 if ($IncludeApplianceVhd -ne 'Yes') {
     Write-Log "Appliance VHD staging is off. Module 1 downloads it from the Azure Migrate project when it is needed."
 }
 try {
   if ($IncludeApplianceVhd -eq 'Yes') {
+    $applianceStatus = 'Incomplete'
     $storeVolumes = @(Get-Volume -FileSystemLabel 'ApplianceStore' -ErrorAction SilentlyContinue |
                       Where-Object { $_.DriveLetter })
     if ($storeVolumes.Count -ne 1) {
-        Write-Log "Expected one ApplianceStore volume; the appliance VHD will not be pre-staged."
+        Write-Log "WARNING: expected one ApplianceStore volume; optional appliance staging is NOT COMPLETE."
     } else {
         $applianceRoot = "$($storeVolumes[0].DriveLetter):\Appliance"
         New-Item -ItemType Directory -Path $applianceRoot -Force | Out-Null
@@ -396,7 +397,8 @@ try {
                 if ($fresh -ne $record.ArchiveSha256 -or ($ExpectedSha256 -and $fresh -ne $ExpectedSha256.ToUpperInvariant())) {
                     throw "Existing ZIP hash changed or differs from the supplied hash: actual $fresh. Retained for inspection; do not import."
                 }
-                return "ARCHIVE_REHASHED|$recordedZip|$fresh|extracted files require separate verification"
+                return [pscustomobject]@{ Status = 'ArchiveRehashed'; ArchiveSha256 = $fresh
+                    HashCheck = if ($ExpectedSha256) { 'SuppliedHashMatched' } else { 'Unverified' } }
             }
             if (-not (Test-Path -LiteralPath $zip)) {
                 # curl.exe, not Start-BitsTransfer: BITS fails in a non-interactive SYSTEM
@@ -446,15 +448,17 @@ try {
                 Source       = $Url
                 ExtractionFiles = $extractionFiles
                 Verified     = [bool]$ExpectedSha256
-                Note         = if ($ExpectedSha256) { 'Checked against the SHA256 supplied at deployment. Rehash before import; verify OS inside the guest.' } else { 'Staged from the static link and NOT checked against a published SHA256. Verify before importing; OS must be checked inside the guest.' }
+                Note         = if ($ExpectedSha256) { 'Checked against the SHA256 supplied at deployment. Optional recommended current publisher comparison before manual import; verify OS inside the guest.' } else { 'Staged from the static link and NOT checked against a published SHA256. Optional recommended manual publisher comparison before import; OS must be checked inside the guest.' }
             } | ConvertTo-Json -Depth 4 | Set-Content $done -Encoding UTF8
-            return "STAGED|$($vhd.FullName)|$hash|verify current published ZIP hash before import"
+            return [pscustomobject]@{ Status = 'Staged'; ArchiveSha256 = $hash
+                HashCheck = if ($ExpectedSha256) { 'SuppliedHashMatched' } else { 'Unverified' } }
         } -ArgumentList $applianceRoot, $ApplianceVhdSha256, $applianceUrl
-        Write-Log "Azure Migrate appliance download started in the background into $applianceRoot."
+        Write-Log "Optional appliance download/extraction started in PHASE 2 into $applianceRoot; overlaps OS image preparation, ADK/QEMU and workloads."
+        Write-Log "No host sign-in or checksum prompt is needed; staging is collected before final readiness."
     }
   }
 } catch {
-    Write-Log "WARNING: could not start the appliance download ($($_.Exception.Message)). Module 1 section 3.3 still applies."
+    Write-Log "WARNING: optional appliance staging is NOT COMPLETE; could not start the download ($($_.Exception.Message)). Module 1 section 2.1 is the manual fallback."
     $applianceJob = $null
 }
 
@@ -1406,16 +1410,41 @@ try { $trafficScript = $payloadReader.ReadToEnd() } finally { $payloadReader.Dis
 if ([string]::IsNullOrWhiteSpace($trafficScript)) { throw 'The staged lab traffic script decoded empty.' }
 [IO.File]::WriteAllText($trafficScriptPath, $trafficScript, [Text.UTF8Encoding]::new($false))
 $cpuAssetPayload = '__LAB_CPU_ASSETS_PAYLOAD__'
+$cpuAssetUtf8 = [Text.UTF8Encoding]::new($false, $true)
 $cpuStream = [IO.MemoryStream]::new([Convert]::FromBase64String($cpuAssetPayload))
 $cpuGzip = [IO.Compression.GzipStream]::new($cpuStream, [IO.Compression.CompressionMode]::Decompress)
-$cpuReader = [IO.StreamReader]::new($cpuGzip, [Text.UTF8Encoding]::new($false))
-try { $cpuAssets = $cpuReader.ReadToEnd() | ConvertFrom-Json } finally { $cpuReader.Dispose() }
+$cpuReader = [IO.StreamReader]::new($cpuGzip, $cpuAssetUtf8)
+try { $cpuAssets = $cpuReader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop } finally { $cpuReader.Dispose() }
+if ($cpuAssets -isnot [pscustomobject]) { throw 'CPU asset payload must be an object.' }
 $cpuAssetRoot = Join-Path $labRoot 'cpu-simulation'
-New-Item -ItemType Directory -Path $cpuAssetRoot -Force | Out-Null
+# Validate all entries before writing; never coerce a metadata object into script text.
 foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
     $asset = $cpuAssets.PSObject.Properties[$name]
-    if ($null -eq $asset -or [string]::IsNullOrWhiteSpace([string]$asset.Value)) { throw 'CPU asset decoded empty.' }
-    [IO.File]::WriteAllText((Join-Path $cpuAssetRoot $name), [string]$asset.Value, [Text.UTF8Encoding]::new($false))
+    if ($null -eq $asset -or $asset.Value -isnot [pscustomobject]) { throw "CPU asset entry invalid: $name." }
+    $text = $asset.Value.PSObject.Properties['Text']
+    $hash = $asset.Value.PSObject.Properties['Sha256']
+    if ($null -eq $text -or $text.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($text.Value) -or
+        $null -eq $hash -or $hash.Value -isnot [string] -or $hash.Value -cnotmatch '^[0-9a-f]{64}$') {
+        throw "CPU asset text/checksum invalid: $name."
+    }
+    $assetSha = [Security.Cryptography.SHA256]::Create()
+    try { $actualHash = ([BitConverter]::ToString($assetSha.ComputeHash($cpuAssetUtf8.GetBytes($text.Value)))).Replace('-', '').ToLowerInvariant() }
+    finally { $assetSha.Dispose() }
+    if ($actualHash -cne $hash.Value) { throw "CPU asset transport checksum mismatch: $name." }
+}
+New-Item -ItemType Directory -Path $cpuAssetRoot -Force | Out-Null
+foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+    $asset = $cpuAssets.PSObject.Properties[$name].Value
+    $assetPath = Join-Path $cpuAssetRoot $name
+    [IO.File]::WriteAllText($assetPath, $asset.Text, $cpuAssetUtf8)
+    if ((Get-FileHash -LiteralPath $assetPath -Algorithm SHA256 -ErrorAction Stop).Hash -ine $asset.Sha256) {
+        throw "CPU asset staged checksum mismatch: $name."
+    }
+    if ($name.EndsWith('.ps1')) {
+        $assetTokens = $null; $assetErrors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseFile($assetPath, [ref]$assetTokens, [ref]$assetErrors)
+        if ($assetErrors.Count) { throw "CPU asset staged syntax errors: $name." }
+    }
 }
 # Deployment knows the lab user and the guest addresses; record them so the script can be
 # run on this host with no arguments beyond the lab password.
@@ -1555,22 +1584,37 @@ try {
 foreach ($item in $hostPrep.GetEnumerator()) { Write-Log "  $($item.Key): $($item.Value)" }
 $hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
 
-# Collect the appliance download started in PHASE 2.
+# Collect download, extraction and recording started in PHASE 2 before final readiness.
 if ($applianceJob) {
-    Write-Log "Waiting for the Azure Migrate appliance download to finish..."
+    Write-Log "Waiting for optional appliance staging (download, extraction and completion record)..."
     try {
-        $applianceResult = Receive-Job -Job $applianceJob -Wait -ErrorAction Stop
-        Write-Log "Appliance staging: $applianceResult"
-        Write-Log "         Rehash the exact ZIP against the current official Hyper-V ZIP row before import."
-        Write-Log "         A completion record does not verify an existing extracted disk or the guest OS."
-        Write-Log "         Follow Module 1 section 3.3; keep the source ZIP for inspection."
+        $applianceResult = @(Receive-Job -Job $applianceJob -Wait -ErrorAction Stop)
+        if ($applianceJob.State -ne 'Completed' -or $applianceResult.Count -ne 1) { throw 'Staging did not return one completed result.' }
+        $result = $applianceResult[0]
+        if ($result.Status -notin @('Staged','ArchiveRehashed') -or
+            $result.HashCheck -notin @('Unverified','SuppliedHashMatched') -or
+            $result.ArchiveSha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Staging returned an invalid result.' }
+        $applianceStatus = $result.Status
+        $applianceHashCheck = $result.HashCheck
+        $applianceArchiveSha256 = $result.ArchiveSha256.ToUpperInvariant()
+        Write-Log "Appliance staging: $applianceStatus; archive hash check: $applianceHashCheck."
+        if ($applianceStatus -eq 'ArchiveRehashed') {
+            Write-Log "WARNING: only the existing ZIP was rehashed; extracted files require separate verification."
+        }
+        Write-Log "         Optional recommended publisher SHA256 comparison after deployment: Module 1 section 2.1."
+        Write-Log "         A computed hash alone is not publisher verification. Keep the source ZIP; import stays manual."
     } catch {
-        Write-Log "WARNING: the appliance download did not complete ($($_.Exception.Message))."
-        Write-Log "         Module 1 section 3.3 downloads it by hand; nothing else is affected."
+        $applianceStatus = 'Incomplete'
+        $applianceHashCheck = 'NotChecked'
+        $applianceArchiveSha256 = ''
+        Write-Log "WARNING: optional appliance staging is NOT COMPLETE ($($_.Exception.Message))."
+        Write-Log "         Module 1 section 2.1 is the manual fallback after deployment; workload setup is separate."
     } finally {
         Remove-Job -Job $applianceJob -Force -ErrorAction SilentlyContinue
     }
 }
+$hostPrep['ApplianceStaging'] = [ordered]@{ Status = $applianceStatus; HashCheck = $applianceHashCheck
+    ArchiveSha256 = $applianceArchiveSha256 }
 
 # A download/verifier can take time: never mark completion on an old readiness snapshot.
 $hostPrep['GuestCommunication'] = @(Assert-LabGuestCommunication)
@@ -1582,6 +1626,8 @@ $hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -E
 @{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
    TrafficScript = $trafficScriptPath } |
     ConvertTo-Json | Set-Content "$labRoot\setup-complete.json" -Encoding UTF8
+# Fixed status tokens and a hash only: never emit the raw job, completion record or credentials.
+Write-Output "LAB_APPLIANCE_STAGE|$applianceStatus|$applianceHashCheck|$applianceArchiveSha256"
 Write-Output 'LAB_WORKLOADS_READY'
 
 } catch {

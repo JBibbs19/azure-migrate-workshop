@@ -4,9 +4,15 @@ Deploy the TD SYNNEX Cloud Enablement Services Hyper-V workshop.
 .DESCRIPTION
 Creates one Standard-security Windows host and provisions four nested workload VMs
 (two Windows, two Linux) that behave as one small-business environment. No appliance
-OS VM is created: Module 1 downloads the Azure Migrate appliance VHD onto the host's
-own OS disk and imports it. This script creates billable Azure resources.
+OS VM is created: optional appliance archive staging starts alongside OS image preparation
+on the host's own disk; Module 1 imports it manually. This script creates billable Azure resources.
 Use a new dedicated resource group. Existing groups are refused intentionally.
+Process timing starts after parameter binding and includes preflight and user prompts.
+It ends after cleanup, before optional traffic/CPU startup and the final exit pause.
+.PARAMETER AdminPasswordConfirmation
+Enter the administrator password a second time as a SecureString. It must match exactly,
+including case and spaces. When omitted, an interactive run prompts with masked input;
+unattended runs must supply this parameter. LAB_NO_PAUSE does not waive confirmation.
 .PARAMETER SubscriptionId
 The workshop subscription GUID, supplied as a SecureString so it is masked at the prompt
 rather than displayed on a shared screen. It is not treated as a stored secret.
@@ -32,37 +38,57 @@ separate download and easily confused with it. Default No,
 which is the right answer for a learner: it is an ~11 GB download that is not needed to finish
 Module 0, and Module 1 fetches the appliance from the Azure Migrate project when it is actually
 required - which is also the link that serves the current build. Yes is for an instructor
-preparing a host before a session. When not supplied, the script asks once and defaults to No.
+preparing a host before a session. Yes starts background download/extraction in the OS image
+phase, overlapping ADK/QEMU and workload setup. It is collected before final host readiness;
+any optional staging failure is reported separately. No host sign-in is needed during setup.
+When not supplied, the script asks once and defaults to No.
 .PARAMETER ApplianceVhdSha256
 The SHA256 Microsoft publishes for the AZURE MIGRATE APPLIANCE VHD archive - the Hyper-V zip
 listed under 'Verify security' in the appliance article. Used only with -IncludeApplianceVhd
 Yes, and intended for unattended runs: when supplied, the host checks the archive against it
-during staging and retains a mismatching ZIP for inspection without extracting it. When omitted, the archive is staged and this
-script offers to verify it once deployment finishes.
+during staging and retains a mismatching ZIP for inspection without extracting it. When omitted,
+the archive is staged as unverified. SHA256 is still computed on the host; there is no end-of-run
+checksum prompt or extra rehash call. Module 1 section 2.1 retains an optional recommended manual
+comparison against Microsoft's current Hyper-V ZIP hash after deployment and before import.
 .PARAMETER TomcatJdbcJar
 Optional local official mssql-jdbc-13.6.0.jre11.jar when the guest cannot use Maven HTTPS.
 Supply -TomcatJdbcSha256 with a separately reviewed expected checksum. No new password prompt.
 .PARAMETER TomcatJdbcSha256
 Expected SHA256 for the explicit local JDBC JAR. Required together with -TomcatJdbcJar.
+.PARAMETER LabTraffic
+Prompt (default), Start or Skip for optional source network traffic AFTER successful fresh
+preparation and cleanup. All interactive runs offer a separate No-default question, including
+runs with every deployment parameter supplied. Noninteractive/unattended default Prompt skips
+startup. LAB_NO_PAUSE=1 also skips default questions; explicit -LabTraffic Prompt overrides
+that only in an interactive session. Start opts in unattended and Skip never asks.
+Traffic persists until manually stopped.
+.PARAMETER CpuSimulation
+Independent Prompt (default), Start or Skip for bounded source CPU activity, including when
+network traffic is declined. Same interactive/automation rules as LabTraffic; no automatic renewal.
+.PARAMETER CpuDurationHours
+CPU lifetime in hours, default 24, range 1-168. Does not limit persistent network traffic.
 .PARAMETER HealthPath
 Local JSON status summary, without credentials or raw Run Command output.
 .EXAMPLE
 $secureSubscriptionId = Read-Host 'Workshop subscription ID' -AsSecureString
 $secureAdminCidr = Read-Host 'Your public IPv4 address' -AsSecureString
 $password = Read-Host 'Lab password' -AsSecureString
-.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminSourceCidr $secureAdminCidr
+$passwordConfirmation = Read-Host 'Confirm lab password' -AsSecureString
+.\scripts\deploy-lab.ps1 -SubscriptionId $secureSubscriptionId -ResourceGroupName 'rg-ces-source-01' -AdminUsername 'labadmin' -AdminPassword $password -AdminPasswordConfirmation $passwordConfirmation -AdminSourceCidr $secureAdminCidr
 MODULE COVERAGE
     The scripts and the modules are run separately. This script completes:
 
       Module 0, section 4   Deployment Steps - the whole of it.
-      Module 1, section 2   Prepare the Hyper-V host - applied in full (PHASE 7 of the
-                            host payload). Nothing is left to do there on a script-deployed lab.
-      Module 1, section 3.3 Download and verify the archive - the download and extract are
-                            started only when you opt in. The end-of-run check freshly hashes
-                            the exact ZIP; compare with the current official Hyper-V ZIP row.
+      Module 1, section 2.2 Prepare the Hyper-V host - applied in full (PHASE 7 of the
+                             host payload); the module retains manual confirmation steps.
+      Module 1, section 2.1 Download the archive - optional staging begins in the image phase
+                             and is collected before final readiness. Hash comparison is enforced
+                             if supplied; otherwise the staged archive is explicitly unverified.
+                             The recommended manual publisher comparison remains optional.
 
-    Left for you: Module 0 section 5 (verify inside HyperVHost), section 6 (start the sample
-    traffic, optional), and all of Module 1 from section 1 onward.
+    After preparation/cleanup, optional source traffic and independent CPU startup are offered
+    to students and instructors. Left for you: Module 0 section 5 (verify inside HyperVHost),
+    section 6 (observe optional traffic), and all of Module 1 from section 1 onward.
 #>
 [CmdletBinding()]
 param(
@@ -81,9 +107,20 @@ param(
     [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$ApplianceVhdSha256 = '',
     [string]$TomcatJdbcJar = '',
     [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$TomcatJdbcSha256 = '',
-    [string]$HealthPath
+    [ValidateSet('Prompt','Start','Skip')][string]$LabTraffic = 'Prompt',
+    [ValidateSet('Prompt','Start','Skip')][string]$CpuSimulation = 'Prompt',
+    [ValidateRange(1,168)][int]$CpuDurationHours = 24,
+    [string]$HealthPath,
+    [SecureString]$AdminPasswordConfirmation
 )
+$script:ProcessStartedAt = [DateTimeOffset]::Now
+$script:ProcessClock = [Diagnostics.Stopwatch]::StartNew()
+$script:ProcessTimingReported = $false
+Microsoft.PowerShell.Utility\Write-Host "Deployment process started: $($script:ProcessStartedAt.ToString('o'))"
+Microsoft.PowerShell.Utility\Write-Host 'Timing includes preflight and prompts after parameter binding; ends after cleanup, before optional source startup and the final exit pause.'
 $ErrorActionPreference = 'Stop'
+$script:LabTrafficPromptExplicit = $PSBoundParameters.ContainsKey('LabTraffic') -and $LabTraffic -eq 'Prompt'
+$script:CpuPromptExplicit = $PSBoundParameters.ContainsKey('CpuSimulation') -and $CpuSimulation -eq 'Prompt'
 
 # ================================================================
 # Launch resilience
@@ -160,6 +197,15 @@ function Save-LabDeploymentError {
     }
 }
 
+function Complete-LabProcessTiming {
+    if ($script:ProcessTimingReported) { return }
+    $script:ProcessClock.Stop()
+    $endedAt = [DateTimeOffset]::Now
+    $script:ProcessTimingReported = $true
+    Microsoft.PowerShell.Utility\Write-Host "Deployment process ended: $($endedAt.ToString('o'))"
+    Microsoft.PowerShell.Utility\Write-Host "Deployment process elapsed (including preflight, prompts and cleanup): $($script:ProcessClock.Elapsed.ToString('c'))"
+}
+
 function Wait-LabBeforeExit {
     # Holds a right-click window open. Set LAB_NO_PAUSE=1 for an unattended run.
     if ($env:LAB_NO_PAUSE -eq '1') { return }
@@ -174,6 +220,7 @@ trap {
     Write-Host ''
     Write-Host ($_ | Out-String) -ForegroundColor Red
     Save-LabDeploymentError -ErrorRecord $_
+    Complete-LabProcessTiming
     Wait-LabBeforeExit
     exit 1
 }
@@ -452,17 +499,25 @@ function Read-LabHostConfiguration {
     $content = $content.Replace('__LAB_TRAFFIC_PAYLOAD__', (Compress-LabScript $traffic))
     if (([regex]::Matches($content, '__LAB_CPU_ASSETS_PAYLOAD__')).Count -ne 1) { throw 'CPU host payload marker incompatible.' }
     $cpuAssets = [ordered]@{}
+    $cpuAssetUtf8 = [Text.UTF8Encoding]::new($false, $true)
     foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
-        $asset = Get-Content -LiteralPath (Join-Path $scriptsRoot ('cpu-simulation/' + $name)) -Raw -Encoding UTF8 -ErrorAction Stop
+        $assetPath = Join-Path $scriptsRoot ('cpu-simulation/' + $name)
+        $assetBytes = [IO.File]::ReadAllBytes($assetPath)
+        # Bare .NET text avoids Get-Content ETS metadata in Windows PowerShell 5.1 JSON.
+        # Decoding the bytes directly also preserves a UTF-8 BOM and every newline byte.
+        $asset = $cpuAssetUtf8.GetString($assetBytes)
         if ([string]::IsNullOrWhiteSpace($asset)) { throw 'CPU asset missing or empty. Obtain the complete workshop checkout.' }
         if ($name.EndsWith('.ps1')) {
             $assetTokens = $null; $assetErrors = $null
-            $null = [System.Management.Automation.Language.Parser]::ParseInput($asset, [ref]$assetTokens, [ref]$assetErrors)
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($assetPath, [ref]$assetTokens, [ref]$assetErrors)
             if ($assetErrors.Count) { throw 'CPU asset syntax errors. Obtain the reviewed workshop revision.' }
         }
-        $cpuAssets[$name] = $asset
+        $assetSha = [Security.Cryptography.SHA256]::Create()
+        try { $assetHash = ([BitConverter]::ToString($assetSha.ComputeHash($assetBytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $assetSha.Dispose() }
+        $cpuAssets[$name] = [ordered]@{ Text = $asset; Sha256 = $assetHash }
     }
-    $content = $content.Replace('__LAB_CPU_ASSETS_PAYLOAD__', (Compress-LabScript ($cpuAssets | ConvertTo-Json -Compress)))
+    $content = $content.Replace('__LAB_CPU_ASSETS_PAYLOAD__', (Compress-LabScript ($cpuAssets | ConvertTo-Json -Depth 4 -Compress)))
     $appRoot = Join-Path (Split-Path $scriptsRoot -Parent) 'apps/contoso-orderdesk'
     $runtimePath = Join-Path $appRoot 'dist/runtime.zip'
     $runtimeHashPath = Join-Path $appRoot 'dist/runtime.sha256'
@@ -516,6 +571,286 @@ function Assert-LabRunResult {
         throw "Remote validation did not pass. Review the VM Run Command output. $stderr"
     }
     return $stdout
+}
+
+# Optional source activity is separate from deployment and never repairs or migrates VMs.
+function Test-LabTrafficPromptSession {
+    param([bool]$ExplicitPrompt)
+    if (-not [Environment]::UserInteractive -or ([Environment]::GetCommandLineArgs() -imatch '^-noni')) { return $false }
+    if ($Host.Name -eq 'ConsoleHost') {
+        try { if ([Console]::IsInputRedirected) { return $false } } catch { return $false }
+    }
+    return ($ExplicitPrompt -or $env:LAB_NO_PAUSE -ne '1')
+}
+
+function New-LabFreshTrafficGuard {
+    param([Parameter(Mandatory)][guid]$HostId)
+    $guard = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$metadata = Invoke-RestMethod -Uri 'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01' -Headers @{Metadata='true'} -TimeoutSec 5
+if ([string]$metadata.vmId -ine '__HOST_ID__' -or [string]$metadata.name -cne 'HyperVHost' -or
+    [string]$metadata.resourceGroupName -ine '__SOURCE_GROUP__') { throw 'Source identity mismatch.' }
+$required = @('OnPrem-Web','OnPrem-SQL','OnPrem-Linux-Web','OnPrem-Linux-App')
+$complete = Get-Content 'C:\AzMigrateLab\setup-complete.json' -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+$completedAt = [DateTimeOffset]::Parse([string]$complete.CompletedUtc)
+if ($completedAt -lt [DateTimeOffset]::Parse('__STARTED_AT__') -or $completedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+    @($complete.VMs).Count -ne 4 -or (Compare-Object $required @($complete.VMs)) -or
+    [string]$complete.TrafficScript -cne 'C:\AzMigrateLab\enable-lab-traffic.ps1') { throw 'Not this fresh completed deployment.' }
+foreach ($name in $required) {
+    $vm = @(Get-VM -Name $name -ErrorAction Stop)
+    if ($vm.Count -ne 1 -or [string]$vm[0].Name -cne $name -or [string]$vm[0].State -cne 'Running' -or
+        [string]$vm[0].AutomaticStartAction -cne 'Start') { throw 'Source is not running or is retired/disarmed.' }
+}
+$path = 'C:\AzMigrateLab\enable-lab-traffic.ps1'
+$command = Get-Command $path -ErrorAction Stop
+foreach ($parameter in @('NonInteractive','Mode','Component','CpuSimulation','CpuDurationHours')) {
+    if (-not $command.Parameters.ContainsKey($parameter)) { throw 'Staged controller capability missing.' }
+}
+foreach ($asset in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
+    if (-not (Test-Path -LiteralPath (Join-Path 'C:\AzMigrateLab\cpu-simulation' $asset))) { throw 'Staged CPU asset missing.' }
+}
+$settings = Get-Content 'C:\AzMigrateLab\lab-traffic.settings.json' -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+if ([string]$settings.LinuxUsername -cne '__ADMIN_USER__' -or [string]$settings.SchemaVersion -cne '1' -or
+    [string]$settings.SqlLogin -cne 'labapp') { throw 'Deployment settings mismatch.' }
+$expected = [ordered]@{'onprem-web'='192.168.0.10';'onprem-sql'='192.168.0.11';'onprem-nginx'='192.168.0.12';'onprem-app'='192.168.0.13'}
+if (@($settings.WorkloadAddresses.PSObject.Properties).Count -ne 4) { throw 'Unexpected source aliases.' }
+foreach ($alias in $expected.Keys) {
+    if ([string]$settings.WorkloadAddresses.$alias -cne $expected[$alias]) { throw 'Source alias mismatch.' }
+}
+$null = Get-Command ssh.exe -ErrorAction Stop
+$oldPreference = $ErrorActionPreference
+try { $ErrorActionPreference = 'Continue'; $version = (& ssh.exe -V 2>&1 | Out-String); $sshExit = $LASTEXITCODE }
+finally { $ErrorActionPreference = $oldPreference }
+if ($sshExit -ne 0 -or $version -notmatch 'OpenSSH[_a-zA-Z]*(\d+)\.(\d+)' -or [int]$Matches[1] -lt 8 -or
+    ([int]$Matches[1] -eq 8 -and [int]$Matches[2] -lt 4)) { throw 'Installed OpenSSH 8.4+ is required.' }
+function Assert-LabSourceWorkloads {
+    foreach ($address in @('http://192.168.0.10','http://192.168.0.12')) {
+        $page = Invoke-WebRequest $address -UseBasicParsing -TimeoutSec 10
+        if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'TD SYNNEX') {
+            throw "Workshop sample site missing at $address."
+        }
+    }
+    $api = Invoke-RestMethod 'http://192.168.0.13:3000/api/health' -TimeoutSec 10
+    if ($api.status -ne 'healthy' -or $api.server -ne 'OnPrem-Linux-App' -or $api.app -ne 'Contoso Order Desk' -or -not $api.timestamp) {
+        throw 'Tomcat health contract failed or wrong application.'
+    }
+    $info = Invoke-RestMethod 'http://192.168.0.13:3000/api/info' -TimeoutSec 10
+    if ($info.app -ne 'Contoso Order Desk' -or $info.javaVersion -notmatch '^17(?:\.|$)') { throw 'Tomcat Java runtime contract failed.' }
+    $ready = Invoke-RestMethod 'http://192.168.0.13:3000/api/ready' -TimeoutSec 20
+    if ($ready.status -ne 'ready') { throw 'Tomcat SQL readiness failed.' }
+    $orders = Invoke-RestMethod 'http://192.168.0.13:3000/api/orders' -TimeoutSec 20
+    if ($orders.customerCount -lt 1 -or $orders.count -lt 1 -or @($orders.customers).Count -lt 1 -or @($orders.orders).Count -lt 1) {
+        throw 'Tomcat cannot read the existing ContosoApp seed data.'
+    }
+    $desk = Invoke-WebRequest 'http://192.168.0.13:3000/' -UseBasicParsing -TimeoutSec 20
+    if ($desk.StatusCode -ne 200 -or $desk.Content -notmatch 'Contoso Order Desk') { throw 'Named Tomcat order desk page missing.' }
+    $proxy = Invoke-RestMethod 'http://192.168.0.12:8080/api/ready' -TimeoutSec 20
+    if ($proxy.status -ne 'ready' -or $proxy.app -ne 'Contoso Order Desk') { throw 'Nginx-to-Tomcat SQL readiness failed.' }
+    if (-not (Test-NetConnection 192.168.0.11 -Port 1433 -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+        throw 'SQL TCP listener unavailable.'
+    }
+}
+Assert-LabSourceWorkloads
+'@
+    return $guard.Replace('__HOST_ID__', $HostId.ToString()).Replace('__SOURCE_GROUP__', $ResourceGroupName).Replace(
+        '__STARTED_AT__', $script:ProcessStartedAt.ToUniversalTime().ToString('o')).Replace('__ADMIN_USER__', $AdminUsername)
+}
+
+function Get-LabTrafficProbeText {
+    param([Parameter(Mandatory)]$Result)
+    if (@($Result).Count -ne 1 -or $null -eq $Result -or $null -eq $Result.PSObject.Properties['Value']) { throw 'Invalid probe result.' }
+    $stdout = @()
+    foreach ($entry in @($Result.Value)) {
+        if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['Code'] -or
+            $null -eq $entry.PSObject.Properties['Message']) { throw 'Invalid probe status.' }
+        $code = [string]$entry.Code
+        if ($code -match '(?i)(failed|error)' -or ($entry.PSObject.Properties['Level'] -and [string]$entry.Level -eq 'Error')) { throw 'Probe failed.' }
+        if ($code -match '(?i)StdErr' -and -not [string]::IsNullOrWhiteSpace([string]$entry.Message)) { throw 'Probe stderr.' }
+        if ($code -match '(?i)StdOut') {
+            if ($code -notmatch '(?i)/succeeded$') { throw 'Probe stdout failed.' }
+            $stdout += [string]$entry.Message
+        }
+    }
+    $text = $stdout -join "`n"
+    if (([regex]::Matches($text, '(?m)^LAB_DEPLOY_TRAFFIC_READY\r?$')).Count -ne 1 -or
+        $text -match 'LAB_DEPLOY_PREFLIGHT_FAILED') { throw 'Fresh source readiness not confirmed.' }
+    return $text
+}
+
+function Write-LabTrafficOutcome {
+    param([Parameter(Mandatory)]$View, [bool]$StartNetwork, [bool]$StartCpu)
+    $valid = $null -ne $View -and $null -ne $View.PSObject.Properties['ExecutionState'] -and
+        [string]$View.ExecutionState -ceq 'Succeeded' -and $null -ne $View.PSObject.Properties['ExitCode'] -and
+        $null -ne $View.ExitCode -and [string]$View.ExitCode -ceq '0' -and
+        $null -ne $View.PSObject.Properties['Error'] -and [string]::IsNullOrWhiteSpace([string]$View.Error) -and
+        $null -ne $View.PSObject.Properties['Output']
+    $text = if ($valid) { [string]$View.Output } else { '' }
+    if ($StartNetwork) {
+        if ($valid -and ([regex]::Matches($text, '(?m)^LAB_TRAFFIC_FULLY_STARTED\r?$')).Count -eq 1 -and
+            $text -notmatch 'LAB_DEPLOY_NETWORK_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED') {
+            Write-Host 'Network lab traffic fully started on the four source workloads. It persists until explicitly stopped (including across reboot).' -ForegroundColor Green
+        } else { Write-Warning 'Network traffic outcome UNKNOWN/partial; generators may be running. Inspect source Status/Stop before any retry.' }
+    }
+    if ($StartCpu) {
+        if ($valid -and ([regex]::Matches($text, '(?m)^LAB_CPU_FULLY_STARTED\r?$')).Count -eq 1 -and
+            $text -notmatch 'LAB_DEPLOY_CPU_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED') {
+            Write-Host 'CPU Simulation fully started on all four source guests; its bounded guest-local expiry is independent of network traffic.' -ForegroundColor Green
+        } else { Write-Warning 'CPU Simulation outcome UNKNOWN/partial; inspect CPU Status/Stop before any retry. This does not change the network outcome.' }
+    }
+}
+
+function Start-LabFreshSourceTraffic {
+    param([bool]$StartNetwork, [bool]$StartCpu)
+    $job = $null; $probeJob = $null; $protectedTraffic = $null; $trafficPassword = $null
+    $attempted = $false; $terminal = $false
+    $runName = 'fresh-source-traffic-' + [guid]::NewGuid().ToString('N')
+    try {
+        foreach ($name in @('Set-AzVMRunCommand','Get-AzVMRunCommand','Remove-AzVMRunCommand','Invoke-AzVMRunCommand')) {
+            $null = Get-Command $name -ErrorAction Stop
+        }
+        if (-not (Get-Command Set-AzVMRunCommand).Parameters.ContainsKey('ProtectedParameter')) { throw 'Protected parameters unavailable.' }
+        $hostVm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -Status -ErrorAction Stop
+        $power = @($hostVm.Statuses | Where-Object { $_.Code -like 'PowerState/*' })
+        if ($power.Count -ne 1 -or [string]$power[0].Code -cne 'PowerState/running' -or
+            [string]$hostVm.VmId -eq [string][guid]::Empty) { throw 'Source host power/identity unavailable.' }
+        $guard = New-LabFreshTrafficGuard -HostId ([guid]$hostVm.VmId)
+        $probe = "try {`n$guard`nWrite-Output 'LAB_DEPLOY_TRAFFIC_READY'`n} catch { Write-Output 'LAB_DEPLOY_PREFLIGHT_FAILED'; exit 1 }"
+        $probeJob = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -CommandId RunPowerShellScript -ScriptString $probe -AsJob -ErrorAction Stop
+        $waited = Wait-Job -Job $probeJob -Timeout 300
+        if (-not $waited -or $probeJob.State -ne 'Completed') { throw 'Readiness probe not confirmed.' }
+        $probeResult = Receive-Job -Job $probeJob -ErrorAction Stop
+        $null = Get-LabTrafficProbeText -Result $probeResult
+        $payload = @'
+param([Parameter(Mandatory)][string]$AdminPassword)
+$ErrorActionPreference = 'Stop'
+$WarningPreference = 'SilentlyContinue'
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$secure = $null
+try {
+    __FRESH_GUARD__
+    $secure = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    if (__START_NETWORK__) {
+        try {
+            $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -Mode Start -Component Network -CpuSimulation Skip -CpuDurationHours __CPU_HOURS__ -ErrorAction Stop 2>$null 6>$null)
+            if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -ne 1) { throw 'Unverified.' }
+            Write-Output 'LAB_TRAFFIC_FULLY_STARTED'
+        } catch { Write-Output 'LAB_DEPLOY_NETWORK_UNVERIFIED' }
+    }
+    if (__START_CPU__) {
+        try {
+            __FRESH_GUARD__
+            $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -Mode Start -Component Cpu -CpuSimulation Start -CpuDurationHours __CPU_HOURS__ -ErrorAction Stop 2>$null 6>$null)
+            if (@($result | Where-Object { [string]$_ -ceq 'LAB_CPU_FULLY_STARTED' }).Count -ne 1) { throw 'Unverified.' }
+            Write-Output 'LAB_CPU_FULLY_STARTED'
+        } catch { Write-Output 'LAB_DEPLOY_CPU_UNVERIFIED' }
+    }
+} catch { Write-Output 'LAB_DEPLOY_PREFLIGHT_FAILED'; exit 1 }
+finally { $AdminPassword = $null; $secure = $null; $result = $null }
+'@
+        $networkLiteral = if ($StartNetwork) { '$true' } else { '$false' }
+        $cpuLiteral = if ($StartCpu) { '$true' } else { '$false' }
+        $payload = $payload.Replace('__FRESH_GUARD__', $guard).Replace('__START_NETWORK__', $networkLiteral).Replace('__START_CPU__', $cpuLiteral).Replace('__CPU_HOURS__', [string]$CpuDurationHours)
+        $trafficPassword = ([pscredential]::new($AdminUsername, $AdminPassword)).GetNetworkCredential().Password
+        $protectedTraffic = @(@{Name='AdminPassword';Value=$trafficPassword})
+        $attempted = $true
+        $job = Set-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -Location $Location -RunCommandName $runName -SourceScript $payload -ProtectedParameter $protectedTraffic -TimeoutInSecond 1800 -AsyncExecution -AsJob -ErrorAction Stop
+        $waited = Wait-Job -Job $job -Timeout 300
+        if (-not $waited -or $job.State -ne 'Completed') { throw 'Submission not confirmed.' }
+        $null = Receive-Job -Job $job -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds(1860)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $run = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
+            if ($null -ne $run -and $run.PSObject.Properties['InstanceView'] -and $null -ne $run.InstanceView -and
+                $run.InstanceView.PSObject.Properties['ExecutionState'] -and
+                [string]$run.InstanceView.ExecutionState -in @('Succeeded','Failed','TimedOut','Canceled','Cancelled')) {
+                $terminal = $true
+                Write-LabTrafficOutcome -View $run.InstanceView -StartNetwork $StartNetwork -StartCpu $StartCpu
+                return
+            }
+            Start-Sleep -Seconds 10
+        }
+        throw 'Observation timed out.'
+    } catch {
+        # Protected Run Command exceptions/output can contain credentials: report only fixed text.
+        if ($attempted) { Write-Warning "Optional startup outcome UNKNOWN; generators or remote execution may still be running. Inspect managed Run Command '$runName' and source Status/Stop before retrying. No automatic retry or rollback occurred." }
+        else { Write-Warning 'Optional startup NOT initiated by this offer: source readiness/protected remote prerequisites were not verified. Deployment remains complete. Inspect the source before using the host-interactive fallback.' }
+    } finally {
+        if ($terminal) {
+            try { Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runName -ErrorAction Stop | Out-Null }
+            catch { Write-Warning 'Terminal optional-startup Run Command needs manual cleanup; removing it does not stop generators.' }
+        }
+        foreach ($finishedJob in @($job,$probeJob)) {
+            if ($null -ne $finishedJob -and $finishedJob.State -in @('Completed','Failed','Stopped')) {
+                Remove-Job -Job $finishedJob -ErrorAction SilentlyContinue
+            }
+        }
+        if ($null -ne $protectedTraffic) { foreach ($parameter in $protectedTraffic) { $parameter.Value = $null } }
+        $trafficPassword = $null; $protectedTraffic = $null; $probeResult = $null; $run = $null
+    }
+}
+
+function Invoke-LabFreshTrafficOffer {
+    Write-Host ''
+    Write-Host 'Deployment preparation and cleanup are complete. Optional source startup below is NOT included in deployment timing.' -ForegroundColor Cyan
+    Write-Host 'Available to students and instructors, with or without appliance download; no Azure Migrate project is required.'
+    Write-Host 'Network traffic creates real sample orders. It persists across console closure and reboot until explicitly stopped; there is no lab-completion stop timer.' -ForegroundColor Yellow
+    Write-Host 'After the lab/final write-freeze, stop ON HyperVHost: C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable'
+    $networkStart = ($LabTraffic -eq 'Start')
+    if ($LabTraffic -eq 'Prompt' -and (Test-LabTrafficPromptSession -ExplicitPrompt $script:LabTrafficPromptExplicit)) {
+        $networkStart = ((Read-Host 'Start optional network lab traffic? [y/N]') -match '^(?i:y|yes)$')
+    }
+    Write-Host "CPU Simulation is independent: approximately 15% day / 2% night total guest CPU (UTC 06:00-22:00 / 22:00-06:00), no peaks. Duration $CpuDurationHours hours (default 24, range 1-168); no reboot auto-resume or automatic renewal." -ForegroundColor Yellow
+    Write-Host 'For the full day/night profile, collect 24 hours during performance capture. No recommendation change is guaranteed; normal VM uptime charges continue.'
+    $cpuStart = ($CpuSimulation -eq 'Start')
+    if ($CpuSimulation -eq 'Prompt' -and (Test-LabTrafficPromptSession -ExplicitPrompt $script:CpuPromptExplicit)) {
+        $cpuStart = ((Read-Host 'Start optional CPU Simulation? [y/N]') -match '^(?i:y|yes)$')
+    }
+    if (-not $networkStart -and -not $cpuStart) {
+        Write-Host 'Neither component selected. No remote probe, credential conversion or generator change was made by this offer; existing generators are unchanged.'
+        return
+    }
+    Start-LabFreshSourceTraffic -StartNetwork $networkStart -StartCpu $cpuStart
+    Write-Host 'Verify ON HyperVHost: C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Both'
+    Write-Host 'Do not repeat Start or renew CPU after an unknown result. Inspect Status/Stop first; infrastructure deployment remains complete.'
+}
+
+function Test-LabAdminPasswordMatch {
+    param([Parameter(Mandatory)][SecureString]$Password, [Parameter(Mandatory)][SecureString]$Confirmation)
+    if ($Password.Length -ne $Confirmation.Length) { return $false }
+    $passwordBuffer = [IntPtr]::Zero
+    $confirmationBuffer = [IntPtr]::Zero
+    try {
+        $passwordBuffer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+        $confirmationBuffer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Confirmation)
+        # Compare UTF-16 code units exactly, without managed plaintext strings or normalization.
+        for ($i = 0; $i -lt $Password.Length; $i++) {
+            if ([Runtime.InteropServices.Marshal]::ReadInt16($passwordBuffer, $i * 2) -ne
+                [Runtime.InteropServices.Marshal]::ReadInt16($confirmationBuffer, $i * 2)) { return $false }
+        }
+        return $true
+    } finally {
+        if ($passwordBuffer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBuffer) }
+        if ($confirmationBuffer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($confirmationBuffer) }
+    }
+}
+
+# Confirm before loading modules, checking Azure context, or writing any resources.
+if (-not $PSBoundParameters.ContainsKey('AdminPasswordConfirmation')) {
+    $confirmationInputRedirected = $false
+    if ($Host.Name -eq 'ConsoleHost') {
+        try { $confirmationInputRedirected = [Console]::IsInputRedirected } catch { }
+    }
+    if (-not [Environment]::UserInteractive -or $confirmationInputRedirected -or
+        ([Environment]::GetCommandLineArgs() -imatch '^-noni')) {
+        throw 'Unattended deployment requires -AdminPasswordConfirmation as a second SecureString entry matching -AdminPassword.'
+    }
+    try { $AdminPasswordConfirmation = Read-Host 'Confirm administrator password' -AsSecureString }
+    catch { throw 'Could not read password confirmation. Rerun with -AdminPasswordConfirmation as a second SecureString entry.' }
+}
+if ($null -eq $AdminPasswordConfirmation -or -not (Test-LabAdminPasswordMatch -Password $AdminPassword -Confirmation $AdminPasswordConfirmation)) {
+    throw 'Administrator passwords do not match. Rerun and enter the same password twice; case and spaces must match exactly. No resources were changed.'
 }
 
 # Both values arrive masked. Convert once, validate, then use the plain form internally.
@@ -588,13 +923,10 @@ if (-not $PSBoundParameters.ContainsKey('IncludeApplianceVhd')) {
     }
 }
 if ($IncludeApplianceVhd -eq 'Yes') {
-    # The published hash is NOT asked for here. Nothing can be verified before the download has
-    # happened, so the question would be asked long before it could be answered usefully. The
-    # host computes the archive's SHA256 as part of staging it, and this script compares that
-    # against the published value at the END of the run.
     Write-Host ''
-    Write-Host 'The Azure Migrate appliance VHD will be staged on the host during deployment.' -ForegroundColor Cyan
-    Write-Host 'Its SHA256 is computed there, and this script offers to check it when deployment finishes.' -ForegroundColor Gray
+    Write-Host 'Optional appliance staging starts alongside OS image preparation and overlaps tool/workload setup.' -ForegroundColor Cyan
+    Write-Host 'The host computes SHA256 and enforces any supplied expected hash; otherwise staging is unverified.' -ForegroundColor Gray
+    Write-Host 'No checksum prompt or host sign-in is needed. Wait for deployment to finish before accessing HyperVHost.' -ForegroundColor Gray
 }
 
 $hostSku = Get-LabHostSku -VMSize $VMSize -Location $Location
@@ -789,111 +1121,49 @@ Write-Output 'APPLIANCE_STORE_READY'
     $job = Set-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -Location $Location -RunCommandName $runName `
         -SourceScript $hostScript -Parameter $parameters -ProtectedParameter $protected -TimeoutInSecond ($GuestSetupTimeoutMinutes * 60) -AsyncExecution -AsJob
     $null = Wait-LabJob $job 'Submit guest setup' -TimeoutSeconds 900 -HealthPath $HealthPath
-    $null = Wait-LabManagedSetup -ReadStatus {
+    $setupResult = Wait-LabManagedSetup -ReadStatus {
         Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
     } -Observation $setupObservation -TimeoutSeconds (($GuestSetupTimeoutMinutes * 60) + 600) -HealthPath $HealthPath
     $setupPassed = $true
+    Write-Host 'Host preparation complete. Wait for the deployment process end/timing message before connecting to HyperVHost.'
     Write-Host "Workload setup verified. Host public IP: $($pip.IpAddress). Host login: $AdminUsername."
     Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
     Write-Host 'Contoso Order Desk runs on Tomcat 10.1 / OpenJDK 17 at .13:3000; initial SQL and Nginx proxy readiness passed.'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
-    Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. It is not running; start it from HyperVHost if you want a populated dependency map.'
+    Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. Nothing has been started by deployment; optional network and CPU choices follow after cleanup and the deployment timing message.'
     if ($IncludeApplianceVhd -eq 'Yes') {
-        # Rehash the actual ZIP: the completion record may predate a manual replacement.
-        $stagedHash = $null
-        $stagedArchive = $null
-        try {
-            $readHash = @'
-$ErrorActionPreference = 'Stop'
-$root = '__ROOT__'
-$recordPath = Join-Path $root 'download-complete.json'
-$record = $null
-if (Test-Path -LiteralPath $recordPath) { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json }
-$archive = if ($record -and $record.Archive) { [string]$record.Archive } else { Join-Path $root 'MigrateAppl.zip' }
-$prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
-$full = [IO.Path]::GetFullPath($archive)
-if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Recorded archive is outside ApplianceStore. Select and verify the correct ZIP manually.' }
-$item = Get-Item -LiteralPath $full -ErrorAction Stop
-if ($item.PSIsContainer -or $item.Extension -ne '.zip' -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Recorded archive is not a regular ZIP file.' }
-$hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
-$recorded = if ($record) { [string]$record.ArchiveSha256 } else { '' }
-$result = [ordered]@{ Archive=$item.FullName; Bytes=$item.Length; ActualSha256=$hash; RecordedSha256=$recorded }
-Write-Output ('APPLIANCE_ARCHIVE_JSON|' + ($result | ConvertTo-Json -Compress))
-'@
-            $readHash = $readHash.Replace('__ROOT__', $appliancePath.Replace("'", "''"))
-            $hashResult = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -CommandId RunPowerShellScript -ScriptString $readHash -ErrorAction Stop
-            $hashText = (@($hashResult.Value | Where-Object { $_.Code -match 'StdOut' } | ForEach-Object { $_.Message }) -join "`n").Trim()
-            if ($hashText -match '(?m)^APPLIANCE_ARCHIVE_JSON\|([^\r\n]+)') {
-                $stagedArchive = $Matches[1] | ConvertFrom-Json
-                if ($stagedArchive.ActualSha256 -match '^[0-9A-Fa-f]{64}$') { $stagedHash = $stagedArchive.ActualSha256.ToUpperInvariant() }
-            }
-        } catch { Write-Warning 'Could not rehash the exact staged ZIP. Inspect its filename and completion record on the host; verify manually before import.' }
-
-        Write-Host ''
-        if (-not $stagedHash) {
-            Write-Warning 'The actual appliance ZIP could not be rehashed. A missing/renamed ZIP or stale completion record is not proof of corruption. Select the exact file and verify it before import (Module 1, section 3.3).'
+        # Read only fixed status tokens from the already-completed managed setup result.
+        # Do not print raw Run Command output or start a duplicate archive rehash command.
+        $stageStatus = 'Incomplete'
+        $hashCheck = 'NotChecked'
+        $archiveSha256 = ''
+        $stageMatch = [regex]::Match([string]$setupResult.Output,
+            '(?m)^LAB_APPLIANCE_STAGE\|(Staged|ArchiveRehashed)\|(Unverified|SuppliedHashMatched)\|([0-9A-Fa-f]{64})\r?$')
+        if ($stageMatch.Success) {
+            $stageStatus = $stageMatch.Groups[1].Value
+            $hashCheck = $stageMatch.Groups[2].Value
+            $archiveSha256 = $stageMatch.Groups[3].Value
+        }
+        if ($stageStatus -eq 'Staged') {
+            Write-Host "Optional appliance download/extraction and completion record finished in $appliancePath. Import and registration remain manual." -ForegroundColor Cyan
+        } elseif ($stageStatus -eq 'ArchiveRehashed') {
+            Write-Warning 'Existing appliance ZIP rehashed only; the existing extracted files still require separate verification. No fresh staging is claimed.'
         } else {
-            # Reference value, recorded from the 'Verify security' table in the appliance article
-            # on 2026-09-27, in the same row as the download link the host used. It is ADVISORY,
-            # not authoritative: Microsoft republishes the appliance periodically, and when they
-            # do this value goes stale while the download stays correct. So a mismatch is
-            # reported as ambiguous rather than as a failure - see VersionNotes.md section 41.
-            $referenceHash = 'AD3C72FB21037B10969548228B4F651BF5A79CD0A34D608CD470B75329A24A24'
-            $referenceDate = '2026-09-27'
-
-            Write-Host 'Azure Migrate appliance staged on the host.' -ForegroundColor Cyan
-            Write-Host "  ZIP file : $($stagedArchive.Archive)"
-            Write-Host "  Bytes    : $($stagedArchive.Bytes)"
-            Write-Host "  SHA256   : $stagedHash (freshly read from this ZIP)"
-            if (-not $stagedArchive.RecordedSha256) {
-                Write-Host '  Historical record: absent; not used as verification.'
-            } elseif ($stagedHash -eq $stagedArchive.RecordedSha256) {
-                Write-Host '  Historical record: MATCH to the freshly computed ZIP hash (not a current publisher check).'
+            Write-Warning 'Optional appliance staging is NOT COMPLETE or its result could not be confirmed. Workload setup passed separately; use Module 1 section 2.1 after deployment.'
+        }
+        if ($archiveSha256) {
+            Write-Host "  Archive SHA256 computed during host staging: $archiveSha256"
+            if ($hashCheck -eq 'SuppliedHashMatched') {
+                Write-Host '  Archive matched the expected hash supplied at deployment; this is not a fresh publisher lookup.'
             } else {
-                Write-Warning "Historical record: MISMATCH ($($stagedArchive.RecordedSha256)). The ZIP or record may have been replaced; extraction provenance needs review."
-            }
-            if ($stagedHash -eq $referenceHash) {
-                Write-Host "  Matches the appliance published as of $referenceDate." -ForegroundColor Green
-            } else {
-                Write-Host ''
-                Write-Warning "This does not match the appliance recorded on $referenceDate ($($referenceHash.Substring(0,16))...)."
-                Write-Warning 'Possible causes include a different published version, artifact type, download source or changed/incomplete bytes. This comparison alone does not identify the cause.'
-                Write-Host '    Do not import until this exact ZIP matches the current official Hyper-V ZIP hash.' -ForegroundColor White
-            }
-            Write-Host '  Published value, "Verify security" table:' -ForegroundColor Gray
-            Write-Host '  https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security' -ForegroundColor Gray
-            if ($ApplianceVhdSha256) {
-                if ($stagedHash -eq $ApplianceVhdSha256.ToUpperInvariant()) {
-                    Write-Host '  Fresh ZIP comparison against the hash supplied at the command line: MATCH.' -ForegroundColor Green
-                } else {
-                    Write-Warning "Fresh ZIP comparison against the supplied hash: MISMATCH (expected $ApplianceVhdSha256, actual $stagedHash). Do not import; retain the ZIP for inspection."
-                }
-            } elseif ([Environment]::UserInteractive -and $env:LAB_NO_PAUSE -ne '1') {
-                Write-Host ''
-                $published = (Read-Host '  Paste the published SHA256 to verify now, or press Enter to verify later').Trim()
-                if (-not $published) {
-                    Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
-                } elseif ($published -notmatch '^[0-9A-Fa-f]{64}$') {
-                    Write-Warning 'That is not a 64-character SHA256 value. The archive is unverified; check it before importing.'
-                } elseif ($published.ToUpperInvariant() -eq $stagedHash) {
-                    Write-Host '  MATCH. The staged appliance is the published build.' -ForegroundColor Green
-                    if ($published.ToUpperInvariant() -ne $referenceHash) {
-                        Write-Host "  Note: the supplied value differs from the advisory reference recorded on $referenceDate." -ForegroundColor Gray
-                        Write-Host '  Confirm its current official artifact row before updating the reference.' -ForegroundColor Gray
-                    }
-                } else {
-                    Write-Host ''
-                    Write-Warning "MISMATCH (expected $published, actual $stagedHash). Check the current Hyper-V ZIP row, exact artifact and source; the cause is not established."
-                    Write-Warning 'Do not import or bypass verification. Retain the ZIP for inspection; do not delete extracted folders that might contain VM disks (Module 1, section 3.3).'
-                }
-            } else {
-                Write-Warning 'Not verified. Check it before importing the appliance - Module 1, section 3.3.'
+                Write-Warning 'Staged archive is UNVERIFIED against the publisher. A computed hash alone is not publisher verification.'
             }
         }
+        Write-Host 'Optional recommended manual SHA256 comparison after deployment and before import: docs/Module-1-Discovery.md section 2.1.'
     } else {
-        Write-Host "Download and extract the Azure Migrate appliance VHD into $appliancePath on HyperVHost, then import and register it as described in docs/Module-1-Discovery.md."
+        Write-Host "Appliance staging was not selected. After deployment, use $appliancePath on HyperVHost for the manual Module 1 section 2.1 workflow."
     }
 } catch {
     try {
@@ -923,6 +1193,12 @@ Write-Output ('APPLIANCE_ARCHIVE_JSON|' + ($result | ConvertTo-Json -Compress))
     } elseif ($runCreated) {
         Write-Warning 'ConfigureWorkshop is retained for failure diagnostics. Inspect its instance view and remove it after it has stopped.'
     }
+    Complete-LabProcessTiming
+}
+
+if ($setupPassed) {
+    try { Invoke-LabFreshTrafficOffer }
+    catch { Write-Warning 'Optional source startup outcome UNKNOWN; inspect source Status/Stop before retrying. Infrastructure preparation succeeded; no automatic rollback or retry was attempted.' }
 }
 
 # A right-click window closes on success just as fast as on failure. The summary above is the

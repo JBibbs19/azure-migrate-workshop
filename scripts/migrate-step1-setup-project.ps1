@@ -88,7 +88,7 @@ MODULE COVERAGE
       Module 1, section 1   Create the project - NOT created here. This script checks for the
                             project and prints the portal steps when it is absent. A project
                             made with New-AzMigrateProject has no tool solutions registered and
-                            cannot generate an appliance key. See VersionNotes.md section 26.
+                            cannot generate an appliance key. Use the portal project-key instructions in Module 1.
 
       Module 2, section 4.1 Build the target landing zone - resource group, VNet (10.1.0.0/16),
                             subnet (default, 10.1.0.0/24) and NSG with five inbound rules, plus

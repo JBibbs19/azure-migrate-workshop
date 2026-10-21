@@ -2815,9 +2815,17 @@ if ($attached.Count) { throw 'An existing VM uses this extracted disk; do not im
 $configs = @($files | Where-Object { $_.Extension -eq '.vmcx' })
 if (-not $configs.Count) { $configs = @($files | Where-Object { $_.Extension -eq '.xml' }) }
 if ($configs.Count -ne 1) { throw 'Expected exactly one exported VM configuration. Check the current official import route; generation will not be guessed.' }
-$disk = Get-VHD -Path $vhdPath
-Write-Output ('TEMPLATE_CAPACITY_GB|{0}' -f [math]::Round($disk.Size / 1GB, 1))
-if ($disk.Size -lt 80GB) { throw 'Verified template has less than the documented roughly 80 GB disk requirement. Stop for instructor review; disk and guest partition were not resized.' }
+$disks = @(Get-VHD -Path $vhdPath -ErrorAction Stop)
+if ($disks.Count -ne 1) { throw 'Expected one readable appliance VHD; stop before import.' }
+$disk = $disks[0]
+$capacityBytes = [UInt64]0; $diskFileBytes = [UInt64]0
+$inv = [Globalization.CultureInfo]::InvariantCulture
+if (-not [UInt64]::TryParse([string]$disk.Size, [Globalization.NumberStyles]::None, $inv, [ref]$capacityBytes) -or $capacityBytes -eq 0 -or
+    -not [UInt64]::TryParse([string]$disk.FileSize, [Globalization.NumberStyles]::None, $inv, [ref]$diskFileBytes) -or $diskFileBytes -eq 0) {
+    throw 'Appliance VHD capacity or file size is missing, invalid or nonpositive; stop before import.'
+}
+# Preserve the verified export. Approximate host-storage guidance is not an exact VHD-capacity gate.
+Write-Output ('TEMPLATE_CAPACITY_BYTES|{0}|FILE_BYTES|{1}' -f $capacityBytes.ToString($inv), $diskFileBytes.ToString($inv))
 $copyBytes = ($files | Measure-Object Length -Sum).Sum
 $free = (Get-Volume -DriveLetter $root.Substring(0,1)).SizeRemaining
 if ($free -lt ($copyBytes + 10GB)) { throw 'Insufficient ApplianceStore space for the physical source-file copy plus 10 GB headroom. Nothing was deleted.' }
@@ -2886,17 +2894,27 @@ Write-Output ('APPLIANCE_IMPORTED|{0}' -f $imported.Generation)
 
 # --- Confirm the appliance VM matches Module 1 (section 3.5 checklist) -------------------
 $verifyScript = @'
+$ErrorActionPreference = 'Stop'
 $vmName = '__VMNAME__'; $drive = '__DRIVE__'
 $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
 if (-not $vm) { Write-Output 'APPLIANCE_CHECK|Missing'; return }
-$paths = @(Get-VMHardDiskDrive -VMName $vmName | ForEach-Object { $_.Path })
-$onStore = ($paths.Count -gt 0 -and @($paths | Where-Object { $_ -like "$drive*" }).Count -eq $paths.Count)
-$maxGB = 0
-if ($paths.Count) { $maxGB = [math]::Round((Get-VHD -Path $paths[0]).Size / 1GB) }
+$paths = @(Get-VMHardDiskDrive -VMName $vmName -ErrorAction Stop | ForEach-Object { $_.Path })
+if ($paths.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$paths[0])) { throw 'Expected exactly one attached appliance VHD; missing or ambiguous disk requires instructor review.' }
+$onStore = @($paths | Where-Object { $_ -like "$drive*" }).Count -eq $paths.Count
+$disks = @(Get-VHD -Path $paths[0] -ErrorAction Stop)
+if ($disks.Count -ne 1) { throw 'Expected one readable appliance VHD; read-only check failed.' }
+$disk = $disks[0]
+$capacityBytes = [UInt64]0; $diskFileBytes = [UInt64]0
+$inv = [Globalization.CultureInfo]::InvariantCulture
+if (-not [UInt64]::TryParse([string]$disk.Size, [Globalization.NumberStyles]::None, $inv, [ref]$capacityBytes) -or $capacityBytes -eq 0 -or
+    -not [UInt64]::TryParse([string]$disk.FileSize, [Globalization.NumberStyles]::None, $inv, [ref]$diskFileBytes) -or $diskFileBytes -eq 0) {
+    throw 'Appliance VHD capacity or file size is missing, invalid or nonpositive; read-only check failed.'
+}
 $memory = Get-VMMemory -VMName $vmName
 $nic = Get-VMNetworkAdapter -VMName $vmName | Select-Object -First 1
 $ips = @($nic.IPAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) -join ' '
-Write-Output ('APPLIANCE_CHECK|{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}' -f $vm.State, $vm.ProcessorCount, [math]::Round($memory.Startup / 1GB), $memory.DynamicMemoryEnabled, $onStore, $maxGB, $nic.SwitchName, $ips)
+# Field 6 is exact logical capacity bytes; append file bytes without moving switch/IP fields.
+Write-Output ('APPLIANCE_CHECK|{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f $vm.State, $vm.ProcessorCount, [math]::Round($memory.Startup / 1GB), $memory.DynamicMemoryEnabled, $onStore, $capacityBytes.ToString($inv), $nic.SwitchName, $ips, $diskFileBytes.ToString($inv))
 '@
 
 Write-Log "Checking '$ApplianceVMName' against Module 1..."
@@ -2904,10 +2922,16 @@ $checkBody = $verifyScript.Replace('__VMNAME__', $ApplianceVMName.Replace("'", "
 $checkOutput = Invoke-HostScript -Script $checkBody -Stage 'Check appliance VM'
 $checkLine = @($checkOutput -split "`r?`n" | Where-Object { $_ -like 'APPLIANCE_CHECK|*' }) | Select-Object -Last 1
 if (-not $checkLine -or $checkLine -eq 'APPLIANCE_CHECK|Missing') {
-    Write-Warning "VM '$ApplianceVMName' was not found on $HyperVHostVMName. Rerun this script, or complete Module 1 sections 3.3-3.4 by hand, before continuing."
-    Read-Host "Press Enter once the appliance VM exists and is running..."
+    throw "VM '$ApplianceVMName' was not found or its read-only check was not reported on $HyperVHostVMName. Complete Module 1 sections 3.3-3.4 and rerun Step 2 before discovery."
 } else {
     $c = $checkLine.Split([char[]]'|')
+    $capacityBytes = [UInt64]0; $diskFileBytes = [UInt64]0
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    if ($c.Count -ne 10 -or
+        -not [UInt64]::TryParse($c[6], [Globalization.NumberStyles]::None, $inv, [ref]$capacityBytes) -or $capacityBytes -eq 0 -or
+        -not [UInt64]::TryParse($c[9], [Globalization.NumberStyles]::None, $inv, [ref]$diskFileBytes) -or $diskFileBytes -eq 0) {
+        throw 'Appliance check has missing, invalid or nonpositive disk byte values; stop before discovery.'
+    }
     $checks = @(
         @{ Item = 'State';                  Actual = $c[1]; Expected = 'Running' }
         @{ Item = 'vCPUs';                  Actual = $c[2]; Expected = '8' }
@@ -2922,8 +2946,14 @@ if (-not $checkLine -or $checkLine -eq 'APPLIANCE_CHECK|Missing') {
         $mark = if ($ok) { '[OK]  ' } else { '[CHECK]' }
         Write-Host ("  {0} {1,-24} {2}  (expected {3})" -f $mark, $check.Item, $check.Actual, $check.Expected) -ForegroundColor $colour
     }
-    Write-Host ("         Template capacity (GB): {0}; current documented requirement is roughly 80 GB. No resize was performed." -f $c[6])
-    if ([double]$c[6] -lt 80) { throw 'Template capacity is below the documented requirement. Stop for instructor review, not learner expansion.' }
+    Write-Host ([string]::Format($inv, '         VHD logical capacity: {0} bytes ({1:0.000} GiB).', $capacityBytes, ($capacityBytes / 1GB)))
+    Write-Host ([string]::Format($inv, '         VHD file size: {0} bytes ({1:0.000} GB decimal); not logical capacity or guest free space.', $diskFileBytes, ($diskFileBytes / 1000000000)))
+    Write-Host '         GiB = 1,073,741,824 bytes (PowerShell 1GB); decimal GB = 1,000,000,000 bytes. No resize was performed.'
+    if ($capacityBytes -lt 80GB) {
+        Write-Warning "Capacity is below the former 80 GiB script gate. Microsoft lists 'around 80 GB disk storage' as approximate host-resource guidance, not an exact 80 GiB VHD gate. Preserve the verified published export; capacity alone neither rejects it nor proves an existing VM's provenance or support."
+    }
+    Write-Host '         Guest C: partition capacity/free space are separate: inspect them read-only inside the appliance. All appliance prerequisites must PASS before discovery; this is not a waiver of Microsoft requirements.'
+    Write-Host '         If guest storage is insufficient or a storage prerequisite fails, STOP for instructor/support review. Do not resize automatically, require learner expansion, or bypass the failure.'
     $ipText = if ($c.Count -ge 9 -and $c[8]) { $c[8] } else { '(not reported yet)' }
     Write-Host ("         {0,-24} {1}  (expected 192.168.0.20)" -f 'Address', $ipText) -ForegroundColor Gray
 }

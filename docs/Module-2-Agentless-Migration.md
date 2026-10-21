@@ -6,17 +6,17 @@
 | **Prerequisites**   | [Module 1: Discovery & Assessment](Module-1-Discovery.md) completed |
 | **CAF Phase**       | **Migrate** — Cloud Adoption Framework |
 
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Manual student route only. Replicate **only Web + Linux-Web** with the Hyper-V provider. Module 3 uses a separate modern replication appliance and Mobility Service for SQL + App; neither teaching pair is an independent cutover wave. See [PILOT-README](../PILOT-README.md).
-
 ### Learning Objectives — Concepts
 
-By the end of this module, you will understand host-based replication, target-network planning, isolated test migration, coordinated cutover, and rollback. You will practice enabling replication and testing IIS and Nginx. The complete application test and shared four-VM cutover continue in [Module 3: Stateful Workload Migration](Module-3-Agent-Based-Migration.md); completing this module's frontend cutover is **not** a prerequisite for starting Module 3.
+By the end of this module, you will understand host-based replication, target-network planning, isolated test migration, coordinated cutover, and rollback. You will configure **Web + Linux-Web together** through the Hyper-V provider, with a separate settings review for each VM. SQL + App use the modern physical-server replication appliance and guest Mobility Service in Module 3; never enable both methods for one source.
+
+Complete **this module §§4–6**, then [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites) to configure replication for the second assigned pair. After both pairs are configured, return to **this module §§7–8** to review and test the frontend pair, then [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) to review and test SQL/App and the complete isolated application. Perform final migration only in [Module 3 §11's one coordinated cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), returning to this module's §§9–10 for its frontend phase. A frontend final cutover is **not** a prerequisite for starting Module 3.
 
 ---
 
 ## 1. Overview — Zero-Footprint Migration: When and Why
 
-Agentless migration avoids installing a migration agent inside each source guest. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves. In this Hyper-V lab, the **Azure Site Recovery Provider and Recovery Services agent on HyperVHost** perform replication for **only Web and Linux-Web** in this pilot. The discovery appliance inventories and assesses machines; it is **not a replication appliance**.
+Agentless migration avoids installing a migration agent inside each source guest. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves. In this Hyper-V lab, the **Azure Site Recovery Provider and Recovery Services agent on HyperVHost** perform replication for **only Web and Linux-Web**. The discovery appliance inventories and assesses machines; it is **not a replication appliance**.
 
 ### How It Works Architecturally
 
@@ -62,7 +62,7 @@ sequenceDiagram
 
 ### When to Choose Guest-Agentless Replication
 
-- Stateless web servers, reverse proxies, and Linux servers with standard configurations are useful pilot candidates.
+- Stateless web servers, reverse proxies, and Linux servers with standard configurations are useful initial migration candidates.
 - Avoiding guest migration software can simplify change approval, but the host still needs its provider.
 - Stateful workloads need data-consistency and dependency planning, **not a different migration architecture merely because they hold state**. SQL and Tomcat deliberately use the modern physical-server/Mobility route in Module 3; that is a teaching choice, not a requirement imposed by statefulness.
 - Source platform, supported configuration, recovery objectives, disk layout, and measured churn determine migration suitability. A web-server label alone is not a readiness test.
@@ -206,14 +206,14 @@ Choose the actual target region before preparing the project's migration resourc
 
 8.  Plan the complete application, including any test/target overlap:
 
-| Exact Target VM Name | Historical Example — NOT Pilot Approval | vCPU / RAM | Historical Alternate — NOT a Preferred SKU |
+| Exact Target VM Name | Historical Example — Requires Size Approval | vCPU / RAM | Historical Alternate — NOT a Preferred SKU |
 |----------------------|--------------|------------|------------------------------------------|
 | `OnPrem-Web` | `Standard_B2s` | 2 / 4 GB | `Standard_D2as_v5` — 2 / 8 GB |
 | `OnPrem-SQL` | `Standard_B2ms` | 2 / 8 GB | `Standard_D2as_v5` — 2 / 8 GB |
 | `OnPrem-Linux-Web` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
 | `OnPrem-Linux-App` | `Standard_B1ms` | 1 / 2 GB | `Standard_D2as_v5` — 2 / 8 GB |
 
-9.  Treat the inherited table as **historical examples only**, not approved pilot defaults. All four actual sources have two vCPUs; the one-vCPU Linux examples need explicit assessment/support/downsize review before use.
+9.  Treat the inherited table as **historical examples only**, not approved lab defaults. All four actual sources have two vCPUs; the one-vCPU Linux examples need explicit assessment/support/downsize review before use.
 
 10. Select and record the actual per-role sizes manually, with current OS/controller/migration support, memory needs, quota, eligibility, price and allocation review.
 
@@ -235,7 +235,7 @@ Choose the actual target region before preparing the project's migration resourc
 
 2.  Select the lab subscription.
 
-3.  Name the group using your **unique pilot namespace** (the example `rg-pilot-target-01` is used below).
+3.  Name the group using your **unique lab namespace** (the example `rg-ces-target-01` is used below).
 
     Confirm the name does not collide with any existing lab. Do not reuse another lab's group; substitute your actual new group/VNet/NSG names consistently.
 
@@ -245,9 +245,9 @@ Choose the actual target region before preparing the project's migration resourc
 
 6.  Open **Virtual networks → Create**.
 
-7.  Select `rg-pilot-target-01`.
+7.  Select `rg-ces-target-01`.
 
-8.  Name it `vnet-pilot-target-01`.
+8.  Name it `vnet-ces-target-01`.
 
 9.  Explicitly set the same target region.
 
@@ -259,7 +259,7 @@ Choose the actual target region before preparing the project's migration resourc
 
 13. Open **Network security groups → Create**.
 
-14. Create `nsg-pilot-target-01` in the same group and region.
+14. Create `nsg-ces-target-01` in the same group and region.
 
 15. Open the NSG's **Inbound security rules → Add**.
 
@@ -280,7 +280,7 @@ Choose the actual target region before preparing the project's migration resourc
 
     Review their scope against the recorded peer addresses after VM creation. Do not add an Internet-wide application allow rule.
 
-18. Under **NSG → Subnets → Associate**, choose `vnet-pilot-target-01` and `default`.
+18. Under **NSG → Subnets → Associate**, choose `vnet-ces-target-01` and `default`.
 
 19. Review effective subnet/NIC rules, including Azure's default VNet rules, against the lab network plan.
 
@@ -306,7 +306,7 @@ The canonical route in the [execution overview](https://learn.microsoft.com/azur
 
 2.  Open [Azure Portal](https://portal.azure.com) → **Azure Migrate → All projects**.
 
-3.  Select the **fresh pilot project** from Module 1 and verify subscription/resource ID.
+3.  Select the **fresh lab project** from Module 1 and verify subscription/resource ID.
 
 4.  Confirm the four fresh source identities; all older protected labs remain untouched.
 
@@ -320,9 +320,9 @@ The canonical route in the [execution overview](https://learn.microsoft.com/azur
 
 8.  Confirm **Hyper-V** as source virtualization and the different target region reviewed in §4.1.
 
-9.  Inspect the pilot migration resources and association evidence before accepting any locked region or existing preparation.
+9.  Inspect the lab migration resources and association evidence before accepting any locked region or existing preparation.
 
-10. Select **Create resources** only if needed in this verified pilot scope; wait for completion.
+10. Select **Create resources** only if needed in this verified lab scope; wait for completion.
 
 11. Keep the Migrate-managed vault and provider association recorded; do not create a separate ASR DR policy.
 
@@ -382,9 +382,9 @@ The canonical route in the [execution overview](https://learn.microsoft.com/azur
 
 ---
 
-## 5. Step 2 — Configure Replication (OnPrem-Web)
+## 5. Step 2 — Configure Replication (Web and Linux-Web Pair)
 
-Replication settings describe a future Azure VM. Starting the job does not mean the initial disk copy is complete.
+Configure **both assigned frontend VMs in the same replication wizard**, reviewing the settings for each row before submission. Replication settings describe future Azure VMs; submitting the pair does not mean either initial disk copy is complete. IIS serves the Windows static site on 80. Nginx serves a separate static site on 80 and the Order Desk proxy on 8080; the proxy is validated with SQL/App later.
 
 ### 5.1 Start the Replication Wizard
 
@@ -400,7 +400,7 @@ Replication settings describe a future Azure VM. Starting the job does not mean 
 
 4.  Select **Next**.
 
-### 5.2 Select the Virtual Machine
+### 5.2 Select the Virtual Machines
 
 #### Hands-On Steps
 
@@ -410,11 +410,13 @@ Replication settings describe a future Azure VM. Starting the job does not mean 
 
     If imported, review every setting; recommendations are not the selected lab plan by default.
 
-2.  Select exactly **`OnPrem-Web`**.
+2.  Select **both `OnPrem-Web` and `OnPrem-Linux-Web`** in this wizard.
 
-3.  Confirm the source host and identity.
+3.  Match each name to its recorded source VM ID and **HyperVHost** association. Web is the Windows source at `192.168.0.10`; Linux-Web is the Ubuntu source at `192.168.0.12`.
 
-4.  Select **Next**.
+4.  Confirm **SQL and Linux-App are not selected**. Those sources belong only to Module 3's modern physical/Mobility route.
+
+5.  Select **Next** with exactly the two frontend records selected.
 
 ### 5.3 Configure Target Settings
 
@@ -424,147 +426,156 @@ Replication settings describe a future Azure VM. Starting the job does not mean 
 
 1.  Select the lab subscription.
 
-2.  Select **`rg-pilot-target-01`**.
+2.  Select **`rg-ces-target-01`**.
 
 3.  Confirm the selected target region.
 
 4.  Select the replication storage/cache account offered for this project's Hyper-V workflow, creating it through the wizard if required.
 
-5.  Choose **`vnet-pilot-target-01` → `default` (`10.1.0.0/24`)** as the final target network.
+5.  Choose **`vnet-ces-target-01` → `default` (`10.1.0.0/24`)** as the final target network for **both** VMs.
 
 6.  Continue to compute settings.
 
     Do not select the isolated test VNet as the final target.
 
-### 5.4 Configure Compute Settings
+### 5.4 Configure Each VM's Compute Settings
+
+#### Hands-On Steps
+
+**Local workstation — student notes / Azure portal:**
+
+1.  Open the settings row for **each selected VM**. Copy the exact approved target SKU from §4.1 into your notes and select that SKU in the portal; the size descriptions below are instructions to use your actual recorded choice, not literal SKU values.
+
+2.  Apply this per-VM mapping, checking the source identity before changing its settings:
+
+| Source VM / Source IP | Source OS | Source vCPU / RAM | Exact Target Name / OS Type | Target Size to Select | OS / Boot Disk to Identify | Required Source Disk Set | Target Disk Type |
+|-----------------------|-----------|-------------------|----------------------------|-----------------------|----------------------------|--------------------------|------------------|
+| `OnPrem-Web` / `192.168.0.10` | Windows Server 2022 | 2 / 4 GB | `OnPrem-Web` / **Windows** | Exact Web SKU approved in §4.1 | Actual **40-GB** OS/boot disk; match its recorded disk ID | OS disk plus every other required disk actually present | **Standard SSD**, unless a reviewed alternative is approved |
+| `OnPrem-Linux-Web` / `192.168.0.12` | Ubuntu 24.04 | 2 / 2 GB | `OnPrem-Linux-Web` / **Linux** | Exact Linux-Web SKU approved in §4.1 | Actual **30-GB** OS/boot disk; match its recorded disk ID | OS disk plus every other required disk actually present | **Standard SSD**, unless a reviewed alternative is approved |
+
+3.  Set **Target VM name** and **OS type** separately for Web and Linux-Web. Preserve Ubuntu 24.04 on Linux-Web; do not copy Windows settings to its row.
+
+4.  For each VM, identify the actual OS/boot disk and review source generation and supported target settings.
+
+    Do not assume the first disk is the boot disk or change generation merely to match a size choice. If the observed disk layout differs from the recorded source, resolve the discrepancy before submission.
+
+5.  Confirm the actual approved sizes meet each workload's assessed needs and current support/quota review. Do not treat a historical B2/D2 example or script menu as approval, or automatically downsize the two-vCPU Linux source to the historical one-vCPU example.
+
+6.  On the Windows row, leave **existing-license / Azure Hybrid Benefit: No** unless eligible rights were confirmed. Do not apply a Windows licensing benefit to the Linux row.
+
+### 5.5 Configure Each VM's Disk Settings
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Set **Target VM name: `OnPrem-Web`**.
+1.  Open **Disks** for Web and then Linux-Web within the same wizard.
 
-2.  Choose Web's manually reviewed size from §4.1; do not treat a historical B2/D2 example or script menu as approval.
+2.  Include the mapped **40-GB Web** and **30-GB Linux-Web** OS/boot disks and **all other required source disks actually present** for the OS, application, or data.
 
-3.  Set **OS type: Windows**.
+3.  Match disk IDs, sizes, and volumes to the source inventory. Do not invent an additional data disk or omit a required volume.
 
-4.  Identify the correct **OS/boot disk**.
+4.  Select **Standard SSD** for the lab's target disks unless your assessment requires a reviewed alternative.
 
-5.  Review the source's generation and the supported target settings.
-
-    Do not change generation merely to match a size choice.
-
-6.  Leave existing-license/Azure Hybrid Benefit settings **No** unless eligible rights were confirmed.
-
-### 5.5 Configure Disk Settings
-
-#### Hands-On Steps
-
-**Local workstation — Azure portal:**
-
-1.  Review every source disk.
-
-2.  Include **all required VM disks**, including the boot disk and any application/data disk.
-
-3.  Select the planned target disk type, using **Standard SSD** for the lab unless your assessment requires a reviewed alternative.
-
-4.  Verify that no required volume was omitted.
+5.  Verify both VM rows have their complete disk selections before continuing.
 
     Disk tiers affect cost and performance independently of VM size.
 
-### 5.6 Review and Start Replication
+### 5.6 Review and Start Replication for the Pair
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Review source VM, host, target name, region, resource group, VNet/subnet, size, OS type, boot disk, and selected disks.
+1.  On the summary, review **both source records**: host/VM IDs, exact target names, region, resource group, final VNet/subnet, actual approved sizes, OS types, boot disks, licensing choice, and every required selected disk.
 
-2.  Review **Tags**, then select **Review and start execution** / **Start execution**; this begins initial replication in **Preparation**, not cutover.
+2.  Confirm exactly **Web + Linux-Web** use the Hyper-V provider. Do not add SQL or App to this request.
 
-3.  Open the resulting job.
+3.  Review **Tags**, then select **Review and start execution** / **Start execution** once for this two-VM selection. This begins initial replication in **Preparation**, not cutover.
 
-**Expected Result:** The portal shows a replication setup job for `OnPrem-Web`. Submission is not completed replication; review actual synchronization in §7.
+4.  Open the resulting setup jobs and record the job IDs associated with **each** frontend. Review submission errors; do not submit a second wizard for a VM already configured by this request.
 
-**CSA Why:** An explicit settings review catches wrong-target mistakes before disk replication begins.
+**Expected Result:** Replication setup has been submitted for **both frontend VMs**, with their own reviewed Windows/Linux settings. Initial synchronization and recovery-point readiness are reviewed after the second pair is configured.
+
+**CSA Why:** Selecting a method pair together still requires independent identity, compute, licensing, and disk checks for every VM.
 
 ---
 
-## 6. Step 3 — Configure Replication (OnPrem-Linux-Web)
+## 6. Step 3 — Confirm Both Frontend Replication Settings
 
-Nginx has two distinct functions: a **static site on 80** and an **application proxy on 8080** to Tomcat on Linux-App. Testing the static page does not validate the SQL-backed application.
+Review the settings just submitted for the pair; **do not start another Linux-Web replication wizard**. These are confirmation steps for the two records created in §5.
 
-### 6.1 Start Replication
-
-#### Hands-On Steps
-
-**Local workstation — Azure portal:**
-
-1.  Select **Execute → Migrations → Start execution → Servers or virtual machines (VMs) → Azure VM → From replication provider (Hyper-V) → HyperVHost**, using the same registered host as §5.
-
-### 6.2 Select the Virtual Machine
+### 6.1 Open Both Replication Records
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Select exactly **`OnPrem-Linux-Web`**.
+1.  Open **Azure Migrate project → Execute → Migrations → Preparation**.
 
-2.  Review any imported assessment settings.
+2.  Locate **`OnPrem-Web`** and **`OnPrem-Linux-Web`**, and open each record's configuration and related setup job.
 
-### 6.3 Configure Target Settings
+3.  Confirm each record belongs to the §5 pair submission. If setup reports an error, resolve that reported issue without configuring a duplicate source record.
+
+### 6.2 Confirm Source Identity and Method
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal / student notes:**
+
+1.  Match the two VM IDs and their **HyperVHost** association to your identity register.
+
+2.  Confirm the method is **From replication provider (Hyper-V)** for both and neither source is also protected through Mobility.
+
+3.  Confirm SQL and App remain excluded from this provider's replication selection.
+
+### 6.3 Confirm Both Destination Mappings
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Select the same subscription and target region.
+1.  On each frontend record, confirm the lab subscription, chosen target region, **`rg-ces-target-01`**, replication storage, and final **`vnet-ces-target-01` → `default`**.
 
-2.  Select **`rg-pilot-target-01`**.
+2.  Confirm neither record uses the isolated test VNet as its final destination.
 
-3.  Select the project replication storage.
+### 6.4 Confirm Per-VM Compute and Boot Settings
 
-4.  Select final target **`vnet-pilot-target-01` → `default`**.
+#### Hands-On Steps
 
-### 6.4 Configure Compute Settings
+**Local workstation — Azure portal / student notes:**
+
+1.  Compare each row with §5.4's mapping table and your actual approved SKU/disk-ID record.
+
+2.  Require **`OnPrem-Web` / Windows / Web's approved size / its 40-GB OS disk**, and **`OnPrem-Linux-Web` / Linux / Linux-Web's approved size / its 30-GB OS disk**.
+
+3.  Confirm generation and supported target settings were reviewed for each source, and Windows licensing benefit remains **No** unless eligible rights were confirmed.
+
+### 6.5 Confirm Disk Inclusion and Continue With the Second Pair
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Set **Target VM name: `OnPrem-Linux-Web`**.
+1.  Review both complete disk sets, matching disk IDs and volumes to the source inventory and confirming the reviewed **Standard SSD** target disk choices or explicitly approved alternatives.
 
-2.  Choose Linux-Web's manually reviewed size from §4.1, resolving the inherited one-vCPU example against its actual two-vCPU source before replication.
+2.  Record both frontend setup-job IDs and their accepted target mappings in your student notes. A successful setup submission is not completed initial replication.
 
-3.  Select **OS type: Linux**.
+**Local workstation — course instructions:**
 
-4.  Identify its OS/boot disk.
+3.  Continue now to [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites): verify SQL/App prerequisites, prepare their sources and separate modern appliance, install/register supported Mobility Service, and submit replication for **SQL + App together**.
 
-    The guest remains **Ubuntu 24.04**.
+4.  After Module 3 §8.6 has submitted that pair, return to **this module §7**, then §8, to review and test the frontends. Keep all four source workloads serving; do not start test migration or final cutover at this handoff.
 
-### 6.5 Configure Disks and Start Replication
+**Expected Result:** Both frontend replication records have the intended per-VM mappings, and you continue to configure SQL/App replication before testing either method pair.
 
-#### Hands-On Steps
-
-**Local workstation — Azure portal:**
-
-1.  Include the boot disk and all other required source VM disks.
-
-2.  Select the planned **Standard SSD** target disk type.
-
-3.  Review the complete summary.
-
-4.  Review **Tags**, then select **Review and start execution** / **Start execution**; this begins initial replication in **Preparation**, not cutover.
-
-**Expected Result:** Both frontend VMs have replication jobs underway with the correct target configuration.
-
-**CSA Why:** The Linux OS selection and complete disk set are as important as choosing the right VM size.
+**CSA Why:** Explicit confirmation preserves distinct VM settings while keeping the two replication methods and their source identities separate.
 
 ---
 
 ## 7. Step 4 — Monitor Replication
 
-The portal's Hyper-V migration details are the readiness evidence. Job submission, or a generic protection label by itself, does not establish a usable recovery point.
+Return here **after Module 3 §8.6 has submitted SQL + App replication**, so both assigned replication groups are configured before test validation. The portal's Hyper-V migration details are the readiness evidence. Job submission, or a generic protection label by itself, does not establish a usable recovery point.
 
 | Portal Observation | Meaning | Action |
 |--------------------|---------|--------|
@@ -617,7 +628,7 @@ The portal's Hyper-V migration details are the readiness evidence. Job submissio
 
 **Local workstation — Azure portal:**
 
-1.  Confirm the portal allows test migration for each selected VM after initial sync completes.
+1.  Confirm **both frontends** have completed initial sync, healthy replication, recovery points within your recorded age objective, and portal permission to start test migration. Do not start either test while the other frontend is not ready.
 
 2.  Record health, initial-sync completion, and the reviewed recovery point in your student notes.
 
@@ -641,7 +652,7 @@ Both methods can replicate writes while services are active. The frontend pair's
 
     ```powershell
     Get-Item 'C:\inetpub\wwwroot\index.html'
-    Add-Content -LiteralPath 'C:\inetpub\wwwroot\index.html' -Value '<!-- pilot-delta: <your-unique-marker> -->'
+    Add-Content -LiteralPath 'C:\inetpub\wwwroot\index.html' -Value '<!-- lab-delta: <your-unique-marker> -->'
     ```
 
 **Source OnPrem-Linux-Web — approved SSH session via HyperVHost:**
@@ -650,7 +661,7 @@ Both methods can replicate writes while services are active. The frontend pair's
 
     ```bash
     ls -l /var/www/html/index.html
-    printf '%s\n' '<!-- pilot-delta: <your-unique-marker> -->' | sudo tee -a /var/www/html/index.html >/dev/null
+    printf '%s\n' '<!-- lab-delta: <your-unique-marker> -->' | sudo tee -a /var/www/html/index.html >/dev/null
     ```
 
 **Local workstation — Azure portal:**
@@ -663,6 +674,8 @@ Both methods can replicate writes while services are active. The frontend pair's
 
 **Expected Result:** The test-copy HTML includes the known source marker at the reviewed point, demonstrating a disk change captured during active host-based delta replication. SQL/App source orders continue independently for Module 3.
 
+**CSA Why:** A known disk marker provides observable delta evidence without pausing source service or confusing CPU activity with changed data.
+
 ---
 
 ## 8. Step 5 — Test Migration (CRITICAL)
@@ -673,13 +686,15 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 ### 8.1 Build the Isolated Test Network
 
+If these resources were already created during Module 3 §6.2, open the recorded actual VNet, subnet, and NSG resource IDs; verify the selected target region, VNet/subnet address spaces, and NSG-to-subnet association against the approved plan before reusing them. Use the creation steps below only for missing resources; do not duplicate resources or adopt unverified ones. Whether creating or reusing, complete all rule, isolation, and effective-NSG checks in this section again before any test boot.
+
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Open **Virtual networks → Create** in **`rg-pilot-target-01`**, using the same target region.
+1.  Open **Virtual networks → Create** in **`rg-ces-target-01`**, using the same target region.
 
-2.  Name it **`vnet-pilot-test-01`**.
+2.  Name it **`vnet-ces-test-01`**.
 
 3.  Set address space **`10.2.0.0/16`**.
 
@@ -687,49 +702,97 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 5.  Select **Review + create → Create**.
 
-6.  Create a separate **`nsg-pilot-test-01`** in that region.
+6.  Create a separate **`nsg-ces-test-01`** in that region.
 
 7.  Associate it with the test `default` subnet through **NSG → Subnets → Associate**.
 
-8.  Add only the approved management/client and internal test-application rules corresponding to §4.2, using **test** ranges rather than source or final target addresses.
+**Local workstation — student notes / Azure portal:**
 
-9.  Under **Outbound security rules**, add explicit deny rules to `192.168.0.0/24`, `10.0.0.0/16`, and `10.1.0.0/16`, with unused priorities ahead of default allow rules.
+8.  Prepare the address values for the additional **test-network** table below. Keep §4.2's final-target rule table unchanged; these rules apply to **test copies only**.
 
-    Preserve the platform/management connectivity required by the lab's approved outbound plan.
+    - **WebTest, SQLTest, AppTest, NginxTest** mean the actual test NIC IPv4 addresses, each scoped as `/32`, from the corresponding job's verified VM/NIC resource IDs. They are **not assigned addresses or names to guess**.
+    - **WindowsTest** means WebTest + SQLTest; **LinuxTest** means NginxTest + AppTest.
+    - **ApprovedMgmt** and **ApprovedClients** mean the actual instructor-approved management/client CIDRs that can already reach the isolated test network. Do not enter Internet/Any, a source-network range, or a final-target range in their place. Omit optional RDP/SSH rows if using only Run Command.
+    - Before NICs exist, use **`10.2.0.0/24` temporarily in unresolved test-peer address fields**, including WindowsTest/LinuxTest destination fields. Do not use the whole test VNet, a source/final prefix, or fabricated `.10/.11/.12/.13` addresses. After each pair is created, tighten known fields to the recorded test `/32` peers; complete every peer field after all four NICs are known in Module 3 §10.1.
+    - Every row uses **source port `*`**. Where a row lists two peers or ports, enter their actual values as an IP-address or port list supported by the portal. If separate rules are needed, choose distinct unused priorities between the surrounding rows and record them.
 
-10. Before starting any test migration, inspect **Peerings**, **DNS servers**, subnet routes, and effective security rules.
+9.  Open **`nsg-ces-test-01` → Inbound security rules → Add**. For each **Inbound** row, enter its priority, name, source/destination IP scopes, source/destination ports, protocol, and action, then select **Add**.
 
-    There must be **no peering, VPN/route path, or source DNS reachability** to source or live target networks. Do not configure source/private production DNS for test guests. Use the network plan's approved outbound method; a new test VNet does not imply outbound Internet access.
+10. Open **Outbound security rules → Add** and enter every **Outbound** row in the same way. The five explicit outbound peer permits match the five inbound application edges. Priorities are unique **within each direction**, in Azure's custom-rule range **100–4096**; lower numbers are evaluated first.
 
-11. Use portal Run Command when the guest agent is ready, or existing approved private RDP/SSH access.
+| Priority | Direction | Rule Name | Source / Source Ports | Destination | Destination Ports | Protocol | Action |
+|----------|-----------|-----------|-----------------------|-------------|-------------------|----------|--------|
+| 110 | Inbound | `Allow-Test-RDP` (optional) | ApprovedMgmt / `*` | WindowsTest | `3389` | TCP | Allow |
+| 120 | Inbound | `Allow-Test-SSH` (optional) | ApprovedMgmt / `*` | LinuxTest | `22` | TCP | Allow |
+| 130 | Inbound | `Allow-Test-Static` | ApprovedClients / `*` | WebTest, NginxTest | `80` | TCP | Allow |
+| 200 | Inbound | `Allow-WebTest-SQLTest` | WebTest / `*` | SQLTest | `1433` | TCP | Allow |
+| 210 | Inbound | `Allow-AppTest-SQLTest` | AppTest / `*` | SQLTest | `1433` | TCP | Allow |
+| 220 | Inbound | `Allow-WebTest-AppTest` | WebTest / `*` | AppTest | `3000` | TCP | Allow |
+| 230 | Inbound | `Allow-NginxTest-AppTest` | NginxTest / `*` | AppTest | `3000` | TCP | Allow |
+| 240 | Inbound | `Allow-AppTest-NginxTest` | AppTest / `*` | NginxTest | `8080` | TCP | Allow |
+| 300 | Inbound | `Deny-SourceGuests-Test` | `192.168.0.0/24` / `*` | `10.2.0.0/24` | `*` | Any | Deny |
+| 310 | Inbound | `Deny-SourceVNet-Test` | `10.0.0.0/16` / `*` | `10.2.0.0/24` | `*` | Any | Deny |
+| 320 | Inbound | `Deny-FinalVNet-Test` | `10.1.0.0/16` / `*` | `10.2.0.0/24` | `*` | Any | Deny |
+| 200 | Outbound | `Allow-WebTest-SQLTest-Out` | WebTest / `*` | SQLTest | `1433` | TCP | Allow |
+| 210 | Outbound | `Allow-AppTest-SQLTest-Out` | AppTest / `*` | SQLTest | `1433` | TCP | Allow |
+| 220 | Outbound | `Allow-WebTest-AppTest-Out` | WebTest / `*` | AppTest | `3000` | TCP | Allow |
+| 230 | Outbound | `Allow-NginxTest-AppTest-Out` | NginxTest / `*` | AppTest | `3000` | TCP | Allow |
+| 240 | Outbound | `Allow-AppTest-NginxTest-Out` | AppTest / `*` | NginxTest | `8080` | TCP | Allow |
+| 300 | Outbound | `Deny-Test-SourceGuests` | `10.2.0.0/24` / `*` | `192.168.0.0/24` | `*` | Any | Deny |
+| 310 | Outbound | `Deny-Test-SourceVNet` | `10.2.0.0/24` / `*` | `10.0.0.0/16` | `*` | Any | Deny |
+| 320 | Outbound | `Deny-Test-FinalVNet` | `10.2.0.0/24` / `*` | `10.1.0.0/16` | `*` | Any | Deny |
 
-    Do not add a public IP or connect test and source networks just to run a localhost check.
+11. Review **all effective subnet and NIC NSG rules**, not just this table. The custom source/final denies at 300–320 must take effect before Azure's default **AllowVnetInBound / AllowVnetOutBound (65000)**, including any prefixes represented by the VirtualNetwork service tag. Remove or correct conflicting higher-precedence permits through the approved network plan; do not create an exception that reconnects test guests to source/final peers.
 
-### 8.2 Test Migrate OnPrem-Web
+    The table is **not a complete allow-list or proof of isolation by itself**. Default VNet permits can still allow other test-to-test traffic, and default **AllowInternetOutBound (65001)** remains unless the approved egress policy controls it. A new VNet or an NSG allow rule also does not supply an outbound route. Do not add a broad Internet permit or claim that only the listed flows are possible.
+
+12. Preserve the lab network plan's **approved Azure platform, VM-agent/Run Command, DNS and management outbound connectivity**. Confirm its exact allowed endpoints/service tags, ports and explicit outbound method with the owner; do not assume default outbound access or that a NAT gateway exists.
+
+    If an approved platform/management custom permit is required, use an unused priority ahead of the applicable deny and the exact approved destination/ports; it must **not** exempt the blocked source/final prefixes. Do not add a blanket outbound deny that breaks the VM agent, or open public application/SQL ingress to regain access. If no compatible approved access/outbound plan exists, STOP before test boot.
+
+13. **Before either test VM boots**, inspect **VNet → Peerings**, **DNS servers**, subnet route tables, and effective network rules against the approved plan. Record the VNet/subnet/NSG IDs and the review in your student notes.
+
+    There must be **no peering, VPN/route path, or source/private-production DNS reachability** to the source or final networks. Do not configure source DNS for test guests. Recheck the same conditions before Module 3 starts the second test pair.
+
+14. Use portal Run Command when each guest agent is ready, or existing approved private RDP/SSH access.
+
+    Do not add a public IP or connect test and source networks just to run a localhost check. The pre-boot network boundary remains in force while copied generators are stopped inside the guests.
+
+**Expected Result:** The separate test subnet has recorded management/client and five-edge application rules, explicit all-port/all-protocol source/final denies, and a reviewed route/DNS/egress plan before any test boot. Unknown peer fields are scoped only to the temporary test subnet until actual NIC mappings are available.
+
+**CSA Why:** Effective defaults, routes and DNS can widen reachability beyond a few custom permits; isolation must protect sources before copied startup workers can be disarmed.
+
+### 8.2 Start Test Migration for Both Frontends
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  In **Execute → Migrations**, select **`OnPrem-Web` → Testing → Start test migration**.
+1.  Recheck §7's **completed initial sync, healthy replication and fresh acceptable recovery points for both frontends**, and §8.1's pre-boot isolation. Confirm SQL/App replication was already submitted in Module 3 §8.6.
 
-2.  Choose **`vnet-pilot-test-01` → `default`**.
+2.  In **Execute → Migrations**, select **`OnPrem-Web` → Testing → Start test migration**.
 
-3.  Review the recovery point offered.
+3.  Choose **`vnet-ces-test-01` → `default`** and review the offered Web recovery point, including the §7.5 marker.
 
-4.  Submit **Test migration**.
+4.  Submit **Test migration** for Web and record its job ID.
 
-5.  Open **Jobs**.
+5.  **Immediately repeat the test-migration action for `OnPrem-Linux-Web`**, selecting that source record's **Testing → Start test migration**. Choose the **same test VNet/subnet** and review its own recovery point before submitting.
 
-6.  Wait for the test-migration job to complete.
+    If the portal exposes only a single-VM action, perform these two individual submissions consecutively. Do not wait for Web to finish, inspect its guest, or assume an unsupported bulk action is available before submitting Linux-Web.
 
-7.  In **Virtual machines**, open the verified Web **test-job output**, recording its actual generated name and resource ID.
+6.  Record the Linux-Web test job ID. With **both jobs submitted**, open **Jobs** and monitor both to completion. Resolve any reported error before validating the pair.
 
-8.  Confirm its resource ID and test VNet.
+7.  Open each VM resource through its **specific completed test-job output**. Record the actual generated VM name, VM resource ID, NIC resource ID, test VNet/subnet, and private IP for both roles in your notes.
 
-9.  Record its actual private IP from **Networking → Network interface / IP configurations**.
+    Never infer a `-test` suffix, reuse an unsuffixed source/final VM, or copy source address endings into the test map.
 
-    Never fall back to the unsuffixed source/target name.
+8.  As each guest agent becomes available, use the **stop/disarm portions** of §8.3's Windows block and §8.5's Linux block on their respective test copies. Require known traffic generators stopped/disabled and copied CPU workers stopped/disarmed or absent on **both frontends before either static HTTP validation**. Do not stop IIS or Nginx.
+
+9.  Tighten §8.1's known WebTest/NginxTest address fields to the actual test `/32` NIC addresses. Leave only unresolved SQLTest/AppTest fields temporarily scoped to `10.2.0.0/24`; complete those mappings in Module 3 §10.1 before cross-tier traffic.
+
+**Expected Result:** Both frontend test jobs were submitted before monitoring or individual guest validation; their actual test identities are recorded and both copied generator/CPU controls have been checked.
+
+**CSA Why:** A paired test uses two independently verified job outputs, not an assumed naming pattern or a successful first VM alone.
 
 ### 8.3 Validate the Windows IIS Test VM
 
@@ -765,25 +828,21 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 **Expected Result:** IIS is running; localhost port 80 returns HTTP 200 and the Windows Web content check is `True` on the **test** copy.
 
-### 8.4 Test Migrate OnPrem-Linux-Web
+### 8.4 Confirm the Linux-Web Test Mapping
 
 #### Hands-On Steps
 
 **Local workstation — Azure portal:**
 
-1.  Select **`OnPrem-Linux-Web` → Testing → Start test migration** in the same project.
+1.  Open the **Linux-Web test job already submitted in §8.2**. Do not start a second test migration here.
 
-2.  Choose **`vnet-pilot-test-01` → `default`**.
+2.  Confirm successful completion and open its actual VM output using the recorded resource ID.
 
-3.  Review and submit.
+3.  Verify its **`vnet-ces-test-01` → `default`** NIC and actual private IP against the pair's recorded map.
 
-4.  Wait for the job to complete.
+4.  Confirm its known copied traffic/CPU controls from §8.5 have been applied before proceeding to static validation.
 
-5.  Open the verified Linux-Web **test-job output**, recording its actual generated name and resource ID.
-
-6.  Confirm its test-network resource ID.
-
-7.  Record the private IP from its NIC configuration.
+**Expected Result:** The Linux-Web VM being validated is the second output of the paired submission, with the correct isolated-network identity.
 
 ### 8.5 Validate the Linux Nginx Test VM
 
@@ -818,7 +877,7 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 3.  Do not claim a successful port-8080 proxy or SQL-backed Order Desk test yet.
 
-    The SQL/App test peers are added in Module 3.
+    The SQL/App replication pair is already configured; its test copies are added after returning to Module 3 §§9–10.
 
 **Expected Result:** Nginx is active and its port-80 static site returns HTTP 200 with Linux Web content. The full application test is still pending.
 
@@ -828,7 +887,7 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 **Local workstation — Azure portal:**
 
-1.  If continuing directly to Module 3, retain these two isolated copies, with generators disabled, for its four-VM test.
+1.  Retain these two isolated copies, with generators disabled and CPU workers stopped, for the immediate return to [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication). SQL/App replication was configured before this frontend test; next review that pair and submit **both** of its test migrations before validating SQL individually.
 
 2.  Record their exact names, IDs, and test private IPs.
 
@@ -846,9 +905,9 @@ Test migration creates separate copies while all four sources keep serving, incl
 
     Delete **only the actual test resources identified by that job and their recorded resource IDs**; do not delete unsuffixed live targets, source originals, or a resource group containing other workloads.
 
-9.  If cleaned up, recreate these **same two** test migrations in Module 3 before its full-chain test.
+9.  If cleaned up, recreate these **same two** test migrations through §8.2’s paired submissions and reapply their guest controls before Module 3 §10.1 completes the four-VM test set.
 
-10. After cleanup, confirm continuing source replication in the portal.
+10. After cleanup, confirm continuing source replication in the portal. Keep all four sources serving during this test phase; proceed to **Module 3 §9**, not final frontend migration.
 
 **Expected Result:** Either the identified pair is retained safely for the immediate full test, or only its test resources are removed and replication continues. Pair-only results do not authorize cutover.
 
@@ -860,7 +919,7 @@ Test migration creates separate copies while all four sources keep serving, incl
 
 The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 → SQL:1433**, plus the app's optional HTTP generator to Nginx and Windows Web's optional SQL/App background traffic. The teaching pair is not an independent final migration wave.
 
-> **HOLD POINT — Do not perform final frontend cutover yet.** Complete Module 3 replication and its **full four-VM isolated test** first. Continue to Module 3 from here without migrating the frontends. The actions below are performed **once**, as the frontend phase of [Module 3 §11's shared cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), after SQL and App target preparation. Do not leave migrated frontends dependent on unreachable source SQL/App peers.
+> **HOLD POINT — Do not perform final frontend cutover yet.** Complete [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) and its **full four-VM isolated test** first. Replication for both pairs was configured before the frontend test; return there without migrating the frontends. The actions below are performed **once**, as the frontend phase of [Module 3 §11's shared cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), after SQL and App target preparation. Do not leave migrated frontends dependent on unreachable source SQL/App peers.
 
 ### 9.1 Cutover Checklist
 
@@ -1127,4 +1186,4 @@ A CSA always has a rollback plan — and knows exactly when to trigger it. These
 
 ## Next Steps
 
-At the §9 hold point, continue to **[Module 3: Agent-Based Migration — SQL/Tomcat and Coordinated Cutover](Module-3-Agent-Based-Migration.md)** to replicate SQL and Tomcat through a separate modern replication appliance and guest Mobility Service, complete the full isolated test, and execute the coordinated four-VM cutover. Return to this module's frontend cutover and validation actions only within that shared window.
+After **§6**, complete [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites) to submit the SQL/App replication pair through its separate modern appliance and guest Mobility Service. Then return here for **§§7–8**, submit **both frontend tests before validation**, and retain their isolated outputs. Return to [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) to submit **both SQL/App tests before SQL validation**, complete the four-VM application test, and clean up all four test migrations. Remain at the **§9 hold point** until [Module 3 §11](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads) opens the single coordinated window. Perform this module's frontend cutover and final validation only in that shared window, after SQL and App.

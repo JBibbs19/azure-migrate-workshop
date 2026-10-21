@@ -9,7 +9,7 @@ Command resources still require write/execution permission. No network/agent rep
 Prepare and Start explicitly authorize stopping/disabling inherited generators,
 repointing only lab aliases, restarting Tomcat and reloading Nginx. Start also writes
 sample orders through the installed Linux HTTP generator. Never run on source VMs.
-See ../docs/post-migration-labtraffic.md for isolation, credentials and recovery.
+See ../README.md#post-migration-lab-traffic--instructor-reference for isolation, credentials and recovery.
 #>
 [CmdletBinding()]
 param(

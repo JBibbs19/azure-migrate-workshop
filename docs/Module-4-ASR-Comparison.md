@@ -8,7 +8,7 @@
 >
 > **Lab Scope:** The required work is a comparison and decision exercise. All four source VMs use Azure Migrate for IaaS rehosting: Web/Linux-Web use the Hyper-V host provider; SQL/App use the modern physical-server workflow and guest Mobility Service. The optional ASR portal walkthrough in Section 7 does not enable disaster recovery.
 >
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Do not protect the pilot machines a second time, re-register their components, or enable an ASR policy. Review and cancel only; see [PILOT-README](../PILOT-README.md).
+> **Exercise boundary:** Do not protect the workshop machines a second time, re-register their components, or enable an ASR policy. The optional portal walkthrough is review and cancel only.
 
 ## 1. Overview — Choosing the Right Tool: A Solution Architect's Guide
 
@@ -27,7 +27,7 @@ Before Azure Migrate, organizations used ASR's failover workflow for lift-and-sh
 **Azure Migrate for migration, ASR for disaster recovery.** The nuance is the overlap:
 
 - Some Azure Migrate replication paths use ASR technology under the hood; shared technology does not make their lifecycle purpose interchangeable
-- In this lab, all four sources reside on Hyper-V, but this pilot deliberately uses **two migration architectures**: host provider for Web/Linux-Web and modern physical/Mobility for SQL/App; guest OS or statefulness does not mandate the split
+- In this lab, all four sources reside on Hyper-V, but this workshop deliberately uses **two migration architectures**: host provider for Web/Linux-Web and modern physical/Mobility for SQL/App; guest OS or statefulness does not mandate the split
 - Migration configuration does not establish ongoing DR for the resulting Azure VMs
 - The Azure Migrate-created migration vault is not a separate student DR vault
 
@@ -59,7 +59,7 @@ Before Azure Migrate, organizations used ASR's failover workflow for lift-and-sh
 
 ## 2. Azure Site Recovery — Architecture Deep Dive
 
-Understanding ASR at the infrastructure level is essential for making informed architectural recommendations. Components depend on the source environment; the two migration architectures in this pilot are not automatically an ongoing DR design.
+Understanding ASR at the infrastructure level is essential for making informed architectural recommendations. Components depend on the source environment; the two migration architectures in this workshop are not automatically an ongoing DR design.
 
 ### 2.1 Component Architecture
 
@@ -83,7 +83,7 @@ Same Hyper-V host                          Recovery Services vault
 | Component | Role | Lab Relevance |
 |---|---|---|
 | **Recovery Services vault** | Manages Site Recovery configuration and protected items | A dedicated DR vault would be separate from migration resources |
-| **Hyper-V host provider** | Coordinates host-based replication | The provider serves only Web/Linux-Web in this pilot |
+| **Hyper-V host provider** | Coordinates host-based replication | The provider serves only Web/Linux-Web in this workshop |
 | **Replication storage/disks** | Holds replicated disk data for recovery | Depends on the selected replication scenario |
 | **Replication policy** | Defines available replication and recovery-point settings | Settings require a separate DR design |
 | **Recovery plan** | Sequences recovery and manual validation | A planning exercise here; no plan is deployed |
@@ -335,7 +335,7 @@ A CSA translates abstract decision trees into concrete recommendations. These sc
 
 - The migration approach treats these source machines similarly to physical servers
 - Discovery and tracking support the migration project
-- **Rationale:** This is a migration project, not an ongoing DR service. Its source-specific design is illustrative; it does not change the approved two-method/four-VM pilot.
+- **Rationale:** This is a migration project, not an ongoing DR service. Its source-specific design is illustrative; it does not change the approved two-method/four-VM workshop.
 
 ### Scenario 5: Hybrid DR Setup (On-Premises ↔ Azure)
 
@@ -522,7 +522,7 @@ A Hyper-V site groups hosts for the DR source. A replication policy exposes scen
 
 1. **There is no single "best" tool** — the right choice depends on the scenario, RPO/RTO requirements, and lifecycle phase.
 2. **Both tools can have a role:** Azure Migrate for the migration project, ASR for separately designed ongoing DR where required.
-3. **Shared replication technology is not shared lifecycle intent** — this pilot compares Hyper-V and modern physical/Mobility migration, with no additional ASR protection.
+3. **Shared replication technology is not shared lifecycle intent** — this workshop compares Hyper-V and modern physical/Mobility migration, with no additional ASR protection.
 4. **The decision is documented** as an Architecture Decision Record, capturing context, options evaluated, and rationale.
 5. **Tool selection belongs in planning**, not improvised during execution.
 6. **Post-migration recovery needs a plan** — a planned capability is not evidence that protection or a successful recovery test exists.

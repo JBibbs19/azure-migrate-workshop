@@ -4,7 +4,7 @@
 
 > **Cloud Adoption Framework context:** Discovery and assessment support migration planning · **Prerequisite:** [Module 0: Setup](Module-0-Setup.md) completed
 >
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Use a fresh project and pristine source identities. [PILOT-README](../PILOT-README.md) defines the two-method scope, manual STOP gates, and unchanged automation boundary.
+> **Prerequisites:** Use a fresh project and pristine source identities as recorded in [Module 0 §3.6](Module-0-Setup.md#36--two-method-resources-and-isolation). Follow the manual module actions for discovery and assessment.
 
 ## Module Overview
 
@@ -31,7 +31,7 @@ By the end of this module, you will be able to:
 
 - Explain the Azure Migrate project, discovery appliance, and Hyper-V host roles.
 - Create a project and distinguish metadata geography from migration target region.
-- Download, verify, import, and network the published Hyper-V appliance.
+- Download, optionally compare the publisher's SHA256, import, and network the published Hyper-V appliance.
 - Confirm host access, register the appliance, add credentials, and start discovery.
 - Validate the four workload records rather than relying on an inventory count.
 - Create and interpret a four-server Azure VM assessment.
@@ -149,15 +149,18 @@ Before you create the project, confirm that the environment you built in Module 
 
     If a workload is missing, resolve the incomplete Module 0 setup before proceeding.
 
-8.  If you enabled optional network traffic in Module 0, Section 6, confirm it is running: read the orders twice, a minute or two apart.
+8.  Complete [Module 0, Section 6](Module-0-Setup.md#6-start-the-sample-business-traffic)'s required network-traffic startup and checks before discovery. Confirm source network Status, direct Tomcat readiness and Nginx-proxy readiness, then read the API's total order `count` twice, a minute or two apart.
 
     ```powershell
-    Invoke-RestMethod http://192.168.0.13:3000/api/orders
+    C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Network
+    Invoke-RestMethod http://192.168.0.13:3000/api/ready
+    Invoke-RestMethod http://192.168.0.12:8080/api/ready
+    Invoke-RestMethod http://192.168.0.13:3000/api/orders | Select-Object count
     ```
 
-    If you enabled network traffic and the number of orders does not increase, complete its checks in Module 0, Section 6, before continuing. If you declined it, skip this traffic check.
+    Repeat the final read after a minute or two and require the second total `count` to be greater than the first; do not use the length of the capped recent-orders array. If Status, either readiness check, or increasing counts cannot be confirmed, return to Module 0, Section 6, and resolve the issue before continuing. Do not skip this preflight because you declined or skipped the deployment traffic prompt. CPU simulation remains optional and is not required for these network checks.
 
-**Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and any enabled optional network traffic is adding orders. No replication or cutover has started.
+**Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and required source network traffic has confirmed Status, ready direct/proxy endpoints and two increasing API total-count observations. CPU simulation is optional. No replication or cutover has started.
 
 ### 1.2 — Create the Project in the Portal
 
@@ -171,13 +174,13 @@ The project gives the appliance and assessment a common scope. Its geography con
 
 2.  Select **Create Project** beneath the **Decide and Plan** section.
 
-3.  On the **Create Project** page, confirm the authorized pilot subscription.
+3.  On the **Create Project** page, confirm the authorized workshop subscription.
 
-    1.  For **Resource group**, create/select your new pilot project group, separate from existing migration projects.
-    2.  Under **Project Details**, provide a unique pilot project name and record its resource ID.
+    1.  For **Resource group**, create/select your new workshop project group, separate from existing migration projects.
+    2.  Under **Project Details**, provide a unique workshop project name and record its resource ID.
     3.  Leave the reviewed endpoint choice at **Public Endpoint** for this lab unless a separately approved design requires otherwise.
 
-    Do not reuse an existing protected lab, rebind its host, or clone its registered appliance. This pilot uses the fresh source identities recorded in Module 0 §3.6.
+    Do not reuse an existing protected lab, rebind its host, or clone its registered appliance. This workshop uses the fresh source identities recorded in Module 0 §3.6.
 
 4.  Create the project. It takes a few moments.
 
@@ -216,9 +219,9 @@ Import the published Hyper-V appliance export, rather than creating an empty Win
 
 2.  Select **Hyper-V** as the virtualization source.
 
-3.  Select the **.VHD** file as the download option.
+3.  Select the **.VHD** file as the download option unless deployment already confirmed successful appliance staging. In that case, reuse the staged ZIP and extracted package on the actual ApplianceStore volume; do not download or extract a second copy. If staging was **NOT COMPLETE**, finish the download/extraction here after deployment has ended. An existing ZIP rehash alone is not verification of the extracted package.
 
-4.  While waiting for the download to complete, enter an appliance registration name, such as `MigrateAppl`.
+4.  While waiting for the download to complete (or if it was already staged), enter an appliance registration name, such as `MigrateAppl`.
 
     Use an alphanumeric name of no more than 14 characters.
 
@@ -232,13 +235,35 @@ Import the published Hyper-V appliance export, rather than creating an empty Win
 
 7.  Identify the volume labelled **ApplianceStore** and its drive letter (normally `E:\`).
 
-    Use its `Appliance` folder for the archive, extraction, and imported VM files.
+    Use its `Appliance` folder for the archive, extraction, and imported VM files. The optional recommended SHA256 comparison below can be performed now or before import.
 
-8.  Extract the ZIP into a new folder under the appliance store, `E:\Appliance\Extracted`.
+8.  If it was not already staged, extract the ZIP into a new folder under the appliance store, for example `E:\Appliance\Extracted` using the drive letter you confirmed.
 
     Keep the published folder structure intact and do not overwrite an existing VM's files.
 
-**Expected Result:** The project key is stored privately, and the appliance package is extracted to `E:\Appliance\Extracted` on the appliance store.
+**Expected Result:** The project key is stored privately, and the appliance package is extracted under the actual appliance store. Deployment does not import or register the appliance. A computed or recorded SHA256 alone does not mean the archive is publisher-verified.
+
+#### Optional Recommended Check — Compare the Publisher's SHA256 Before Import
+
+Do this only **after deployment has finished**, on HyperVHost. This manual check is optional; it is not a deployment pause or a requirement to log in during preparation. Without a publisher comparison, record the archive as **staged / unverified**.
+
+1.  Open Microsoft's [appliance Verify security instructions](https://learn.microsoft.com/azure/migrate/migrate-appliance#verify-security). Use the **current Hyper-V ZIP** row, not another appliance format or an old reference value.
+
+2.  In elevated PowerShell, identify the actual store and the exact ZIP you will use. Replace the filename placeholder with that ZIP's real name; do not hash an extracted VHD instead.
+
+    ```powershell
+    $volumes = @(Get-Volume -FileSystemLabel ApplianceStore | Where-Object { $_.DriveLetter })
+    if ($volumes.Count -ne 1) { throw 'Expected one ApplianceStore volume; confirm the correct store.' }
+    $store = "$($volumes[0].DriveLetter):\Appliance"
+    Get-ChildItem -LiteralPath $store -Filter '*.zip' -File | Select-Object Name,Length
+    $archive = Join-Path $store '<actual ZIP filename>'
+    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+    $actual
+    ```
+
+3.  Compare that hash with the current Microsoft Hyper-V ZIP value. If you choose to perform this check and it **mismatches, STOP: do not import or bypass the mismatch**. Retain the ZIP for inspection and resolve the artifact/version/source with the instructor. Do not delete extracted folders that may already contain VM disks. A match applies to that exact ZIP, not to previously extracted files or the running guest OS.
+
+`-ApplianceVhdSha256` remains an optional deployment parameter: if provided, the host enforces it before extraction and reports a staging failure on mismatch. Omitting it does not disable host-side hash computation, extraction capacity checks or existing-record rehash checks.
 
 ### 2.2 — Prepare the Hyper-V Host
 
@@ -506,7 +531,7 @@ First boot establishes the appliance's local administrator password and network 
 
 ### Why This Matters — CSA Context
 
-Verifying the archive is a stop/go security check, not an optional warning. Importing the published export also avoids silently changing the appliance generation or storage layout. DHCP reservation gives the lab a predictable source address while keeping the guest network configuration DHCP-based.
+The manual publisher SHA256 comparison is optional but recommended after deployment and before import; a computed hash alone is not publisher verification. If a supplied or manually compared expected hash mismatches, stop and resolve it rather than bypassing the failure. Importing the published export also avoids silently changing the appliance generation or storage layout. DHCP reservation gives the lab a predictable source address while keeping the guest network configuration DHCP-based.
 
 ------------------------------------------------------------------------
 
@@ -910,15 +935,15 @@ Performance-based sizing can inform a comparison, but an idle lab does not estab
 
 ### 5.7 — Read the Supplied Assessment Examples Without Changing Scope
 
-The reviewed supplied exports illustrate **recommendations**, not a different hands-on migration target. The pilot remains **four Azure IaaS VM rehosts**. Do not run a PaaS migration or change the manual source choice based on a workbook name.
+The reviewed supplied exports illustrate **recommendations**, not a different hands-on migration target. The workshop remains **four Azure IaaS VM rehosts**. Do not run a PaaS migration or change the manual source choice based on a workbook name.
 
-| Export path | Actual recommendation pattern in the reviewed export | Pilot interpretation |
+| Export path | Actual recommendation pattern in the reviewed export | Workshop interpretation |
 |---|---|---|
 | IaaS | Four VMs, `Standard_D2als_v6` recommendation | Validate current size support, quota, price and allocation; not a fixed lab default |
 | PaaS Preferred | Two Linux IaaS VMs + IIS to App Service + SQL to Managed Instance | Conceptual modernization comparison only |
 | PaaS Only | Two Linux IaaS VMs + IIS to AKS + SQL to Managed Instance | The label does not mean the export eliminated every IaaS VM |
 
-No separately assessed Tomcat, Nginx or Contoso Order Desk web-application asset was present in these exports. That is **not proof the software is absent**. IIS/Tomcat discovery support is not a promise that every generic Java app or Nginx reverse proxy appears as a first-class assessed web-app asset; do not fail the pilot merely because Nginx has no such asset.
+No separately assessed Tomcat, Nginx or Contoso Order Desk web-application asset was present in these exports. That is **not proof the software is absent**. IIS/Tomcat discovery support is not a promise that every generic Java app or Nginx reverse proxy appears as a first-class assessed web-app asset; do not fail the workshop merely because Nginx has no such asset.
 
 #### Hands-On Steps
 
@@ -930,11 +955,11 @@ No separately assessed Tomcat, Nginx or Contoso Order Desk web-application asset
 
 3.  If the SQL readiness detail reports **trace flag 8017**, retain the exact warning and route it for manual SQL/support review.
 
-    Its remediation is **unverified here**. Do not enable/disable a trace flag or change SQL configuration based on the warning alone.
+    Confirm the supported remediation with the SQL owner/support before changing configuration. Do not enable/disable a trace flag or change SQL configuration based on the warning alone.
 
 4.  Mark unresolved readiness findings as follow-up items; a Ready VM assessment does not clear Module 3's kernel/Mobility/storage gates.
 
-**Expected Result:** Your notes accurately describe the exported recommendations and limitations while keeping the pilot's four-VM IaaS scope unchanged.
+**Expected Result:** Your notes accurately describe the exported recommendations and limitations while keeping the workshop's four-VM IaaS scope unchanged.
 
 ### Why This Matters — CSA Context
 

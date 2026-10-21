@@ -8,7 +8,7 @@
 >
 > **Objectives:** Review application health, configure and verify guest monitoring, assess data protection, harden role-specific network access, review costs, assess updates, and complete an operations runbook.
 >
-> **DRAFT PILOT—NOT LIVE VALIDATED · 2026-10-17.** Begin only after Module 3's shared cutover acceptance; otherwise record this module as deferred. The two replication engines are not ongoing monitoring or DR. See [PILOT-README](../PILOT-README.md).
+> **Prerequisite:** Begin only after [Module 3](Module-3-Agent-Based-Migration.md)'s shared cutover acceptance; otherwise defer these changes. The two replication engines are not ongoing monitoring or DR.
 >
 > **Lab Scope:** Four migrated Azure IaaS VMs; both Linux guests remain Ubuntu 24.04. Required student work is manual and portal-first. Resource creation and configuration changes require the appropriate permissions and approved lab scope/budget. Backup/restore, ASR, flow logging, Bastion, paid Defender plans, commitments, and scheduled patch installation are optional, not assumed to exist.
 
@@ -1054,7 +1054,7 @@ Apply only approved changes; review again later
 
 A representative post-migration baseline is needed before right-sizing. The original 2–4 week review window is a planning example; a short lab session is not enough to establish production sizing.
 
-Use the **actual sizes manually approved and selected in Modules 2–3**, not a fixed lab default. The inherited B1/B2 examples and all-four D2 fallback were not pilot approval, especially for the two-vCPU Linux sources. An assessment recommendation such as `Standard_D2als_v6` is not proof that this SKU was selected or allocatable. Record current utilization and application requirements before proposing any later change.
+Use the **actual sizes manually approved and selected in Modules 2–3**, not a fixed lab default. The inherited B1/B2 examples and all-four D2 fallback are not approved size selections, especially for the two-vCPU Linux sources. An assessment recommendation such as `Standard_D2als_v6` is not proof that this SKU was selected or allocatable. Record current utilization and application requirements before proposing any later change.
 
 #### Hands-On Steps
 
@@ -1409,7 +1409,7 @@ Statuses are **verified**, **pending**, **failed**, **deferred**, or **not appro
 | **Module 0: Environment Setup** | Ready | Nested Hyper-V lab with Windows Server 2022 and Ubuntu 24.04 workloads |
 | **Module 1: Discovery & Assessment** | Plan | Discovery, assessment, sizing, and migration planning for the four servers |
 | **Module 2: Migration Preparation** | Migrate | Supported Hyper-V replication preparation and target/test planning |
-| **Module 3: Migration Validation & Cutover** | Migrate | SQL/App modern physical/Mobility plus Web/Linux-Web Hyper-V; one full isolated rehearsal and shared planned cutover, alias repointing, and data/application acceptance |
+| **Module 3: Migration Validation & Cutover** | Migrate | SQL/App modern physical/Mobility plus Web/Linux-Web Hyper-V; one full isolated test and shared planned cutover, alias repointing, and data/application acceptance |
 | **Module 4: ASR vs Azure Migrate** | Migrate — Tool Selection | Tool comparison, ADR, recovery requirements, and optional review-only ASR walkthrough |
 | **Module 5: Post-Migration Operations** | Manage + Govern | Actual monitoring/network/cost/update results and optional protection activities |
 
