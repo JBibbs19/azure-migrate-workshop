@@ -1,4 +1,4 @@
-# Shared by the deployment client and the embedded Windows host payload.
+﻿# Shared by the deployment client and the embedded Windows host payload.
 # Progress is observational: a running process is not proof of workload health.
 $script:LabProgress = $null
 
@@ -197,7 +197,8 @@ function Wait-LabJob {
 function Assert-LabManagedRunResult {
     param([Parameter(Mandatory)]$InstanceView)
     if ($InstanceView.ExecutionState -ne 'Succeeded' -or $null -eq $InstanceView.ExitCode -or $InstanceView.ExitCode -ne 0 -or
-        $InstanceView.Output -cnotmatch '(?m)^LAB_WORKLOADS_READY\r?$') {
+        $InstanceView.Output -cnotmatch '(?m)^LAB_WORKLOADS_READY\r?$' -or
+        $InstanceView.Output -cnotmatch '(?m)^LAB_REPLICATION_HELPER_STAGED\r?$') {
         throw 'Guest setup did not pass. Inspect the managed Run Command instance view and C:\AzMigrateLab\setup-log.txt.'
     }
 }

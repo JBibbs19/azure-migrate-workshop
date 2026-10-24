@@ -1,6 +1,6 @@
 # Module 3: Agent-Based Migration — SQL/Tomcat and Coordinated Cutover
 
-| **Estimated Time** | 75–90 minutes of student activity, plus separately approved appliance preparation, replication, and full-system testing |
+| **Estimated Time** | 75–90 minutes of student activity, plus Microsoft appliance installation/registration, replication, and full-system testing |
 |---------------------|---------------|
 | **Level**           | Advanced — Cloud Solution Architect |
 | **Prerequisites**   | [Module 1](Module-1-Discovery.md) completed; [Module 2 §§4–6](Module-2-Agentless-Migration.md#4-step-1--prepare-for-migration) frontend replication configured; separate modern appliance and support prerequisites in §§4–7 |
@@ -8,7 +8,7 @@
 
 ### Learning Objectives — Concepts
 
-By the end of this module, you will distinguish disk-block replication from application requests, deploy/register a separate supported replication appliance manually, install/register supported guest Mobility Service, validate the four isolated test peers across **both** engines, and coordinate **one planned business maintenance window**. Initial and delta replication do not require a business outage. SQL + App are the assigned modern physical/Mobility pair; Web + Linux-Web remain exclusively on the Hyper-V provider.
+By the end of this module, you will distinguish disk-block replication from application requests, run the staged helper after assessment to create `MigrateRepl` automatically, verify its clean OS/disks and manually install/register Microsoft's modern replication appliance on it, install/register supported guest Mobility Service, validate the four isolated test peers across **both** engines, and coordinate **one planned business maintenance window**. Initial and delta replication do not require a business outage. SQL + App are the assigned modern physical/Mobility pair; Web + Linux-Web remain exclusively on the Hyper-V provider.
 
 Enter here after [Module 2 §§4–6](Module-2-Agentless-Migration.md#4-step-1--prepare-for-migration) configured the frontend pair. Complete **this module §§4–8** to configure replication for **SQL + App together**, then return to [Module 2 §§7–8](Module-2-Agentless-Migration.md#7-step-4--monitor-replication) to review and test **both frontends**. Return here for **§§9–10** to review and test **both SQL/App VMs**, validate SQL and the complete four-VM isolated application, and clean up all test copies. Only then perform **§11's one coordinated cutover**, SQL first; invoke Module 2's frontend cutover inside that same window, not as an earlier prerequisite.
 
@@ -24,7 +24,7 @@ This lab deliberately treats **`OnPrem-SQL` and `OnPrem-Linux-App` as physical s
 
 **The replication pipeline:**
 
-1. **Prepare and register the modern appliance** — Use this fresh lab project's physical-server preparation flow and separately approved hosting; never reuse a source VM or the discovery appliance.
+1. **Create the clean guest, then install/register the modern appliance** — After Module 1 assessment, §7's staged standalone helper creates `MigrateRepl` automatically from the same original generalized Windows Server 2022 base image used for the Windows workloads. Never clone a configured workload or discovery appliance. Verify its prepared OS/disks, then use this fresh project's physical-server flow to install/register Microsoft's appliance manually.
 2. **Install/register supported Mobility Service** — Use the registered appliance's matching installer/configuration and approved credentials on SQL and App only.
 3. **Initial replication** — Copy every required OS/application/database disk while the four sources keep serving.
 4. **Delta replication** — Track changed blocks, not HTTP requests, SQL log shipping, open transaction memory, or CPU utilization. Source-to-appliance control uses TCP 443 and data uses TCP 9443; appliance-to-Azure uses TCP 443 under the current documented network requirements. These are scoped data-path requirements, **not an old appliance management URL**.
@@ -146,7 +146,7 @@ The five-edge map is already documented in [Module 1 §6](Module-1-Discovery.md#
 | `OnPrem-SQL` | Windows Server 2022 | SQL Server 2022 Express, `ContosoApp`, TCP 1433 | `192.168.0.11` |
 | `OnPrem-Linux-App` | Ubuntu 24.04 | Tomcat 10.1 / OpenJDK 17 JSP Order Desk, TCP 3000 | `192.168.0.13` |
 
-The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generation 2 **HyperVHost** hosts this pair and the Module 2 pair. The source nested network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`), separate from the source Azure VNet `10.0.0.0/16`.
+The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generation 2 **HyperVHost** hosts this pair and the Module 2 pair; §7 creates separate `MigrateRepl` only after assessment. The source nested network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`, replication guest `.21`), separate from the source Azure VNet `10.0.0.0/16`. The single 2-TiB Premium SSD host OS disk backs `MigrateRepl`'s separate 80-GiB OS and 620-GiB local data VHDXs; the 100-GiB discovery partition remains unchanged.
 
 #### Hands-On Steps
 
@@ -156,7 +156,7 @@ The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generatio
 
 3.  **HyperVHost — Hyper-V Manager:** Confirm SQL and App are running, with approved guest access and existing authorized SQL access. Keep §2's source identities and method assignments; do not dual-protect either VM.
 
-4.  **Local workstation — Azure portal:** Confirm target/test networks and a **separate modern replication appliance** are available, or will be prepared and verified in §§6–7 before use. The discovery appliance is not a substitute.
+4.  **HyperVHost — elevated Windows PowerShell / Azure portal:** Confirm target/test networks are available or will be completed in §6, and the standalone helper plus retained original Windows base image are staged as checked in Module 0 §5.1. `MigrateRepl` need not exist yet: §7 creates it automatically after assessment, without manual sizing/build. The discovery appliance is not a substitute; Microsoft appliance software installation/registration still follows below.
 
 5.  **Instructor confirmation:** Confirm the provided build matches the [instructor-qualified baseline](../README.md#instructor-preparation--qualify-the-provided-baseline). If qualification or the match is unconfirmed, or the image/kernel, agent, storage or architecture changed, **STOP and ask the instructor before agent installation or replication**.
 
@@ -351,21 +351,51 @@ The current [physical-server tutorial](https://learn.microsoft.com/azure/migrate
 
 Before enabling this pair's protection, recheck Module 2 §4.3's **project-association prerequisite**: the owner must verify project/provider/appliance/managed-vault compatibility for both methods. The presence of both source choices is not shared-vault certification. Do not force associations, guess blank IDs, silently create separate projects, or patch scripts.
 
-### 7.1 Verify Separate Hosting and Prepare the Physical-Server Route
+### 7.1 Create the Replication VM Automatically, Verify It and Prepare the Physical-Server Route
 
 #### Hands-On Steps
 
+**HyperVHost — elevated Windows PowerShell (Run as administrator):**
+
+1.  Confirm Module 1's **four-workload assessment is complete**, then run the standalone helper staged in Module 0. It prompts privately for the existing guest `Administrator` password as a SecureString; do not put the password in command history, notes or source.
+
+    ```powershell
+    C:\AzMigrateLab\prepare-replication.ps1
+    ```
+
+    This creates the fixed-spec `MigrateRepl` automatically from retained original `C:\AzMigrateLab\VHDs\WindowsServer2022-Base.vhdx`, the **same clean generalized Windows Server 2022 base** used for the Windows workload guests. It does not clone a workload's IIS/SQL installation, install Microsoft's replication software or register a project. No manual VM build/sizing is required. **Do not rerun `deploy-lab.ps1`.** A repeat for the helper's existing owned prepared VM verifies it read-only rather than recreating it; stop for the instructor on an unverified/partial result, identity mismatch or retired source.
+
+    After successful helper completion, record the actual VM ID and inspect the result:
+
+    ```powershell
+    Get-VM -Name MigrateRepl | Select-Object Name,VMId,State,ProcessorCount,MemoryAssigned
+    Get-VMMemory -VMName MigrateRepl | Select-Object DynamicMemoryEnabled,Startup
+    Get-VMHardDiskDrive -VMName MigrateRepl | Get-VHD |
+        Select-Object Path,VhdType,Size,FileSize
+    Get-VMNetworkAdapter -VMName MigrateRepl | Select-Object SwitchName,IPAddresses
+    ```
+
+    Expect Running, eight shared vCPUs, 16 GiB static memory, `intSwitch`/`192.168.0.21`, 80-GiB OS and separate 620-GiB data disk. Both VHDXs are under host `C:\AzMigrateLab\ReplicationAppliance`, backed by the single 2-TiB Premium SSD host OS disk, not the discovery partition or temporary storage. Disk `Size` is capacity; a dynamic data disk's smaller `FileSize` does not reduce its reserved backing requirement. The nested total is now six, but the existing assessment group remains the four workload identities. Ongoing host discovery may now list `MigrateRepl`; leave it out of assessment and migration selections.
+
+**MigrateRepl — VMConnect / elevated PowerShell:**
+
+2.  Open **Connect** for `MigrateRepl` in Hyper-V Manager and sign in with the approved guest credentials. Verify Windows Server 2022 Desktop Experience English (`en-*`), the separate data volume labelled `ReplicationData`, and no installed Hyper-V, IIS or AD DS roles before the vendor installer.
+
+    ```powershell
+    Get-CimInstance Win32_OperatingSystem | Select-Object Caption,OSArchitecture,OSLanguage
+    Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' |
+        Select-Object InstallationType
+    Get-WindowsFeature Hyper-V,Web-Server,AD-Domain-Services |
+        Select-Object Name,InstallState
+    Get-Disk | Select-Object Number,FriendlyName,Size,OperationalStatus
+    Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,Size,SizeRemaining
+    ```
+
+    Record the actual data drive letter; it is normally `E:` **inside this guest**, independent of host `ApplianceStore`'s drive letter. No Microsoft replication appliance is installed or registered yet. Do not add server roles or clone a workload/registered appliance.
+
 **Local workstation — student notes:**
 
-1.  Reopen Module 0 §3.6's approved machine record and §4's support tuple.
-
-2.  Verify a separate, unreplicated **Windows Server 2022** machine with at least **8 CPUs, 16 GB memory, 80-GB OS disk and separate 620-GB data disk**, sufficient free capacity and the current published prerequisites.
-
-    This minimum is not the higher-scale 16-CPU/32-GB tier. The appliance OS must not have the Hyper-V role. This guest-role restriction is not proof that every hypervisor/cloud placement is prohibited or supported.
-
-3.  Obtain approval for the **actual hosting placement** against the current documentation and instructor/support review before installation. Do not assume Azure-hosted or nested placement is supported merely because Windows Server 2022 can boot there; verify the particular placement rather than declaring all such placements unsupported.
-
-    **STOP** if placement, storage backing, quota, licensing, network reachability or cost approval is missing. The original host's 512-GB OS disk and 100-GB discovery partition do not supply a 620-GB data disk. Do not change the host, its disks, deployment scripts, or source workload allocations to make space. Never reuse `MigrateAppl`, SQL, App, or a registered-appliance clone.
+3.  Confirm the instructor-qualified build match from §4, the **helper's actual** storage/memory and OS-readiness result, SQL/App-to-`.21` TCP 443/9443 reachability and the appliance's approved outbound Azure HTTPS path. Initial deployment's staged result is not this VM-readiness result. If helper preparation is incomplete or qualification is unconfirmed, stop for the instructor rather than build another VM, resize disks or repeat a hosting assessment. The instructor handles actual nested-placement/vendor qualification; nominal minimums are not certification.
 
 **Local workstation — Azure portal:**
 
@@ -389,13 +419,13 @@ Before enabling this pair's protection, recheck Module 2 §4.3's **project-assoc
 
 #### Hands-On Steps
 
-**Separate approved replication-appliance machine — elevated PowerShell / installer UI:**
+**MigrateRepl (`192.168.0.21`) — elevated PowerShell / installer UI:**
 
 1.  Download the current appliance package from the **actual project's setup link**.
 
-2.  Verify the publisher/signature and any currently published hash using the official instructions; extract to the approved appliance location.
+2.  Verify the publisher/signature and any currently published hash using the official instructions; extract to the documented location on the guest's actual data volume. If that volume is `E:`, the usual appliance agent path is `E:\Software\Agents`; use the installed path reported by the current installer, not a guessed host drive.
 
-3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator on this separate machine**.
+3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator inside `MigrateRepl`**, not on HyperVHost, the discovery appliance or a workload.
 
     This is the Microsoft appliance installer, not a workshop `migrate-step` helper. No copied installer command, fixed binary URL, execution-policy bypass, or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
 
@@ -727,6 +757,9 @@ Names ending in `-test` below are **illustrative role labels only**. Use the uni
     if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
       sudo systemctl disable --now contoso-orderdesk-traffic.service
     fi
+    if systemctl cat contoso-employee-orders.service >/dev/null 2>&1; then
+      sudo systemctl disable --now contoso-employee-orders.service
+    fi
     ```
 
     Leave **SQL, `contoso-orderdesk` (Tomcat), Nginx and IIS running**. Do not disable broad groups of services or stop the application just to stop a generator.
@@ -763,7 +796,7 @@ Names ending in `-test` below are **illustrative role labels only**. Use the uni
         sudo systemctl disable lab-cpu-simulation.service
       fi
     fi
-    systemctl show contoso-orderdesk-traffic.service lab-cpu-simulation.service \
+    systemctl show contoso-orderdesk-traffic.service contoso-employee-orders.service lab-cpu-simulation.service \
       --property=Id,LoadState,ActiveState,MainPID,UnitFileState
     ```
 
@@ -1170,11 +1203,14 @@ flowchart TD
 
 **Source Linux guests — SSH session:**
 
-8.  Inside each source Linux guest with the known traffic unit (normally App), run:
+8.  Inside each source Linux guest with the known traffic units, on **both Linux-Web and Linux-App**, run:
 
     ```bash
     if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
       sudo systemctl disable --now contoso-orderdesk-traffic.service
+    fi
+    if systemctl cat contoso-employee-orders.service >/dev/null 2>&1; then
+      sudo systemctl disable --now contoso-employee-orders.service
     fi
     ```
 
@@ -1184,7 +1220,7 @@ flowchart TD
 
     These commands are not a general service shutdown.
 
-10. Confirm the known tasks/services are disabled/stopped.
+10. Confirm the known tasks/services are disabled/stopped, including `contoso-employee-orders.service` on Linux-Web and `contoso-orderdesk-traffic.service` on Linux-App. Neither may restart unattended on the next day or reboot.
 
 11. Confirm manual clients are no longer creating orders.
 

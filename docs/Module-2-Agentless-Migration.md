@@ -856,11 +856,14 @@ If these resources were already created during Module 3 §6.2, open the recorded
 
 **OnPrem-Linux-Web-test — Run Command (RunShellScript) or SSH session:**
 
-2.  Stop/disable the known traffic service only if present, then check the static site:
+2.  Stop/disable the known traffic services only if present, then check the static site:
 
     ```bash
     if systemctl cat contoso-orderdesk-traffic.service >/dev/null 2>&1; then
       sudo systemctl disable --now contoso-orderdesk-traffic.service
+    fi
+    if systemctl cat contoso-employee-orders.service >/dev/null 2>&1; then
+      sudo systemctl disable --now contoso-employee-orders.service
     fi
     if systemctl cat lab-cpu-simulation.service >/dev/null 2>&1; then
       sudo systemctl stop lab-cpu-simulation.service
@@ -868,7 +871,7 @@ If these resources were already created during Module 3 §6.2, open the recorded
         sudo systemctl disable lab-cpu-simulation.service
       fi
     fi
-    systemctl show contoso-orderdesk-traffic.service lab-cpu-simulation.service \
+    systemctl show contoso-orderdesk-traffic.service contoso-employee-orders.service lab-cpu-simulation.service \
       --property=Id,LoadState,ActiveState,MainPID,UnitFileState
     systemctl is-active nginx
     curl --fail --silent --show-error -o /dev/null -w '%{http_code}\n' http://localhost:80
@@ -917,7 +920,7 @@ If these resources were already created during Module 3 §6.2, open the recorded
 
 ## 9. Step 6 — Cutover Planning & Execution
 
-The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 → SQL:1433**, plus the app's optional HTTP generator to Nginx and Windows Web's optional SQL/App background traffic. The teaching pair is not an independent final migration wave.
+The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 → SQL:1433**, plus the app's required source HTTP generator to Nginx and Windows Web's required source SQL/App background traffic. The teaching pair is not an independent final migration wave.
 
 > **HOLD POINT — Do not perform final frontend cutover yet.** Complete [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) and its **full four-VM isolated test** first. Replication for both pairs was configured before the frontend test; return there without migrating the frontends. The actions below are performed **once**, as the frontend phase of [Module 3 §11's shared cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), after SQL and App target preparation. Do not leave migrated frontends dependent on unreachable source SQL/App peers.
 

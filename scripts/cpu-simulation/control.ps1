@@ -17,15 +17,37 @@ function Invoke-RequestedCpuStart {
     try { Invoke-LabCpuSimulation -Action Start }
     catch { Write-Warning 'CPU startup unverified; network outcome is unchanged. Inspect CPU-only Status/Stop.'; Write-Output 'LAB_CPU_PARTIAL_OR_FAILED' }
 }
+function Write-LabCpuFailure {
+    param([string]$Guest,[string]$Action,[string]$Phase,[System.Management.Automation.ErrorRecord]$Record)
+    $id = ($Record.FullyQualifiedErrorId -split ',')[0]
+    if ($id -notmatch '^[A-Za-z][A-Za-z0-9_.]{0,95}$') { $id = 'CpuOperationFailed' }
+    $type = $Record.Exception.GetType().FullName
+    Write-Warning "$Guest CPU $Action unverified (phase=$Phase; errorId=$id; type=$type). Inspect CPU-only Status/Stop; no raw error or payload recorded."
+}
 function Invoke-LabCpuSimulation {
     param([ValidateSet('Start','Status','Stop')][string]$Action)
-    $windows = Get-Content (Join-Path $cpuAssetsPath 'windows-cpu.ps1') -Raw -Encoding UTF8 -ErrorAction Stop
-    $linux = Get-Content (Join-Path $cpuAssetsPath 'linux-cpu.py') -Raw -Encoding UTF8 -ErrorAction Stop
+    # Bare .NET strings avoid carrying Get-Content extended properties into remoting.
+    $windows = [IO.File]::ReadAllText((Join-Path $cpuAssetsPath 'windows-cpu.ps1'),[Text.Encoding]::UTF8)
+    $linux = [IO.File]::ReadAllText((Join-Path $cpuAssetsPath 'linux-cpu.py'),[Text.Encoding]::UTF8)
+    $renewToken = 'No'
+    if ($Action -eq 'Start' -and $RenewCpu.IsPresent) { $renewToken = 'Yes' }
+    $remoteArguments = @(
+        [string]$windows
+        [string]$Action
+        [int]$CpuDurationHours
+        [string]$renewToken
+    )
     $confirmed = 0
     foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
+        $phase = 'windows-remoting'
         try {
             $result = Invoke-Command -VMName $name -Credential $credential -ErrorAction Stop -ScriptBlock {
-                param($Text,$Action,$Hours,$Renew)
+                param(
+                    [string]$Text,
+                    [ValidateSet('Start','Status','Stop')][string]$Action,
+                    [ValidateRange(1,168)][int]$Hours,
+                    [ValidateSet('Yes','No')][string]$RenewToken
+                )
                 $ErrorActionPreference='Stop'
                 if ($Action -eq 'Start') {
                     $root='C:\LabCpuSimulation'
@@ -34,16 +56,19 @@ function Invoke-LabCpuSimulation {
                     if ($LASTEXITCODE -ne 0) { throw 'CPU asset ACL failed' }
                     [IO.File]::WriteAllText((Join-Path $root 'windows-cpu.ps1'),$Text,[Text.UTF8Encoding]::new($false))
                 }
-                & ([scriptblock]::Create($Text)) -Mode $Action -DurationHours $Hours -Renew:$Renew
-            } -ArgumentList $windows,$Action,$CpuDurationHours,[bool]$RenewCpu
+                $workerParameters = @{ Mode = $Action; DurationHours = $Hours }
+                if ($Action -eq 'Start' -and $RenewToken -ceq 'Yes') { $workerParameters['Renew'] = $true }
+                & ([scriptblock]::Create($Text)) @workerParameters
+            } -ArgumentList $remoteArguments
+            $phase = 'windows-confirmation'
             if ($Action -eq 'Start' -and ($null -eq $result -or -not $result.healthy)) { throw 'CPU start unverified' }
             if ($Action -eq 'Stop' -and ($null -eq $result -or $null -ne $result.pid -or $result.task.exists)) { throw 'CPU stop unverified' }
             Write-Host ($name + ' CPU: ' + ($result | ConvertTo-Json -Depth 6 -Compress))
             $confirmed++
-        } catch { Write-Warning "$name CPU $Action unverified; inspect CPU-only Status/Stop. No application services were changed; no raw error recorded." }
+        } catch { Write-LabCpuFailure -Guest $name -Action $Action -Phase $phase -Record $_ }
     }
     $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($linux -replace "`r`n","`n")))
-    $renewArg=''; if ($RenewCpu) { $renewArg=' --renew' }
+    $renewArg=''; if ($renewToken -ceq 'Yes') { $renewArg=' --renew' }
     $install=''
     if ($Action -eq 'Start') {
         $install="install -d -m 0755 /opt/lab-cpu-simulation`nprintf '%s' '$encoded' | base64 -d > /opt/lab-cpu-simulation/linux-cpu.py`nchmod 0644 /opt/lab-cpu-simulation/linux-cpu.py`n"
@@ -52,8 +77,8 @@ function Invoke-LabCpuSimulation {
     $payload="set -e`n"+$install+"python3 -c `"import base64; exec(compile(base64.b64decode('$encoded'), '<cpu-control>', 'exec'))`" --mode $Action --duration-hours $CpuDurationHours$renewArg"
     foreach ($guest in @(@{Name='OnPrem-Linux-Web';Address=$labHosts['onprem-nginx']},@{Name='OnPrem-Linux-App';Address=$labHosts['onprem-app']})) {
         try {
-            if (Invoke-LabLinuxPayload -VMName ($guest.Name + '-cpu') -Address $guest.Address -Payload $payload -Marker 'LAB_CPU_CONFIRMED') { $confirmed++ }
-        } catch { Write-Warning "$($guest.Name) CPU $Action unverified; inspect guest-local state. No raw error recorded." }
+            if (Invoke-LabLinuxPayload -VMName ($guest.Name + '-cpu') -Address $guest.Address -Payload $payload -Marker 'LAB_CPU_CONFIRMED' -StreamInput) { $confirmed++ }
+        } catch { Write-LabCpuFailure -Guest $guest.Name -Action $Action -Phase 'linux-stdin-transport' -Record $_ }
     }
     if ($Action -eq 'Start') {
         if ($confirmed -eq 4) { Write-Output 'LAB_CPU_FULLY_STARTED' }

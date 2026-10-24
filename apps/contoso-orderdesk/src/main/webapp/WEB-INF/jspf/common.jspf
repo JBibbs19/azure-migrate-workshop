@@ -75,6 +75,100 @@ private static java.util.List<java.util.Map<String,String>> orders(java.sql.Conn
     }
     return values;
 }
+private static java.util.List<java.util.Map<String,String>> orderOptions(java.sql.Connection c, boolean products) throws java.sql.SQLException {
+    java.util.List<java.util.Map<String,String>> values = new java.util.ArrayList<>();
+    String sql = products ?
+        "SELECT TOP (500) ProductName, UnitPrice FROM (SELECT ProductName, UnitPrice, " +
+        "ROW_NUMBER() OVER (PARTITION BY ProductName ORDER BY OrderID) AS choice FROM dbo.Orders " +
+        "WHERE UnitPrice BETWEEN 0.01 AND 1000.00 AND UnitPrice = ROUND(UnitPrice, 2) " +
+        "AND LEN(ProductName) BETWEEN 1 AND 100) history WHERE choice = 1 ORDER BY ProductName" :
+        "SELECT TOP (500) CustomerID FROM dbo.Customers WHERE CustomerID > 0 ORDER BY CustomerID";
+    try (java.sql.PreparedStatement s = statement(c, sql); java.sql.ResultSet r = s.executeQuery()) {
+        while (r.next()) {
+            java.util.Map<String,String> row = new java.util.LinkedHashMap<>();
+            if (products) {
+                row.put("productName", r.getString("ProductName"));
+                row.put("unitPrice", r.getBigDecimal("UnitPrice").toPlainString());
+            } else row.put("customerId", Integer.toString(r.getInt("CustomerID")));
+            values.add(row);
+        }
+    }
+    return values;
+}
+private static final class DeskPage {
+    int size, anchor;
+    boolean hasNext, hasPrevious;
+    java.util.List<java.util.Map<String,String>> rows;
+    String first() { return rows.get(0).get("orderId"); }
+    String last() { return rows.get(rows.size() - 1).get("orderId"); }
+    String metadata() {
+        return "{\"pageSize\":" + size + ",\"anchor\":" + anchor +
+            ",\"hasNext\":" + hasNext + ",\"hasPrevious\":" + hasPrevious +
+            ",\"nextBefore\":" + (hasNext ? last() : "null") +
+            ",\"previousAfter\":" + (hasPrevious ? first() : "null") + "}";
+    }
+}
+private static java.util.List<java.util.Map<String,String>> pageRows(java.sql.Connection c, int size,
+        int anchor, Integer cursor, boolean newer) throws java.sql.SQLException {
+    java.util.List<java.util.Map<String,String>> values = new java.util.ArrayList<>();
+    String sql = "SELECT TOP (?) o.OrderID, o.CustomerID, c.FirstName, c.LastName, o.ProductName, " +
+        "o.Quantity, o.UnitPrice, o.OrderDate FROM dbo.Orders o JOIN dbo.Customers c ON c.CustomerID = o.CustomerID " +
+        "WHERE o.OrderID <= ? " + (cursor == null ? "" : (newer ? "AND o.OrderID > ? " : "AND o.OrderID < ? ")) +
+        (newer ? "ORDER BY o.OrderID ASC" : "ORDER BY o.OrderID DESC");
+    try (java.sql.PreparedStatement s = statement(c, sql)) {
+        s.setInt(1, size); s.setInt(2, anchor);
+        if (cursor != null) s.setInt(3, cursor);
+        try (java.sql.ResultSet r = s.executeQuery()) {
+            while (r.next()) {
+                java.util.Map<String,String> row = new java.util.LinkedHashMap<>();
+                row.put("orderId", Integer.toString(r.getInt("OrderID")));
+                row.put("customerId", Integer.toString(r.getInt("CustomerID")));
+                row.put("customer", r.getString("FirstName") + " " + r.getString("LastName"));
+                row.put("productName", r.getString("ProductName"));
+                row.put("quantity", Integer.toString(r.getInt("Quantity")));
+                java.math.BigDecimal price = r.getBigDecimal("UnitPrice");
+                row.put("unitPrice", price == null ? null : price.toPlainString());
+                java.sql.Timestamp date = r.getTimestamp("OrderDate");
+                row.put("orderDate", date == null ? null : date.toLocalDateTime().toString());
+                values.add(row);
+            }
+        }
+    }
+    if (newer) java.util.Collections.reverse(values);
+    return values;
+}
+private static boolean pageExists(java.sql.Connection c, int anchor, int cursor, boolean newer) throws java.sql.SQLException {
+    String sql = "SELECT TOP (1) o.OrderID FROM dbo.Orders o JOIN dbo.Customers c ON c.CustomerID = o.CustomerID " +
+        "WHERE o.OrderID <= ? " + (newer ? "AND o.OrderID > ?" : "AND o.OrderID < ?");
+    try (java.sql.PreparedStatement s = statement(c, sql)) {
+        s.setInt(1, anchor); s.setInt(2, cursor);
+        try (java.sql.ResultSet r = s.executeQuery()) { return r.next(); }
+    }
+}
+private static DeskPage orderPage(java.sql.Connection c, int size, Integer anchor, Integer before, Integer after) throws java.sql.SQLException {
+    DeskPage page = new DeskPage(); page.size = size;
+    if (anchor == null) {
+        try (java.sql.PreparedStatement s = statement(c,
+                "SELECT COALESCE(MAX(o.OrderID), 0) FROM dbo.Orders o JOIN dbo.Customers c ON c.CustomerID = o.CustomerID");
+             java.sql.ResultSet r = s.executeQuery()) { r.next(); page.anchor = r.getInt(1); }
+    } else page.anchor = anchor;
+    page.rows = pageRows(c, size, page.anchor, before != null ? before : after, after != null);
+    // Bound stale/manually out-of-range cursors at the corresponding surviving end, without OFFSET shifts.
+    if (page.rows.isEmpty() && (before != null || after != null))
+        page.rows = pageRows(c, size, page.anchor, null, before != null);
+    if (!page.rows.isEmpty()) {
+        page.hasNext = pageExists(c, page.anchor, Integer.parseInt(page.last()), false);
+        page.hasPrevious = pageExists(c, page.anchor, Integer.parseInt(page.first()), true);
+    }
+    return page;
+}
+private static Integer pageParameter(jakarta.servlet.http.HttpServletRequest request, String key, boolean zero) throws DeskInputException {
+    String[] values = request.getParameterValues(key);
+    if (values == null) return null;
+    if (values.length != 1) throw new DeskInputException("Supply each paging field exactly once.");
+    if (zero && values[0].equals("0")) return 0;
+    return positive(values[0], Integer.MAX_VALUE, "Invalid paging field.");
+}
 private static long count(java.sql.Connection c, boolean customerCount) throws java.sql.SQLException {
     String sql = customerCount ? "SELECT COUNT_BIG(*) FROM dbo.Customers" : "SELECT COUNT_BIG(*) FROM dbo.Orders";
     try (java.sql.PreparedStatement s = statement(c, sql); java.sql.ResultSet r = s.executeQuery()) {

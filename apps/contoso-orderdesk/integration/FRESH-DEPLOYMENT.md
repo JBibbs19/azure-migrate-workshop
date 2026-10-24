@@ -43,8 +43,9 @@ Only a marked incomplete build of this revision may resume; older/unmarked hosts
    normal all-four KVP/OS metadata and app observations, plus a final completion recheck.
 7. Host final workload validation waits for Tomcat health/info, SQL readiness, nonempty actual
    customer/order data, named page, SQL listener and Nginx proxy readiness. Only then are
-   cloud-init seed ISOs detached/removed. PHASE 6 merely stages the optional traffic script;
-   PHASE 7 still prepares the Hyper-V discovery host. Completion markers do not mean the
+   cloud-init seed ISOs detached/removed. PHASE 6 stages the required network traffic controller;
+   PHASE 7 still prepares the Hyper-V discovery host. Deployment then automatically starts and
+   verifies required source network traffic before reporting completion. Completion markers do not mean the
    appliance discovered/assessed the app or a migration was tested.
 
 ## Included application assets
@@ -61,7 +62,7 @@ Follow [Module 0](../../../docs/Module-0-Setup.md) to verify a fresh course lab:
 package/download path, SQL-independent early health, delayed
 SQL initialization/recovery, final readiness/data/page/proxy checks, one explicit order write,
 root/runtime descriptor ownership, non-root JVM, actual java-owned SQL socket, discovery
-credential directory read/execute and sudo ls/netstat, reboot behavior, optional traffic on/off,
+credential directory read/execute and sudo ls/netstat, reboot behavior, required source traffic startup/status/stop,
 and alias repointing in isolated test migration. Repeat using the local-JDBC prerequisite route
 when required. Validate appliance SSH/credential mapping separately, fresh Ubuntu 24.04 OS
 metadata, Tomcat 10.1/Java 17 inventory and a visible Contoso Order Desk Java web asset. A

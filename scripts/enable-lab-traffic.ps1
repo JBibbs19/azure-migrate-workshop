@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-Enable (or stop) the optional lab traffic mesh between the four workshop VMs.
+Enable (or stop) the required source lab traffic mesh between the four workshop VMs.
 .DESCRIPTION
 Run this inside HyperVHost in an elevated Windows PowerShell session after deployment
 reports workload readiness. It wires the four independent samples into one small-business
@@ -43,7 +43,7 @@ Configure only the Windows guests and write the Linux scripts to disk without co
 .PARAMETER NonInteractive
 Requires supplied credentials, valid deployment settings and installed OpenSSH 8.4+.
 Fails before generator changes if Linux password/sudo access cannot be driven without prompts.
-Emits LAB_TRAFFIC_FULLY_STARTED only when both generators and the proxy check are confirmed;
+Emits LAB_TRAFFIC_FULLY_STARTED only when the Windows task, both Linux generators and the proxy check are confirmed;
 otherwise reports LAB_TRAFFIC_PARTIAL_OR_FAILED or LAB_TRAFFIC_NOT_STARTED. Intended for the
 protected Step 1 host launcher, not direct workstation execution.
 .PARAMETER Mode
@@ -66,7 +66,7 @@ the Nginx proxy, the firewall rules and the hosts entries in place.
 C:\AzMigrateLab\enable-lab-traffic.ps1
 .EXAMPLE
 $password = Read-Host 'Lab password' -AsSecureString
-C:\AzMigrateLab\enable-lab-traffic.ps1 -AdminPassword $password -IntervalSeconds 30
+C:\AzMigrateLab\enable-lab-traffic.ps1 -AdminPassword $password -IntervalSeconds 300
 .EXAMPLE
 C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable
 MODULE COVERAGE
@@ -151,7 +151,7 @@ if (-not $LinuxUsername) {
 if ($LinuxUsername -notmatch '^[a-z][a-z0-9]{2,18}$') { throw 'Enter the Linux username supplied to deployment.' }
 if (-not $PSBoundParameters.ContainsKey('IntervalSeconds')) {
     $configured = Get-LabSetting 'IntervalSeconds'
-    $IntervalSeconds = if ($configured) { [int]$configured } else { 30 }
+    $IntervalSeconds = if ($configured) { [int]$configured } else { 300 }
 }
 if ($IntervalSeconds -lt 20 -or $IntervalSeconds -gt 600) { throw 'Traffic interval must be 20 to 600 seconds.' }
 $configuredLogin = Get-LabSetting 'SqlLogin'
@@ -316,9 +316,10 @@ $removeWebGenerator = {
 # ---------- Linux guest payloads ----------
 $nginxPayload = @'
 set -e
-# The required proxy/hosts belong to initial provisioning; optional traffic never rewrites them.
+# The required proxy/hosts belong to initial provisioning; traffic control never rewrites them.
 nginx -t
 curl --fail --silent --show-error --max-time 20 http://127.0.0.1:8080/api/ready >/dev/null
+bash /opt/contoso-employee-orders/control.sh start
 echo LAB_TRAFFIC_NGINX_READY
 '@
 
@@ -326,6 +327,16 @@ $appPayload = @'
 set -e
 bash /opt/contoso-orderdesk/scripts/traffic.sh on __INTERVAL__
 echo LAB_TRAFFIC_APP_READY
+'@
+
+$employeeStopPayload = @'
+set -e
+bash /opt/contoso-employee-orders/control.sh stop
+'@
+
+$employeeStatusPayload = @'
+set -e
+bash /opt/contoso-employee-orders/control.sh status
 '@
 
 $appRemovePayload = @'
@@ -387,8 +398,79 @@ function Initialize-LabSshAskpass {
     return $path
 }
 
+function ConvertTo-LabNativeArgument {
+    param([AllowEmptyString()][string]$Value)
+    # Windows CommandLineToArgvW quoting, including quotes and trailing backslashes.
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Invoke-LabSshStdin {
+    param([string]$SshPath,[string]$Destination,[string]$Payload,[string]$AskpassPath,
+          [string]$Password,[ValidateRange(1,600)][int]$TimeoutSeconds = 120)
+    if (-not $AskpassPath -or [string]::IsNullOrWhiteSpace($Password)) {
+        throw 'CPU stdin SSH requires reusable askpass authentication; no terminal/password-stdin fallback is permitted.'
+    }
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $SshPath
+    $arguments = @('-T','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=NUL',
+        '-o','LogLevel=ERROR','-o','ConnectTimeout=15','-o','NumberOfPasswordPrompts=1',
+        '-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2',
+        $Destination,'base64 -d | sudo -n bash -s')
+    $info.Arguments = ($arguments | ForEach-Object { ConvertTo-LabNativeArgument $_ }) -join ' '
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    # Set secrets on this child only; never change the parent's environment.
+    $info.EnvironmentVariables['LAB_SSH_PASSWORD'] = $Password
+    $info.EnvironmentVariables['SSH_ASKPASS'] = $AskpassPath
+    $info.EnvironmentVariables['SSH_ASKPASS_REQUIRE'] = 'force'
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    $started = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $started = $process.Start()
+        if (-not $started) { throw 'CPU SSH process did not start.' }
+        # Drain BOTH pipes before writing/waiting, including noisy authentication failures.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Payload -replace "`r`n","`n")))
+        $bytes = [Text.Encoding]::ASCII.GetBytes($encoded + "`n")
+        # BaseStream bypasses Windows PowerShell 5.1's ASCII pipeline/CRLF conversion.
+        $write = $process.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
+        $remaining = [Math]::Max(0,[int]($TimeoutSeconds * 1000 - $clock.ElapsedMilliseconds))
+        if (-not $write.Wait($remaining)) { throw 'CPU SSH stdin timed out; outcome unknown. Inspect Status before any retry.' }
+        $process.StandardInput.Close()
+        $remaining = [Math]::Max(0,[int]($TimeoutSeconds * 1000 - $clock.ElapsedMilliseconds))
+        if (-not $process.WaitForExit($remaining)) { throw 'CPU SSH execution timed out; outcome unknown. Inspect Status before any retry.' }
+        $remaining = [Math]::Max(0,[int]($TimeoutSeconds * 1000 - $clock.ElapsedMilliseconds))
+        $reads = [System.Threading.Tasks.Task[]]@($stdout,$stderr)
+        if (-not [System.Threading.Tasks.Task]::WaitAll($reads,$remaining)) { throw 'CPU SSH output timed out; outcome unknown. Inspect Status before any retry.' }
+        # Stderr is drained but never echoed: it may contain unreviewed remote diagnostics.
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result }
+    } finally {
+        try {
+            if ($started -and -not $process.HasExited) {
+                $process.Kill()
+                $null = $process.WaitForExit(5000)
+            }
+        } finally {
+            $info.EnvironmentVariables.Remove('LAB_SSH_PASSWORD')
+            $info.EnvironmentVariables.Remove('SSH_ASKPASS')
+            $info.EnvironmentVariables.Remove('SSH_ASKPASS_REQUIRE')
+            $Password = $null
+            $bytes = $null
+            $process.Dispose()
+        }
+    }
+}
+
 function Invoke-LabLinuxPayload {
-    param([string]$VMName,[string]$Address,[string]$Payload,[string]$Marker)
+    param([string]$VMName,[string]$Address,[string]$Payload,[string]$Marker,[switch]$StreamInput)
     $expanded = Expand-LabPayload $Payload
     $scriptPath = Join-Path $trafficRoot "$VMName.sh"
     # LF endings only; bash rejects the CRLF a Windows editor would introduce.
@@ -409,6 +491,24 @@ function Invoke-LabLinuxPayload {
     if (-not $ssh) {
         Write-Warning "Cannot reach $VMName over SSH. Open its Hyper-V console and run the contents of $scriptPath with sudo."
         return $false
+    }
+    if ($StreamInput) {
+        if (-not (Test-Path 'Variable:script:LabAskpassResolved')) {
+            $script:LabAskpassResolved = $true
+            $script:LabAskpass = Initialize-LabSshAskpass
+        }
+        $result = Invoke-LabSshStdin -SshPath $ssh.Source -Destination "$LinuxUsername@$Address" `
+            -Payload $expanded -AskpassPath $script:LabAskpass -Password $passwordText
+        $text = [string]$result.Output
+        if ($result.ExitCode -ne 0 -or ([regex]::Matches($text, '(?m)^' + [regex]::Escape($Marker) + '\r?$')).Count -ne 1) {
+            Write-Warning "$VMName CPU operation unverified (phase=linux-confirmation; sshExit=$($result.ExitCode)). Inspect CPU-only Status/Stop; no raw output recorded."
+            return $false
+        }
+        $text -split '\r?\n' | Where-Object { $_ } | ForEach-Object { Write-Host "  $_" }
+        if ($Mode -eq 'Status') { Write-Step "$VMName status query completed (not a healthy-worker assertion)." }
+        elseif ($Mode -eq 'Stop') { Write-Step "$VMName CPU stop confirmed." }
+        else { Write-Step "$VMName CPU start confirmed." }
+        return $true
     }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($expanded -replace "`r`n","`n")))
     Write-Step "Connecting to $VMName ($Address) as $LinuxUsername."
@@ -476,37 +576,50 @@ try {
         if ($Component -in @('Cpu','Both')) { Invoke-LabCpuSimulation -Action $Mode }
         if ($Component -eq 'Cpu') { return }
         if ($Mode -eq 'Status') {
-            Invoke-Command -VMName 'OnPrem-Web' -Credential $credential -ScriptBlock {
+            $webStatus = @(Invoke-Command -VMName 'OnPrem-Web' -Credential $credential -ScriptBlock {
                 Get-ScheduledTask -TaskName LabOrderDeskTraffic -ErrorAction SilentlyContinue | Select-Object TaskName,State
-            } | ForEach-Object { Write-Host ($_ | Out-String) }
-            $statusPayload = "set -e`nsystemctl show contoso-orderdesk-traffic.service --property=LoadState,ActiveState,UnitFileState`necho LAB_NETWORK_STATUS_CONFIRMED"
-            $null = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-App' -Address $labHosts['onprem-app'] -Payload $statusPayload -Marker 'LAB_NETWORK_STATUS_CONFIRMED'
+            } -ErrorAction Stop)
+            $webStatus | ForEach-Object { Write-Host ($_ | Out-String) }
+            $statusPayload = @'
+set -e
+unit=contoso-orderdesk-traffic.service
+systemctl show "$unit" --property=LoadState,ActiveState,SubState,UnitFileState,MainPID
+if [ "$(systemctl show "$unit" --property=LoadState --value)" = loaded ] &&
+   [ "$(systemctl show "$unit" --property=ActiveState --value)" = active ] &&
+   [ "$(systemctl show "$unit" --property=SubState --value)" = running ] &&
+   [ "$(systemctl show "$unit" --property=UnitFileState --value)" = enabled ] &&
+   [ "$(systemctl show "$unit" --property=MainPID --value)" -gt 0 ] &&
+   kill -0 "$(systemctl show "$unit" --property=MainPID --value)"; then
+    echo LAB_NETWORK_UNIT_RUNNING
+fi
+echo LAB_NETWORK_STATUS_CONFIRMED
+'@
+            $appRunning = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-App' -Address $labHosts['onprem-app'] -Payload $statusPayload -Marker 'LAB_NETWORK_UNIT_RUNNING'
+            $employeeRunning = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-Web' -Address $labHosts['onprem-nginx'] `
+                -Payload $employeeStatusPayload -Marker 'LAB_EMPLOYEE_ORDERS_RUNNING'
+            if ($webStatus.Count -eq 1 -and [string]$webStatus[0].TaskName -ceq 'LabOrderDeskTraffic' -and
+                [string]$webStatus[0].State -ceq 'Running' -and $appRunning -and $employeeRunning) {
+                Write-Output 'LAB_NETWORK_RUNNING_CONFIRMED'
+            } else { Write-Output 'LAB_NETWORK_NOT_FULLY_RUNNING' }
             return
         }
-        Write-Step 'Stopping optional traffic only; initial application dependencies are preserved.'
+        Write-Step 'Stopping network traffic only; initial application dependencies are preserved.'
         Invoke-Command -VMName 'OnPrem-Web' -Credential $credential -ScriptBlock $removeWebGenerator |
             ForEach-Object { Write-Host "  $_" }
         $appStopped = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-App' -Address $labHosts['onprem-app'] `
             -Payload $appRemovePayload -Marker 'LAB_TRAFFIC_APP_REMOVED'
-        if ($appStopped) {
-            Write-Host 'Optional generators stopped. Tomcat, SQL login, hosts and Nginx proxy are unchanged.'
+        $employeeStopped = Invoke-LabLinuxPayload -VMName 'OnPrem-Linux-Web' -Address $labHosts['onprem-nginx'] `
+            -Payload $employeeStopPayload -Marker 'LAB_EMPLOYEE_ORDERS_STOPPED'
+        if ($appStopped -and $employeeStopped) {
+            Write-Host 'Network generators stopped. Tomcat, SQL login, hosts and Nginx proxy are unchanged.'
         } else {
-            Write-Warning 'Windows traffic stopped; Linux traffic stop was not confirmed. Run the staged Linux command from its console. Primary application dependencies are unchanged.'
+            Write-Warning 'Windows traffic stopped; one or both Linux generator stops were not confirmed. Run the staged Linux command from its console. Primary application dependencies are unchanged.'
         }
         return
     }
 
     if ($Component -eq 'Cpu') { Invoke-RequestedCpuStart; return }
-    # Bare interactive use asks Network first; explicit Start/component and automation do not re-prompt.
-    if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Mode') -and
-        -not $PSBoundParameters.ContainsKey('Component')) {
-        $answer = Read-Host 'Would you like to initiate lab traffic as part of the immediate continuation of the lab? [y/N]'
-        if ($answer -notmatch '^(?i:y|yes)$') {
-            Write-Host 'Network traffic not initiated; existing network generators are unchanged.'
-            Invoke-RequestedCpuStart
-            return
-        }
-    }
+    Write-Step 'Starting required source network traffic; CPU simulation remains an independent optional choice.'
 
     Write-Step 'Adding hosts entries to the Windows guests.'
     foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
@@ -532,7 +645,7 @@ try {
     Write-Host '  OnPrem-Web  -> OnPrem-Linux-App HTTP 3000  scheduled task LabOrderDeskTraffic'
     if ($appReady)   { Write-Host '  OnPrem-Linux-App -> OnPrem-SQL       TDS 1433   Tomcat JVM bounded JDBC pool' }
     if ($appReady)   { Write-Host '  OnPrem-Linux-App -> OnPrem-Linux-Web HTTP 8080  systemd unit contoso-orderdesk-traffic' }
-    if ($nginxReady) { Write-Host '  OnPrem-Linux-Web -> OnPrem-Linux-App HTTP 3000  Nginx proxy on port 8080' }
+    if ($nginxReady) { Write-Host '  OnPrem-Linux-Web -> local Nginx 8080 -> OnPrem-Linux-App 3000  synthetic employee orders, UTC 06-22, random 2-20 min' }
     if (-not ($appReady -and $nginxReady)) {
         Write-Warning "Traffic is PARTIAL: Windows generator may be running; Linux startup/proxy checks were not all confirmed. Their scripts are in $trafficRoot. Inspect or stop traffic before retrying."
         if ($NonInteractive) { throw 'Full traffic startup was not confirmed.' }

@@ -157,7 +157,7 @@ if __name__ == '__main__':
     parser.add_argument('--bundle')
     parser.add_argument('--password-file', help='Root-only JSON seed for initial provisioning; never supply a password argument.')
     parser.add_argument('--port', type=int, choices=(3000, 3001))
-    parser.add_argument('--interval', type=int, default=30)
+    parser.add_argument('--interval', type=int, default=300)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('Run with sudo.')

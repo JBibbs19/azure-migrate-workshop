@@ -8,7 +8,7 @@ require_managed
 case "${1:-}" in
     on)
         [[ $(configured_port) == 3000 ]] || { echo 'Switch to 3000 before enabling replacement traffic.' >&2; exit 1; }
-        interval=${2:-30}
+        interval=${2:-300}
         python3 "$HERE/configure.py" traffic --interval "$interval"
         python3 "$HERE/check.py" --base http://127.0.0.1:3000
         python3 "$HERE/check.py" --base http://onprem-nginx:8080 --api-only

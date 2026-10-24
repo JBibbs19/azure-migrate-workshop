@@ -17,7 +17,7 @@ param(
     [string]$TargetResourceGroup,
     [string]$SubscriptionId,
     [switch]$TestMigration,
-    [ValidateRange(30,600)][int]$IntervalSeconds = 30,
+    [ValidateRange(30,600)][int]$IntervalSeconds = 300,
     [ValidateRange(1,120)][int]$DurationMinutes = 60,
     [switch]$VerifySampleOrder,
     [Security.SecureString]$SqlPassword,
@@ -470,7 +470,7 @@ import urllib.request
 
 sys.dont_write_bytecode = True
 ROOT = pathlib.Path('/var/lib/contoso-orderdesk/labtraffic')
-UNITS = ('contoso-orderdesk-traffic.service', 'lab-traffic.service')
+UNITS = ('contoso-orderdesk-traffic.service', 'lab-traffic.service', 'contoso-employee-orders.service')
 DEADLINE_TIMER = 'lab-postmigration-deadline.timer'
 DEADLINE_SERVICE = 'lab-postmigration-deadline.service'
 ALIASES = ('onprem-web', 'onprem-sql', 'onprem-nginx', 'onprem-app')
@@ -882,6 +882,9 @@ def main(config):
     checks = {}
     sample = None
     if action == 'Check':
+        employee = data['generators']['contoso-employee-orders.service']
+        checks['employeeOrdersDisabled'] = (employee['active'] == 'inactive' and
+            (not employee['exists'] or employee['enabled'] in ('disabled', 'masked')))
         checks['localService'] = data['service'] == 'active'
         checks['localListeners'] = all(data['listeners'].values())
         if config['role'] == 'App':
@@ -1514,6 +1517,10 @@ try {
             $timer=$final.App.observation.expiry.timer
             if ($timer.active -ne 'active' -or $timer.enabled -ne 'disabled') { throw 'Linux guest-local deadline timer gate failed' }
         }
+    }
+    foreach ($role in @('Nginx','App')) {
+        $employee=$final[$role].observation.generators.'contoso-employee-orders.service'
+        if ($employee.active -ne 'inactive' -or ($employee.exists -and $employee.enabled -notin @('disabled','masked'))) { throw 'Inherited employee-order generator must remain stopped/disabled' }
     }
     Write-PhaseSummary $targets ("Start verified: runId={0}; deadlineUtc={1}; intervalSeconds={2}; Windows SQL reads/HTTP health and Linux HTTP-driven inserts. No reboot auto-resume." -f $runId,$deadline.ToString('o'),$IntervalSeconds)
     Write-Host 'Both bounded generators verified. The controller now exits; use Status/Stop, and Check again after Step 6 hardening.'

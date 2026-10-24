@@ -14,6 +14,7 @@
   <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/info</url-pattern></servlet-mapping>
   <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/ready</url-pattern></servlet-mapping>
   <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/orders</url-pattern></servlet-mapping>
+  <servlet-mapping><servlet-name>OrderDesk</servlet-name><url-pattern>/api/order-options</url-pattern></servlet-mapping>
   <resource-ref>
     <res-ref-name>jdbc/ContosoApp</res-ref-name>
     <res-type>javax.sql.DataSource</res-type>

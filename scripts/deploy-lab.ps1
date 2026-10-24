@@ -1,14 +1,14 @@
-<#
+﻿<#
 .SYNOPSIS
 Deploy the TD SYNNEX Cloud Enablement Services Hyper-V workshop.
 .DESCRIPTION
 Creates one Standard-security Windows host and provisions four nested workload VMs
-(two Windows, two Linux) that behave as one small-business environment. No appliance
-OS VM is created: optional appliance archive staging starts alongside OS image preparation
+(two Windows, two Linux) that behave as one small-business environment, plus a separate
+staged standalone helper that creates the replication Windows OS VM later in Module 3. Optional discovery archive staging starts alongside OS image preparation
 on the host's own disk; Module 1 imports it manually. This script creates billable Azure resources.
 Use a new dedicated resource group. Existing groups are refused intentionally.
 Process timing starts after parameter binding and includes preflight and user prompts.
-It ends after cleanup, before optional traffic/CPU startup and the final exit pause.
+It includes required network startup/verification and cleanup, before optional CPU startup and the final exit pause.
 .PARAMETER AdminPasswordConfirmation
 Enter the administrator password a second time as a SecureString. It must match exactly,
 including case and spaces. When omitted, an interactive run prompts with masked input;
@@ -55,16 +55,10 @@ Optional local official mssql-jdbc-13.6.0.jre11.jar when the guest cannot use Ma
 Supply -TomcatJdbcSha256 with a separately reviewed expected checksum. No new password prompt.
 .PARAMETER TomcatJdbcSha256
 Expected SHA256 for the explicit local JDBC JAR. Required together with -TomcatJdbcJar.
-.PARAMETER LabTraffic
-Prompt (default), Start or Skip for optional source network traffic AFTER successful fresh
-preparation and cleanup. All interactive runs offer a separate No-default question, including
-runs with every deployment parameter supplied. Noninteractive/unattended default Prompt skips
-startup. LAB_NO_PAUSE=1 also skips default questions; explicit -LabTraffic Prompt overrides
-that only in an interactive session. Start opts in unattended and Skip never asks.
-Traffic persists until manually stopped.
 .PARAMETER CpuSimulation
-Independent Prompt (default), Start or Skip for bounded source CPU activity, including when
-network traffic is declined. Same interactive/automation rules as LabTraffic; no automatic renewal.
+Independent OPTIONAL Prompt (default, No), Start or Skip for bounded source CPU activity after
+deployment timing. Noninteractive/unattended Prompt skips CPU; LAB_NO_PAUSE=1 suppresses its
+default question. Explicit CpuSimulation Prompt overrides that only interactively. No automatic renewal.
 .PARAMETER CpuDurationHours
 CPU lifetime in hours, default 24, range 1-168. Does not limit persistent network traffic.
 .PARAMETER HealthPath
@@ -86,9 +80,10 @@ MODULE COVERAGE
                              if supplied; otherwise the staged archive is explicitly unverified.
                              The recommended manual publisher comparison remains optional.
 
-    After preparation/cleanup, optional source traffic and independent CPU startup are offered
-    to students and instructors. Left for you: Module 0 section 5 (verify inside HyperVHost),
-    section 6 (observe optional traffic), and all of Module 1 from section 1 onward.
+    Required source network traffic is installed, started and verified after application readiness.
+    Independent optional CPU startup is offered only after preparation/cleanup and deployment timing.
+    Left for you: Module 0 section 5 (verify inside HyperVHost), section 6 (observe required traffic),
+    and all of Module 1 from section 1 onward.
 #>
 [CmdletBinding()]
 param(
@@ -107,7 +102,6 @@ param(
     [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$ApplianceVhdSha256 = '',
     [string]$TomcatJdbcJar = '',
     [ValidatePattern('^([0-9A-Fa-f]{64})?$')][string]$TomcatJdbcSha256 = '',
-    [ValidateSet('Prompt','Start','Skip')][string]$LabTraffic = 'Prompt',
     [ValidateSet('Prompt','Start','Skip')][string]$CpuSimulation = 'Prompt',
     [ValidateRange(1,168)][int]$CpuDurationHours = 24,
     [string]$HealthPath,
@@ -117,9 +111,8 @@ $script:ProcessStartedAt = [DateTimeOffset]::Now
 $script:ProcessClock = [Diagnostics.Stopwatch]::StartNew()
 $script:ProcessTimingReported = $false
 Microsoft.PowerShell.Utility\Write-Host "Deployment process started: $($script:ProcessStartedAt.ToString('o'))"
-Microsoft.PowerShell.Utility\Write-Host 'Timing includes preflight and prompts after parameter binding; ends after cleanup, before optional source startup and the final exit pause.'
+Microsoft.PowerShell.Utility\Write-Host 'Timing includes preflight, prompts, required network startup/verification and cleanup; excludes optional CPU startup and the final exit pause.'
 $ErrorActionPreference = 'Stop'
-$script:LabTrafficPromptExplicit = $PSBoundParameters.ContainsKey('LabTraffic') -and $LabTraffic -eq 'Prompt'
 $script:CpuPromptExplicit = $PSBoundParameters.ContainsKey('CpuSimulation') -and $CpuSimulation -eq 'Prompt'
 
 # ================================================================
@@ -485,9 +478,40 @@ function Read-LabHostConfiguration {
         throw 'Host health helpers are missing or incompatible. Obtain the complete workshop checkout.'
     }
     $content = $content.Replace('# LAB_HEALTH_HELPERS', $health)
-    # The optional traffic generator is delivered to the host during setup so the instructor
-    # never has to copy a file onto HyperVHost by hand. The host payload writes it to disk;
-    # it is never executed by deployment.
+    $replication = [IO.File]::ReadAllText((Join-Path $scriptsRoot 'host/prepare-replication.ps1'), [Text.Encoding]::UTF8)
+    $hostTokens = $null; $hostErrors = $null
+    $hostAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$hostTokens, [ref]$hostErrors)
+    if ($hostErrors.Count) { throw 'Host source syntax invalid before standalone helper assembly.' }
+    $standaloneFunctions = @()
+    foreach ($name in @('Write-Log','Expand-LabTextTemplate','Set-LabReservation','Create-WindowsGuestVM','Wait-ForGuestVM')) {
+        $matches = @($hostAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
+        if ($matches.Count -ne 1) { throw "Missing/ambiguous standalone Windows helper $name." }
+        $definition = $matches[0].Extent.Text
+        if ($name -ceq 'Create-WindowsGuestVM') {
+            $begin = $definition.IndexOf('    $existingVM = Get-VM -Name $VMName')
+            $end = $definition.IndexOf('    Write-Log "Creating Windows VM')
+            if ($begin -lt 0 -or $end -le $begin) { throw 'Standalone fresh-only VM guard assembly failed.' }
+            # The later helper has no legacy source-rebuild/delete branch at all.
+            $definition = $definition.Substring(0,$begin) + "    if (Get-VM -Name `$VMName -ErrorAction SilentlyContinue) { throw 'Existing appliance VM is never replaced.' }`n" + $definition.Substring($end)
+        }
+        $standaloneFunctions += $definition
+    }
+    foreach ($marker in @('# LAB_HEALTH_HELPERS','# LAB_WINDOWS_GUEST_HELPERS')) {
+        if (([regex]::Matches($replication, [regex]::Escape($marker))).Count -ne 1) { throw 'Standalone replication template markers invalid.' }
+    }
+    $replication = $replication.Replace('# LAB_HEALTH_HELPERS',$health).Replace('# LAB_WINDOWS_GUEST_HELPERS',($standaloneFunctions -join "`n`n"))
+    $replicationTokens = $null; $replicationErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($replication, [ref]$replicationTokens, [ref]$replicationErrors)
+    if ($replicationErrors.Count) { throw 'Standalone replication helper syntax invalid.' }
+    $replicationBytes = [Text.UTF8Encoding]::new($false).GetBytes($replication)
+    $replicationSha = [Security.Cryptography.SHA256]::Create()
+    try { $replicationHash = ([BitConverter]::ToString($replicationSha.ComputeHash($replicationBytes))).Replace('-','').ToLowerInvariant() } finally { $replicationSha.Dispose() }
+    foreach ($marker in @('__LAB_REPLICATION_HELPER_B64__','__LAB_REPLICATION_HELPER_SHA256__')) {
+        if (([regex]::Matches($content, [regex]::Escape($marker))).Count -ne 1) { throw 'Standalone replication transport markers invalid.' }
+    }
+    $content = $content.Replace('__LAB_REPLICATION_HELPER_B64__',[Convert]::ToBase64String($replicationBytes)).Replace('__LAB_REPLICATION_HELPER_SHA256__',$replicationHash)
+    # Always deliver the controller. After host readiness, deployment runs the protected
+    # required network stage; CPU remains a separate optional action.
     $trafficPath = Join-Path $scriptsRoot 'enable-lab-traffic.ps1'
     $traffic = Get-Content -LiteralPath $trafficPath -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($traffic) -or ([regex]::Matches($content, '__LAB_TRAFFIC_PAYLOAD__')).Count -ne 1) {
@@ -518,6 +542,23 @@ function Read-LabHostConfiguration {
         $cpuAssets[$name] = [ordered]@{ Text = $asset; Sha256 = $assetHash }
     }
     $content = $content.Replace('__LAB_CPU_ASSETS_PAYLOAD__', (Compress-LabScript ($cpuAssets | ConvertTo-Json -Depth 4 -Compress)))
+    foreach ($entry in @(
+        @{ Name='employee-orders.py'; Token='WORKER' },
+        @{ Name='control.sh'; Token='CONTROL' },
+        @{ Name='contoso-employee-orders.service'; Token='UNIT' }
+    )) {
+        $assetBytes = [IO.File]::ReadAllBytes((Join-Path $scriptsRoot ('employee-orders/' + $entry.Name)))
+        if ($assetBytes.Length -eq 0) { throw 'Employee-order asset is empty.' }
+        $assetSha = [Security.Cryptography.SHA256]::Create()
+        try { $assetHash = ([BitConverter]::ToString($assetSha.ComputeHash($assetBytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $assetSha.Dispose() }
+        $payloadMarker = '__EMPLOYEE_' + $entry.Token + '_B64__'
+        $hashMarker = '__EMPLOYEE_' + $entry.Token + '_SHA256__'
+        foreach ($marker in @($payloadMarker,$hashMarker)) {
+            if (([regex]::Matches($content, [regex]::Escape($marker))).Count -ne 1) { throw 'Employee-order host marker incompatible.' }
+        }
+        $content = $content.Replace($payloadMarker, [Convert]::ToBase64String($assetBytes)).Replace($hashMarker, $assetHash)
+    }
     $appRoot = Join-Path (Split-Path $scriptsRoot -Parent) 'apps/contoso-orderdesk'
     $runtimePath = Join-Path $appRoot 'dist/runtime.zip'
     $runtimeHashPath = Join-Path $appRoot 'dist/runtime.sha256'
@@ -573,8 +614,8 @@ function Assert-LabRunResult {
     return $stdout
 }
 
-# Optional source activity is separate from deployment and never repairs or migrates VMs.
-function Test-LabTrafficPromptSession {
+# Fresh-source activity never repairs, boots or migrates VMs. Only CPU is optional.
+function Test-LabCpuPromptSession {
     param([bool]$ExplicitPrompt)
     if (-not [Environment]::UserInteractive -or ([Environment]::GetCommandLineArgs() -imatch '^-noni')) { return $false }
     if ($Host.Name -eq 'ConsoleHost') {
@@ -686,18 +727,27 @@ function Write-LabTrafficOutcome {
         $null -ne $View.PSObject.Properties['Error'] -and [string]::IsNullOrWhiteSpace([string]$View.Error) -and
         $null -ne $View.PSObject.Properties['Output']
     $text = if ($valid) { [string]$View.Output } else { '' }
+    $confirmed = $false
     if ($StartNetwork) {
-        if ($valid -and ([regex]::Matches($text, '(?m)^LAB_TRAFFIC_FULLY_STARTED\r?$')).Count -eq 1 -and
-            $text -notmatch 'LAB_DEPLOY_NETWORK_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED') {
-            Write-Host 'Network lab traffic fully started on the four source workloads. It persists until explicitly stopped (including across reboot).' -ForegroundColor Green
-        } else { Write-Warning 'Network traffic outcome UNKNOWN/partial; generators may be running. Inspect source Status/Stop before any retry.' }
+        $growth = [regex]::Matches($text, '(?m)^LAB_DEPLOY_NETWORK_VERIFIED\|([0-9]+)\|([0-9]+)\r?$')
+        $first = [long]0; $second = [long]0
+        $confirmed = $valid -and ([regex]::Matches($text, '(?m)^LAB_TRAFFIC_FULLY_STARTED\r?$')).Count -eq 1 -and
+            $growth.Count -eq 1 -and [long]::TryParse($growth[0].Groups[1].Value, [ref]$first) -and
+            [long]::TryParse($growth[0].Groups[2].Value, [ref]$second) -and $first -ge 1 -and $second -gt $first -and
+            $text -notmatch 'LAB_DEPLOY_NETWORK_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED'
+        if ($confirmed) {
+            Write-Host "Required network stage confirmed: Windows task Running; both Linux order units healthy/enabled (employee night-sleep is healthy); direct/proxy ready; API total orders $first -> $second (at least 90 seconds apart)." -ForegroundColor Green
+            Write-Host 'Network traffic persists until explicitly stopped, including across reboot.'
+        } else { Write-Warning 'Required network stage UNKNOWN/partial; generators may be running. Inspect source Status/Stop before any retry. Deployment is not complete.' }
     }
     if ($StartCpu) {
-        if ($valid -and ([regex]::Matches($text, '(?m)^LAB_CPU_FULLY_STARTED\r?$')).Count -eq 1 -and
-            $text -notmatch 'LAB_DEPLOY_CPU_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED') {
+        $confirmed = $valid -and ([regex]::Matches($text, '(?m)^LAB_CPU_FULLY_STARTED\r?$')).Count -eq 1 -and
+            $text -notmatch 'LAB_DEPLOY_CPU_UNVERIFIED|LAB_DEPLOY_PREFLIGHT_FAILED'
+        if ($confirmed) {
             Write-Host 'CPU Simulation fully started on all four source guests; its bounded guest-local expiry is independent of network traffic.' -ForegroundColor Green
         } else { Write-Warning 'CPU Simulation outcome UNKNOWN/partial; inspect CPU Status/Stop before any retry. This does not change the network outcome.' }
     }
+    return $confirmed
 }
 
 function Start-LabFreshSourceTraffic {
@@ -735,8 +785,31 @@ try {
         try {
             $result = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -Mode Start -Component Network -CpuSimulation Skip -CpuDurationHours __CPU_HOURS__ -ErrorAction Stop 2>$null 6>$null)
             if (@($result | Where-Object { [string]$_ -ceq 'LAB_TRAFFIC_FULLY_STARTED' }).Count -ne 1) { throw 'Unverified.' }
+            function Get-LabSourceOrderCount {
+                $orders = Invoke-RestMethod 'http://192.168.0.13:3000/api/orders' -TimeoutSec 20
+                $count = [long]0
+                if ($null -eq $orders -or $null -eq $orders.PSObject.Properties['count'] -or
+                    -not [long]::TryParse([string]$orders.count, [ref]$count) -or $count -lt 1) { throw 'Invalid total order count.' }
+                return $count
+            }
+            $interval = [int]$settings.IntervalSeconds
+            if ($interval -lt 20 -or $interval -gt 600) { throw 'Invalid source traffic interval.' }
+            $first = Get-LabSourceOrderCount
+            $growthDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(90, $interval + 120))
+            Start-Sleep -Seconds 90
+            $second = Get-LabSourceOrderCount
+            while ($second -le $first -and [DateTime]::UtcNow -lt $growthDeadline) {
+                Start-Sleep -Seconds 15
+                $second = Get-LabSourceOrderCount
+            }
+            __FRESH_GUARD__
+            $status = @(& 'C:\AzMigrateLab\enable-lab-traffic.ps1' -AdminPassword $secure -NonInteractive -Mode Status -Component Network -ErrorAction Stop 2>$null 6>$null)
+            if (@($status | Where-Object { [string]$_ -ceq 'LAB_NETWORK_RUNNING_CONFIRMED' }).Count -ne 1) { throw 'Generators not confirmed running.' }
+            $second = Get-LabSourceOrderCount
+            if ($second -le $first) { throw 'No observed order growth.' }
             Write-Output 'LAB_TRAFFIC_FULLY_STARTED'
-        } catch { Write-Output 'LAB_DEPLOY_NETWORK_UNVERIFIED' }
+            Write-Output "LAB_DEPLOY_NETWORK_VERIFIED|$first|$second"
+        } catch { Write-Output 'LAB_DEPLOY_NETWORK_UNVERIFIED'; exit 1 }
     }
     if (__START_CPU__) {
         try {
@@ -766,20 +839,20 @@ finally { $AdminPassword = $null; $secure = $null; $result = $null }
                 $run.InstanceView.PSObject.Properties['ExecutionState'] -and
                 [string]$run.InstanceView.ExecutionState -in @('Succeeded','Failed','TimedOut','Canceled','Cancelled')) {
                 $terminal = $true
-                Write-LabTrafficOutcome -View $run.InstanceView -StartNetwork $StartNetwork -StartCpu $StartCpu
-                return
+                return (Write-LabTrafficOutcome -View $run.InstanceView -StartNetwork $StartNetwork -StartCpu $StartCpu)
             }
             Start-Sleep -Seconds 10
         }
         throw 'Observation timed out.'
     } catch {
         # Protected Run Command exceptions/output can contain credentials: report only fixed text.
-        if ($attempted) { Write-Warning "Optional startup outcome UNKNOWN; generators or remote execution may still be running. Inspect managed Run Command '$runName' and source Status/Stop before retrying. No automatic retry or rollback occurred." }
-        else { Write-Warning 'Optional startup NOT initiated by this offer: source readiness/protected remote prerequisites were not verified. Deployment remains complete. Inspect the source before using the host-interactive fallback.' }
+        if ($attempted) { Write-Warning "Source startup outcome UNKNOWN; generators or remote execution may still be running. Inspect managed Run Command '$runName' and source Status/Stop before retrying. No automatic retry or rollback occurred." }
+        else { Write-Warning 'Source startup NOT initiated by this invocation: fresh-source readiness/protected remote prerequisites were not verified. Inspect the source before using the host-interactive fallback.' }
+        return $false
     } finally {
         if ($terminal) {
             try { Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runName -ErrorAction Stop | Out-Null }
-            catch { Write-Warning 'Terminal optional-startup Run Command needs manual cleanup; removing it does not stop generators.' }
+            catch { Write-Warning 'Terminal source-startup Run Command needs manual cleanup; removing it does not stop generators.' }
         }
         foreach ($finishedJob in @($job,$probeJob)) {
             if ($null -ne $finishedJob -and $finishedJob.State -in @('Completed','Failed','Stopped')) {
@@ -791,29 +864,22 @@ finally { $AdminPassword = $null; $secure = $null; $result = $null }
     }
 }
 
-function Invoke-LabFreshTrafficOffer {
+function Invoke-LabFreshCpuOffer {
     Write-Host ''
-    Write-Host 'Deployment preparation and cleanup are complete. Optional source startup below is NOT included in deployment timing.' -ForegroundColor Cyan
-    Write-Host 'Available to students and instructors, with or without appliance download; no Azure Migrate project is required.'
-    Write-Host 'Network traffic creates real sample orders. It persists across console closure and reboot until explicitly stopped; there is no lab-completion stop timer.' -ForegroundColor Yellow
-    Write-Host 'After the lab/final write-freeze, stop ON HyperVHost: C:\AzMigrateLab\enable-lab-traffic.ps1 -Disable'
-    $networkStart = ($LabTraffic -eq 'Start')
-    if ($LabTraffic -eq 'Prompt' -and (Test-LabTrafficPromptSession -ExplicitPrompt $script:LabTrafficPromptExplicit)) {
-        $networkStart = ((Read-Host 'Start optional network lab traffic? [y/N]') -match '^(?i:y|yes)$')
-    }
+    Write-Host 'Required network stage and deployment cleanup are complete. Optional CPU startup below is NOT included in deployment timing.' -ForegroundColor Cyan
     Write-Host "CPU Simulation is independent: approximately 15% day / 2% night total guest CPU (UTC 06:00-22:00 / 22:00-06:00), no peaks. Duration $CpuDurationHours hours (default 24, range 1-168); no reboot auto-resume or automatic renewal." -ForegroundColor Yellow
     Write-Host 'For the full day/night profile, collect 24 hours during performance capture. No recommendation change is guaranteed; normal VM uptime charges continue.'
     $cpuStart = ($CpuSimulation -eq 'Start')
-    if ($CpuSimulation -eq 'Prompt' -and (Test-LabTrafficPromptSession -ExplicitPrompt $script:CpuPromptExplicit)) {
+    if ($CpuSimulation -eq 'Prompt' -and (Test-LabCpuPromptSession -ExplicitPrompt $script:CpuPromptExplicit)) {
         $cpuStart = ((Read-Host 'Start optional CPU Simulation? [y/N]') -match '^(?i:y|yes)$')
     }
-    if (-not $networkStart -and -not $cpuStart) {
-        Write-Host 'Neither component selected. No remote probe, credential conversion or generator change was made by this offer; existing generators are unchanged.'
+    if (-not $cpuStart) {
+        Write-Host 'CPU not selected. Existing CPU workers are unchanged; confirmed network traffic continues.'
         return
     }
-    Start-LabFreshSourceTraffic -StartNetwork $networkStart -StartCpu $cpuStart
-    Write-Host 'Verify ON HyperVHost: C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Both'
-    Write-Host 'Do not repeat Start or renew CPU after an unknown result. Inspect Status/Stop first; infrastructure deployment remains complete.'
+    $null = Start-LabFreshSourceTraffic -StartNetwork $false -StartCpu $true
+    Write-Host 'Verify ON HyperVHost: C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Cpu'
+    Write-Host 'Do not repeat Start or renew CPU after an unknown result. Inspect CPU Status/Stop first; the required network result is unchanged.'
 }
 
 function Test-LabAdminPasswordMatch {
@@ -869,7 +935,8 @@ Initialize-LabProgress -Activity 'TD SYNNEX | Hyper-V deployment' -Steps @(
     'Submit guest setup', 'Guest setup starting',
     'Host networking', 'Downloading and converting images', 'Creating nested VMs', 'Guest first boot',
     'Installing workloads', 'Installing IIS', 'Installing SQL', 'Validating sample applications',
-    'Staging the traffic generator', 'Preparing the host for discovery', 'Guest setup complete'
+    'Staging the traffic generator', 'Preparing the host for discovery', 'Guest setup complete',
+    'Required network traffic'
 )
 if (-not $HealthPath) { $HealthPath = Join-Path $PSScriptRoot "../.artifacts/deployment-health-$ResourceGroupName.json" }
 $adminSourceCidrPlain = Resolve-LabAdminSource $adminSourceCidrPlain
@@ -897,16 +964,39 @@ if ($existingGroup) {
     if (-not $existingGroup.Tags -or $existingGroup.Tags['Workshop'] -ne 'TD-SYNNEX-CES-HyperV') {
         throw "Resource group '$ResourceGroupName' exists and is not tagged as this workshop. Use a new, dedicated source resource group."
     }
+    if ($existingGroup.Tags['Revision'] -ne 'PreparedReplication-2TiB-v1') {
+        throw 'This revision needs a fresh, separate 2048-GiB source deployment; an older lab is never resized or retrofitted.'
+    }
     $existingHost = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -ErrorAction SilentlyContinue
     if (-not $existingHost) {
         throw "Resource group '$ResourceGroupName' exists but has no HyperVHost. Inspect and remove it, then deploy into a clean group."
     }
     $completed = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runNameProbe -Expand InstanceView -ErrorAction SilentlyContinue
+    if ([int]$existingHost.StorageProfile.OsDisk.DiskSizeGB -ne 2048 -or [string]$existingHost.StorageProfile.OsDisk.ManagedDisk.StorageAccountType -ne 'Premium_LRS') {
+        throw 'Existing host OS storage differs from this 2048-GiB Premium SSD revision; no in-place resize or storage change is allowed.'
+    }
+    if ($completed -and [string]$completed.InstanceView.ExecutionState -notin @('Succeeded','Failed','TimedOut','Canceled','Cancelled')) {
+        throw 'Previous host setup is running or its termination is unknown. Preserve ConfigureWorkshop and resources; inspect it before any resume.'
+    }
     if ($completed -and [string]$completed.InstanceView.ExecutionState -eq 'Succeeded') {
         throw "Guest setup already succeeded in '$ResourceGroupName'. Deployment is not a post-migration repair command; use a new group for a fresh lab."
     }
+    # A successful run normally removes ConfigureWorkshop. Its absence therefore does
+    # not prove incompleteness: check the host marker before rebooting or starting guests.
+    $resumeProbe = @'
+$ErrorActionPreference = 'Stop'
+if (Test-Path 'C:\AzMigrateLab\setup-complete.json') { throw 'Completed host: deployment replay is forbidden.' }
+$log = 'C:\AzMigrateLab\setup-log.txt'
+if ((Test-Path $log) -and -not @(Get-Content -LiteralPath $log | Where-Object { $_ -ceq 'LAB_BUILD|ubuntu2404-prepared-replication-v1' }).Count) {
+    throw 'Different or unknown host build: no retrofit or adoption.'
+}
+Write-Output 'LAB_RESUME_ALLOWED'
+'@
+    $probeJob = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -CommandId RunPowerShellScript -ScriptString $resumeProbe -AsJob -ErrorAction Stop
+    $probeResult = Wait-LabJob $probeJob 'Check incomplete host identity' -TimeoutSeconds 300 -HealthPath $HealthPath
+    $null = Assert-LabRunResult $probeResult 'LAB_RESUME_ALLOWED'
     $resumeDeployment = $true
-    Write-Host "Resuming the incomplete deployment in '$ResourceGroupName'. Existing resources are reused; unfinished guests are rebuilt."
+    Write-Host "Resuming the recognized incomplete deployment in '$ResourceGroupName'. Existing resources are reused; only unfinished source workloads may be rebuilt. A prepared replication appliance is never recreated."
 }
 # The appliance VHD is an ~11 GB download and nothing in Module 0 needs it. A learner should
 # skip it: Module 1 downloads the appliance from the Azure Migrate project when it is required,
@@ -939,7 +1029,7 @@ foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Stora
 }
 Write-Host "Creating source lab in the selected subscription, region $Location."
 Write-LabHealth 'Source deployment' Preparing 0 'Preflight passed. Starting dedicated workshop resource creation.' $HealthPath
-$tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training' }
+$tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training'; Revision = 'PreparedReplication-2TiB-v1' }
 $vmName = 'HyperVHost'
 $diskName = 'WinServerBase-temp'
 # Resolved by the host during the store step, since only the host knows which letters are free.
@@ -949,6 +1039,7 @@ $runName = 'ConfigureWorkshop'
 $diskCreated = $false
 $runCreated = $false
 $setupPassed = $false
+$networkConfirmed = $false
 $setupObservation = @{ Terminal = $false }
 $deploymentClock = [Diagnostics.Stopwatch]::StartNew()
 try {
@@ -984,7 +1075,7 @@ try {
     $vm = New-AzVMConfig -VMName $vmName -VMSize $VMSize -SecurityType Standard
     $vm = Set-AzVMOperatingSystem -VM $vm -Windows -ComputerName $vmName -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
     $vm = Set-AzVMSourceImage -VM $vm -PublisherName $windowsImages.Host.Publisher -Offer $windowsImages.Host.Offer -Skus $windowsImages.Host.Sku -Version $windowsImages.Host.Version
-    $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 512
+    $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 2048
     $vm = Add-AzVMNetworkInterface -VM $vm -Id $nic.Id
     $vm = Set-AzVMBootDiagnostic -VM $vm -Enable
     $job = New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vm -Tag $tags -AsJob
@@ -1025,7 +1116,12 @@ $ErrorActionPreference = 'Stop'
 $requested = '__DRIVE__'
 $storeBytes = __STOREGB__GB
 $label = 'ApplianceStore'
-$guestReserveBytes = 140GB
+$guestReserveBytes = 140GB + 700GB
+$bootPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+$bootDisk = Get-Disk -Number $bootPartition.DiskNumber -ErrorAction Stop
+if (-not $bootDisk.IsBoot -or [string]$bootDisk.PartitionStyle -ne 'GPT' -or [math]::Abs([double]$bootDisk.Size - 2048GB) -gt 1MB) {
+    throw 'This fresh revision requires the single 2048-GiB GPT host OS disk; no additional data disk or in-place retrofit is provisioned.'
+}
 $existing = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existing) {
     $letter = $existing.DriveLetter
@@ -1057,7 +1153,8 @@ if ($existing) {
     # store leaves exactly the store free, whether that means growing C: or shrinking it.
     $targetSize = $supported.SizeMax - $storeBytes
     $usedBytes = $system.Size - (Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
-    # C: must still hold Windows, the base images and the 140 GB of fixed guest disks.
+    # Reserve measured host usage plus four fixed workload disks, full new appliance
+    # virtual capacity (including dynamic data growth), and the existing base/tool headroom.
     $needed = $guestReserveBytes + 60GB
     $toGB = { param($b) [math]::Round($b / 1GB, 1) }
     if ($targetSize -lt $supported.SizeMin) {
@@ -1065,7 +1162,7 @@ if ($existing) {
         throw ("Cannot reserve __STOREGB__ GB for the appliance store. C: is $(& $toGB $system.Size) GB and can range from $(& $toGB $supported.SizeMin) GB to $(& $toGB $supported.SizeMax) GB on this disk, so at most $maxStore GB can be set aside. Deploy with a larger OS disk, or pass -ApplianceStoreSizeGB with a value at or below $maxStore.")
     }
     if (($targetSize - $usedBytes) -lt $needed) {
-        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140 GB of fixed guest disks and their base images require. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB.")
+        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140-GiB workloads, 700-GiB appliance disks and base/tool headroom require. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB.")
     }
     if ($targetSize -ne $system.Size) {
         $action = if ($targetSize -gt $system.Size) { 'Extending' } else { 'Shrinking' }
@@ -1082,6 +1179,23 @@ New-Item -ItemType Directory -Path "${letter}:\Appliance" -Force | Out-Null
 & icacls.exe "${letter}:\Appliance" /grant:r '__ADMINUSER__:(OI)(CI)M' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not grant the lab administrator access to the appliance store.' }
 $system = Get-Volume -DriveLetter C -ErrorAction Stop
+# On incomplete resumes existing files already consume space. Require every remaining
+# reserved byte without counting allocated workload/appliance files twice.
+$reservedPaths = @(
+    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Web.vhdx'; Bytes=40GB },
+    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-SQL.vhdx'; Bytes=40GB },
+    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Linux-Web.vhdx'; Bytes=30GB },
+    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Linux-App.vhdx'; Bytes=30GB },
+    @{ Path='C:\AzMigrateLab\ReplicationAppliance\OS.vhdx'; Bytes=80GB },
+    @{ Path='C:\AzMigrateLab\ReplicationAppliance\Data.vhdx'; Bytes=620GB }
+)
+$remainingReserve = 60GB
+foreach ($entry in $reservedPaths) {
+    $allocated = 0L
+    if (Test-Path -LiteralPath $entry.Path) { $allocated = [long](Get-Item -LiteralPath $entry.Path -ErrorAction Stop).Length }
+    $remainingReserve += [math]::Max(0L, ([long]$entry.Bytes - $allocated))
+}
+if ([long]$system.SizeRemaining -lt $remainingReserve) { throw 'Insufficient C: free backing for remaining guest capacity and 60-GiB base/tool headroom; no thin oversubscription.' }
 Write-Output ("APPLIANCE_STORE_DRIVE|{0}" -f $letter)
 Write-Output ("Appliance store {0}: {1} GB free; system C: {2} GB free before guest disks." -f $letter,
     [math]::Round($store.SizeRemaining/1GB,1), [math]::Round($system.SizeRemaining/1GB,1))
@@ -1107,6 +1221,7 @@ Write-Output 'APPLIANCE_STORE_READY'
     $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName -Access Read -DurationInSecond 18000
     $parameters = @(
         @{ Name = 'AdminUsername';       Value = $AdminUsername }
+        @{ Name = 'HostVMId';            Value = [string](Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction Stop).VmId }
         @{ Name = 'IncludeApplianceVhd'; Value = $IncludeApplianceVhd }
         @{ Name = 'ApplianceVhdSha256';  Value = $ApplianceVhdSha256 }
     )
@@ -1114,7 +1229,11 @@ Write-Output 'APPLIANCE_STORE_READY'
     # A Run Command left by an interrupted attempt would block the new submission.
     $staleRun = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction SilentlyContinue
     if ($staleRun) {
-        Write-Host 'Removing the Run Command left by the previous attempt before resubmitting.'
+        $staleView = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
+        if ([string]$staleView.InstanceView.ExecutionState -notin @('Failed','TimedOut','Canceled','Cancelled')) {
+            throw 'Previous setup termination is not a confirmed failure; retain its command and resources for review, never replay unknown/completed work.'
+        }
+        Write-Host 'Removing the terminal failed Run Command before a guarded incomplete resume.'
         Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -ErrorAction Stop | Out-Null
     }
     $runCreated = $true
@@ -1124,15 +1243,17 @@ Write-Output 'APPLIANCE_STORE_READY'
     $setupResult = Wait-LabManagedSetup -ReadStatus {
         Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
     } -Observation $setupObservation -TimeoutSeconds (($GuestSetupTimeoutMinutes * 60) + 600) -HealthPath $HealthPath
+    if ([string]$setupResult.Output -cnotmatch '(?m)^LAB_REPLICATION_HELPER_STAGED\r?$') { throw 'Replication helper/base staging was not confirmed; deployment is incomplete.' }
     $setupPassed = $true
     Write-Host 'Host preparation complete. Wait for the deployment process end/timing message before connecting to HyperVHost.'
     Write-Host "Workload setup verified. Host public IP: $($pip.IpAddress). Host login: $AdminUsername."
     Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
     Write-Host 'Contoso Order Desk runs on Tomcat 10.1 / OpenJDK 17 at .13:3000; initial SQL and Nginx proxy readiness passed.'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
+    Write-Host 'Module 3 replication helper and original generalized Windows base are staged; MigrateRepl is NOT created yet. After assessment, run C:\AzMigrateLab\prepare-replication.ps1 in elevated Windows PowerShell on HyperVHost. It prompts securely and prepares the fixed-spec VM; appliance installation/registration remains manual.'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
-    Write-Host 'Optional traffic generator staged on the host at C:\AzMigrateLab\enable-lab-traffic.ps1 with its settings file. Nothing has been started by deployment; optional network and CPU choices follow after cleanup and the deployment timing message.'
+    Write-Host 'Traffic controller/settings and CPU assets are staged at C:\AzMigrateLab. Required network installation/start/verification follows automatically, before cleanup and the deployment timing message. CPU remains optional afterward.'
     if ($IncludeApplianceVhd -eq 'Yes') {
         # Read only fixed status tokens from the already-completed managed setup result.
         # Do not print raw Run Command output or start a duplicate archive rehash command.
@@ -1165,6 +1286,13 @@ Write-Output 'APPLIANCE_STORE_READY'
     } else {
         Write-Host "Appliance staging was not selected. After deployment, use $appliancePath on HyperVHost for the manual Module 1 section 2.1 workflow."
     }
+    Write-Host 'Required lab network traffic starts automatically after application readiness; startup and verification are included in deployment timing.' -ForegroundColor Cyan
+    Write-LabHealth 'Required network traffic' Preparing $deploymentClock.Elapsed.TotalSeconds 'Installing/starting required source generators and checking task, unit, readiness and two increasing API totals. No network question or automatic write retry.' $HealthPath
+    $networkConfirmed = Start-LabFreshSourceTraffic -StartNetwork $true -StartCpu $false
+    if (-not $networkConfirmed) {
+        throw 'Required network stage is incomplete or unknown. Deployment is NOT complete. Preserve Run Command diagnostics; inspect source Network Status/Stop before an approved manual retry. Do not replay deployment.'
+    }
+    Write-LabHealth 'Required network traffic' Completed $deploymentClock.Elapsed.TotalSeconds 'Required source network task/unit, application readiness and increasing API totals confirmed.' $HealthPath
 } catch {
     try {
         $lastHealth = Get-Content -LiteralPath $HealthPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -1187,18 +1315,19 @@ Write-Output 'APPLIANCE_STORE_READY'
     } elseif ($diskCreated) {
         Write-Warning 'Setup termination is unconfirmed. WinServerBase-temp is retained so a running download is not interrupted. Its export access expires after five hours; revoke access and remove the disk after confirming ConfigureWorkshop has stopped.'
     }
-    if ($runCreated -and $setupPassed) {
+    if ($runCreated -and $setupPassed -and $networkConfirmed) {
         try { Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName | Out-Null }
         catch { Write-Warning 'Managed Run Command removal failed. Inspect and remove ConfigureWorkshop from the host when it has stopped.' }
     } elseif ($runCreated) {
-        Write-Warning 'ConfigureWorkshop is retained for failure diagnostics. Inspect its instance view and remove it after it has stopped.'
+        Write-Warning 'ConfigureWorkshop is retained for failure diagnostics and replay protection. Inspect its instance view; do not rerun deployment to repair incomplete/unknown network traffic.'
     }
     Complete-LabProcessTiming
 }
 
-if ($setupPassed) {
-    try { Invoke-LabFreshTrafficOffer }
-    catch { Write-Warning 'Optional source startup outcome UNKNOWN; inspect source Status/Stop before retrying. Infrastructure preparation succeeded; no automatic rollback or retry was attempted.' }
+if ($setupPassed -and $networkConfirmed) {
+    Write-LabHealth 'Source deployment' Completed $deploymentClock.Elapsed.TotalSeconds 'Infrastructure/application preparation and required source network stage confirmed; cleanup finished or was reported separately. Optional CPU is independent.' $HealthPath
+    try { Invoke-LabFreshCpuOffer }
+    catch { Write-Warning 'Optional CPU startup outcome UNKNOWN; inspect CPU Status/Stop before retrying. Required network startup remains confirmed; no automatic rollback or retry was attempted.' }
 }
 
 # A right-click window closes on success just as fast as on failure. The summary above is the

@@ -1,0 +1,38 @@
+[Unit]
+Description=Synthetic employee orders via local Nginx (UTC 06-22)
+After=network-online.target nginx.service
+Wants=network-online.target
+Requires=nginx.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=contoso-employee-orders
+StateDirectoryMode=0700
+RuntimeDirectory=contoso-employee-orders
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 -B /opt/contoso-employee-orders/employee-orders.py
+Restart=no
+TimeoutStopSec=25
+KillMode=control-group
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+MemoryMax=64M
+TasksMax=8
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=contoso-employee-orders
+
+[Install]
+WantedBy=multi-user.target

@@ -48,7 +48,7 @@ Azure Migrate provides a project in which discovery, assessment, and migration i
 
 ### Discovery Appliance
 
-The Windows-based appliance queries the **Hyper-V host** for VM configuration and performance information. With appropriate guest credentials, it can also connect to Windows guests through PowerShell remoting and Linux guests through SSH for supported software inventory and dependency features.
+The Windows-based appliance queries the **Hyper-V host** through WinRM/CIM for VM configuration and performance information. With appropriate guest credentials, it can also connect to Windows guests through PowerShell remoting and Linux guests through SSH for supported software inventory and dependency features. `MigrateRepl` is not created until Module 3, after this assessment. Continuous host-based inventory can then include it even if that guest does not allow discovery-appliance connections; later inventory does not change an already explicitly selected four-workload assessment group. Do not block connectivity or hide inventory to force a four-server portal count; select the four workload identities explicitly for assessment and migration.
 
 | Component | Role in this module |
 |---|---|
@@ -158,7 +158,7 @@ Before you create the project, confirm that the environment you built in Module 
     Invoke-RestMethod http://192.168.0.13:3000/api/orders | Select-Object count
     ```
 
-    Repeat the final read after a minute or two and require the second total `count` to be greater than the first; do not use the length of the capped recent-orders array. If Status, either readiness check, or increasing counts cannot be confirmed, return to Module 0, Section 6, and resolve the issue before continuing. Do not skip this preflight because you declined or skipped the deployment traffic prompt. CPU simulation remains optional and is not required for these network checks.
+    Repeat the final read after a minute or two and require the second total `count` to be greater than the first; do not use the length of the capped recent-orders array. If Status, either readiness check, or increasing counts cannot be confirmed, return to Module 0, Section 6, and resolve the issue before continuing. Do not skip this preflight after deployment's automatic network startup. CPU simulation remains optional and is not required for these network checks.
 
 **Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and required source network traffic has confirmed Status, ready direct/proxy endpoints and two increasing API total-count observations. CPU simulation is optional. No replication or cutover has started.
 
@@ -269,7 +269,7 @@ Do this only **after deployment has finished**, on HyperVHost. This manual check
 
 Azure Migrate does not reach into a Hyper-V guest to discover it. It talks to the **host**, and the host reports on the virtual machines it runs. So before anything is discovered, the host has to be willing to answer — and in most organisations it is not, because nothing has ever needed to ask it.
 
-Whatever your organisation runs Hyper-V for — a few line-of-business servers in a branch office, a consolidated rack in a datacentre, a lab that quietly became production — the appliance needs the same things to be true of every host holding workloads you intend to migrate. Microsoft publishes a host-preparation script that configures them, described in its [Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v). The script is signed; verify its signature or published hash before running it anywhere.
+Whatever your organisation runs Hyper-V for — a few line-of-business servers in a branch office, a consolidated rack in a datacentre, a lab that quietly became production — the appliance needs the same things to be true of every host holding workloads you intend to migrate. Microsoft publishes a host-preparation script that configures them, described in its [Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v). The script is signed; require a `Valid` Authenticode signature with a **Microsoft Corporation** signer before running it anywhere.
 
 #### What the Script Configures, and Why the Appliance Needs It
 
@@ -286,7 +286,7 @@ Run against a real estate, this script is often the point where a migration stal
 
 #### In This Environment
 
-You do **not** run Microsoft's script in this lab. The Module 0 deployment already prepared HyperVHost for discovery and recorded the result. Two details differ from what the Microsoft script would have done:
+Microsoft's script is **not required and is not run automatically** in this lab. The Module 0 deployment already prepared HyperVHost directly for discovery and recorded the result. Two details differ from what the Microsoft script would have done:
 
 1.  **WinRM is open to the nested lab subnet only.** The script opens 5985 and 5986 without a scope. Here they are restricted to `192.168.0.0/24`, which is the only network the appliance ever connects from. Narrower is better, and it is worth carrying that habit into a real engagement.
 2.  **The lab user is already a host administrator**, which satisfies the account requirement on its own. It is also a member of the three groups above, so the least-privilege path can be examined without rebuilding anything.
@@ -308,6 +308,15 @@ CredSSP is not enabled, because the workload disks are local to HyperVHost. Step
     Anything showing `Failed` or `NOT FOUND` is applied by hand in Step 3.1 before discovery.
 
 **Expected Result:** The summary shows PowerShell remoting enabled, WinRM allowed from `192.168.0.0/24` only, the discovery account prepared, and CredSSP not enabled. This is a recorded summary, not a live check; Step 3.1 confirms host access directly.
+
+#### Optional Extended Learning — Microsoft's Host-Preparation Script
+
+This is **not a deployment prerequisite**. Only after Module 0 preparation has completed, students may choose to review and, with instructor authorization, run Microsoft's script themselves:
+
+1.  Review the current [official Hyper-V discovery tutorial](https://learn.microsoft.com/azure/migrate/tutorial-discover-hyper-v) and obtain the script from Microsoft's [published script link](https://aka.ms/migrate/script/hyperv).
+2.  Before running it, inspect `Get-AuthenticodeSignature` for the downloaded file. Require **Status = Valid** and a signer certificate identifying **Microsoft Corporation**; otherwise stop. Do not bypass signature checks or execution-policy/security controls.
+3.  Review the script and proposed changes with the instructor. It **changes host configuration; it is not a read-only verifier**. Its defaults can widen WinRM access or enable unnecessary CredSSP. Retain the private `192.168.0.0/24` firewall scope and leave CredSSP disabled for these local disks; do not authorize conflicting changes.
+4.  Only if you explicitly choose to proceed, run the verified script in your own **interactive elevated PowerShell console on HyperVHost**, reviewing each prompt and authorizing only the agreed changes. Do not launch it through deployment, Run Command or a background job. Recheck host access and firewall scope afterward.
 
 ### 2.3 — Import the Published Appliance Configuration
 
@@ -727,9 +736,9 @@ VM inventory, software inventory, and performance collection progress separately
 
 3.  Find the four workload names individually.
 
-    Do not treat the headline server count as proof of scope. The appliance itself may also appear.
+    Do not treat the headline server count as proof of scope. `MigrateAppl` may also appear as infrastructure inventory; `MigrateRepl` may appear after its later Module 3 creation. Their presence does not add a migration workload.
 
-4.  Open each workload record and compare its name, source host, OS, address, CPU, and memory with the lab inventory and Hyper-V Manager.
+4.  Open each workload record and compare its name, source host, source VM ID, OS, address, CPU, and memory with the lab identity register and Hyper-V Manager.
 
 5.  Confirm both Linux records identify **Ubuntu 24.04**, and both Windows records identify **Windows Server 2022**.
 
@@ -745,11 +754,11 @@ VM inventory, software inventory, and performance collection progress separately
 
 **Local workstation — lab notes:**
 
-9.  Record the four server names, OS values, source host, and discovery status.
+9.  Record the four server names, source VM IDs, OS values, source host, and discovery status.
 
-    Keep the appliance out of your workload assessment selection.
+    Keep `HyperVHost`, `MigrateAppl` and `MigrateRepl` out of your workload assessment and migration selections.
 
-**Expected Result:** The portal contains fresh records for all four named workloads from the correct Hyper-V host, with the expected operating systems and configuration. Any additional appliance record remains outside the workload scope.
+**Expected Result:** The portal contains fresh records for all four named workloads from the correct Hyper-V host, with the expected operating systems and configuration. Inventory may contain additional infrastructure; only the four verified workload identities belong to the assessment and migration scope.
 
 | Server name | Expected OS | Expected source address |
 |---|---|---|
@@ -837,7 +846,7 @@ The assessment group must contain exactly the four workload **server records**. 
 
 2.  Select only **OnPrem-Web**, **OnPrem-SQL**, **OnPrem-Linux-Web**, and **OnPrem-Linux-App**, using the source details validated in Step 4.
 
-3.  Verify that the selection contains exactly those four servers and excludes `MigrateAppl` or any other appliance display name.
+3.  Verify that the selection contains exactly those four workload identities and excludes `HyperVHost`, `MigrateAppl`, `MigrateRepl` and any other infrastructure record. Do not use **Select all** on an unfiltered inventory.
 
 4.  Continue to the review page.
 
@@ -1155,6 +1164,6 @@ The [wave execution experience](https://learn.microsoft.com/azure/migrate/how-to
 
 ## Next Steps
 
-You have created and registered the discovery appliance, validated the four-server inventory, reviewed an Azure VM assessment, and recorded a dependency-aware migration plan. Keep the appliance and source workloads running for continued collection and the next module.
+You have created and registered the discovery appliance, validated the four workload identities within discovered inventory, reviewed their four-server Azure VM assessment, and recorded a dependency-aware migration plan. Keep the appliance and source workloads running for continued collection and the next module.
 
 ➡️ Continue to [**Module 2: Hyper-V Migration**](Module-2-Agentless-Migration.md) to configure the separate host replication components and begin migration preparation. Keep the frontend cutover on hold until the later stateful and coordinated application tests are complete.

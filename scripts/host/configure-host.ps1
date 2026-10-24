@@ -1,9 +1,10 @@
-# Runs as SYSTEM on the Windows Hyper-V host through managed Run Command.
+﻿# Runs as SYSTEM on the Windows Hyper-V host through managed Run Command.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$AdminUsername,
     [Parameter(Mandatory)][string]$AdminPassword,
     [Parameter(Mandatory)][string]$WindowsVhdSasUrl,
+    [Parameter(Mandatory)][string]$HostVMId,
     [string]$IncludeApplianceVhd = 'No',
     [string]$ApplianceVhdSha256 = '',
     [string]$WorkshopTitle = 'TD SYNNEX - Cloud Enablement Services'
@@ -25,7 +26,7 @@ if (Test-Path "$labRoot\setup-complete.json") {
     throw 'This host has already been provisioned. Use validation, not deployment, after migration starts.'
 }
 $labResuming = Test-Path "$labRoot\setup-log.txt"
-$labBuildMarker = 'LAB_BUILD|ubuntu2404-tomcat101-unified-v1'
+$labBuildMarker = 'LAB_BUILD|ubuntu2404-prepared-replication-v1'
 $matchingBuild = $labResuming -and @(Get-Content -LiteralPath $logFile | Where-Object { $_ -ceq $labBuildMarker }).Count -gt 0
 if (($labResuming -and -not $matchingBuild) -or
     (@(Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App -ErrorAction SilentlyContinue).Count -gt 0 -and -not $matchingBuild)) {
@@ -588,10 +589,20 @@ Write-Log "PHASE 3: Creating guest VMs..."
 function Create-WindowsGuestVM {
     param(
         [string]$VMName, [string]$IPAddress,
-        [int]$MemoryMB = 4096, [int]$CPUs = 2, [int]$DiskGB = 40
+        [int]$MemoryMB = 4096, [int]$CPUs = 2, [int]$DiskGB = 40,
+        [string]$StorageRoot = '', [switch]$PreparedInfrastructure, [scriptblock]$OnCreated
     )
 
+    if (($VMName -ceq 'MigrateRepl' -and -not $PreparedInfrastructure) -or
+        (-not $PreparedInfrastructure -and $VMName -notin @('OnPrem-Web','OnPrem-SQL'))) {
+        throw 'Windows rebuild helper is restricted to the two source workloads; MigrateRepl requires the non-destructive owned-infrastructure path.'
+    }
     $existingVM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    if ($PreparedInfrastructure) {
+        if ($VMName -cne 'MigrateRepl' -or -not $StorageRoot -or $existingVM -or -not $OnCreated) {
+            throw 'NeedsReview: prepared infrastructure must be new, separately owned MigrateRepl; never remove an existing appliance VM.'
+        }
+    } elseif ($StorageRoot) { throw 'StorageRoot is reserved for the new prepared replication VM.' }
     if ($existingVM) {
         # Left behind by an interrupted run. Its provisioning never completed, so discard it
         # and rebuild rather than adopting a guest in an unknown state.
@@ -606,7 +617,7 @@ function Create-WindowsGuestVM {
 
     Write-Log "Creating Windows VM '$VMName'..."
 
-    $vmVhdPath = "$vhdPath\$VMName.vhdx"
+    $vmVhdPath = if ($PreparedInfrastructure) { Join-Path $StorageRoot 'OS.vhdx' } else { "$vhdPath\$VMName.vhdx" }
     if (-not (Test-Path $vmVhdPath)) {
         # Fixed, not dynamic. The guest disks are allocated in full at creation so host
         # capacity is deterministic and does not shift under the workshop as the guests
@@ -659,11 +670,12 @@ function Create-WindowsGuestVM {
     $null = [xml]$unattendXml
     $unattendXml | Out-File -FilePath "$unattendDir\unattend.xml" -Encoding UTF8 -Force
 
-    $vmDir = "$labRoot\VMs\$VMName"
+    $vmDir = if ($PreparedInfrastructure) { Join-Path $StorageRoot 'VM' } else { "$labRoot\VMs\$VMName" }
     New-Item -ItemType Directory -Path $vmDir -Force | Out-Null
 
     New-VM -Name $VMName -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $vmVhdPath `
         -SwitchName $intSwitchName -Path $vmDir -Generation 2 -ErrorAction Stop | Out-Null
+    if ($PreparedInfrastructure) { & $OnCreated (Get-VM -Name $VMName -ErrorAction Stop) $vmVhdPath }
     Set-LabReservation -VMName $VMName -IPAddress $IPAddress
     Set-VMProcessor -VMName $VMName -Count $CPUs -ErrorAction Stop
     Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false -ErrorAction Stop
@@ -992,6 +1004,44 @@ $nginxRunCmdYaml = @'
     systemctl reload nginx
 '@
 
+$employeeWriteFilesYaml = @'
+write_files:
+  - path: /opt/contoso-employee-orders/employee-orders.py
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: __EMPLOYEE_WORKER_B64__
+  - path: /opt/contoso-employee-orders/control.sh
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: __EMPLOYEE_CONTROL_B64__
+  - path: /etc/systemd/system/contoso-employee-orders.service
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: __EMPLOYEE_UNIT_B64__
+'@
+$nginxRunCmdYaml += @'
+
+  - |
+    set -eu
+    python3 - <<'PY'
+    import hashlib
+    from pathlib import Path
+    assets = {
+        '/opt/contoso-employee-orders/employee-orders.py': '__EMPLOYEE_WORKER_SHA256__',
+        '/opt/contoso-employee-orders/control.sh': '__EMPLOYEE_CONTROL_SHA256__',
+        '/etc/systemd/system/contoso-employee-orders.service': '__EMPLOYEE_UNIT_SHA256__',
+    }
+    for name, expected in assets.items():
+        if hashlib.sha256(Path(name).read_bytes()).hexdigest() != expected:
+            raise SystemExit('Employee-order asset transport checksum mismatch.')
+    PY
+    systemctl daemon-reload
+    systemctl disable --now contoso-employee-orders.service
+'@
+
 # The deploy client embeds the reviewed checkout's minimal runtime ZIP, not a remote branch URL.
 $tomcatRuntime = '__TOMCAT_RUNTIME_PAYLOAD__'
 $tomcatRuntimeSha = '__TOMCAT_RUNTIME_SHA256__'
@@ -1039,10 +1089,10 @@ $tomcatRunCmdYaml = Expand-LabTextTemplate $tomcatRunCmdYaml @{ '__RUNTIME_SHA__
 # --- Create VMs ---
 Create-WindowsGuestVM -VMName "OnPrem-Web" -IPAddress "192.168.0.10" -MemoryMB 4096 -CPUs 2
 Create-WindowsGuestVM -VMName "OnPrem-SQL" -IPAddress "192.168.0.11" -MemoryMB 4096 -CPUs 2
-# No appliance OS VM is built here. The Azure Migrate appliance arrives as Microsoft's
+# The discovery appliance is not built here. It arrives as Microsoft's
 # published VHD, downloaded and imported by the instructor in Module 1; its host memory
 # and 192.168.0.20 reservation are deliberately left unused for that import.
-Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("nginx") -ExtraRunCmdYaml $nginxRunCmdYaml
+Create-LinuxGuestVM   -VMName "OnPrem-Linux-Web" -IPAddress "192.168.0.12" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("nginx") -ExtraRunCmdYaml $nginxRunCmdYaml -ExtraWriteFilesYaml $employeeWriteFilesYaml
 Create-LinuxGuestVM   -VMName "OnPrem-Linux-App" -IPAddress "192.168.0.13" -MemoryMB 2048 -CPUs 2 -ExtraPackages @("openjdk-17-jre-headless", "ca-certificates") -ExtraRunCmdYaml $tomcatRunCmdYaml -ExtraWriteFilesYaml $tomcatWriteFilesYaml
 
 # =============================================================
@@ -1309,7 +1359,7 @@ Set-StrictMode -Version Latest
         Set-ItemProperty $tcpPath -Name Enabled -Value 1
         Set-ItemProperty "$tcpPath\IPAll" -Name TcpDynamicPorts -Value ''
         Set-ItemProperty "$tcpPath\IPAll" -Name TcpPort -Value '1433'
-        # SQL authentication is required by the initial Tomcat JVM, not by optional traffic setup.
+        # SQL authentication is prepared for the initial Tomcat JVM, before network traffic startup.
         Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\MSSQLServer" -Name LoginMode -Value 2
         Restart-Service 'MSSQL$SQLEXPRESS'
         if (-not (Get-NetFirewallRule -Name LabSql -ErrorAction SilentlyContinue)) {
@@ -1379,6 +1429,23 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 20
 }
 if (-not $healthy) { throw 'Workload/KVP communication readiness timed out. Check guest hv-kvp-daemon, exact-kernel tools, cloud-init logs and host CIM access; setup is incomplete.' }
+Write-Log 'Staging the standalone Module 3 replication OS helper and retaining the original generalized Windows base; no replication VM is created yet.'
+$replicationHelperBytes = [Convert]::FromBase64String('__LAB_REPLICATION_HELPER_B64__')
+$replicationHelperPath = Join-Path $labRoot 'prepare-replication.ps1'
+[IO.File]::WriteAllBytes($replicationHelperPath, $replicationHelperBytes)
+$replicationHelperHash = '__LAB_REPLICATION_HELPER_SHA256__'
+if ((Get-FileHash -LiteralPath $replicationHelperPath -Algorithm SHA256 -ErrorAction Stop).Hash -ine $replicationHelperHash) { throw 'Staged replication helper checksum mismatch.' }
+$replicationTokens = $null; $replicationErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile($replicationHelperPath, [ref]$replicationTokens, [ref]$replicationErrors)
+if ($replicationErrors.Count) { throw 'Staged replication helper has syntax errors.' }
+$sourceVMIds = [ordered]@{}
+foreach ($name in $allVMs) { $sourceVMIds[$name] = [string](Get-VM -Name $name -ErrorAction Stop).Id }
+$replicationPreparation = [ordered]@{ Schema=1; State='HelperAndBaseStaged'; HostVMId=$HostVMId;
+    HelperPath=$replicationHelperPath; HelperSha256=$replicationHelperHash; BasePath=$windowsBaseVhd;
+    BaseSha256=(Get-FileHash -LiteralPath $windowsBaseVhd -Algorithm SHA256 -ErrorAction Stop).Hash;
+    BaseFileBytes=[long](Get-Item -LiteralPath $windowsBaseVhd -ErrorAction Stop).Length; SourceVMIds=$sourceVMIds }
+$replicationPreparation | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $labRoot 'replication-preparation.json') -Encoding UTF8 -ErrorAction Stop
+
 # Delete Windows setup password material after successful first boot.
 foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
     Invoke-Command -VMName $name -Credential $winCred -ScriptBlock {
@@ -1395,11 +1462,11 @@ foreach ($name in @('OnPrem-Linux-Web','OnPrem-Linux-App')) {
 Remove-Item "$labRoot\CloudInit" -Recurse -Force -ErrorAction SilentlyContinue
 # cloud-init retains a root-only copy of user-data within Linux; credentials are lab-only.
 # =============================================================
-# PHASE 6 - Stage the optional traffic generator on the host
+# PHASE 6 - Stage the required network controller and optional CPU assets
 # =============================================================
-# Written to disk only. Nothing here starts traffic: the instructor decides whether to run
-# it, and when. Delivering it now means no file has to be copied onto HyperVHost by hand.
-Write-Log "PHASE 6: Staging the optional lab traffic generator..."
+# Always staged here. After host readiness, the deployment client starts and verifies
+# required source network traffic through protected Run Command; CPU remains optional.
+Write-Log "PHASE 6: Staging the lab traffic controller and assets..."
 $trafficScriptPath = "$labRoot\enable-lab-traffic.ps1"
 $trafficSettingsPath = "$labRoot\lab-traffic.settings.json"
 $trafficPayload = '__LAB_TRAFFIC_PAYLOAD__'
@@ -1461,9 +1528,9 @@ foreach ($name in @('control.ps1','windows-cpu.ps1','linux-cpu.py')) {
         'onprem-app'   = '192.168.0.13'
     }
     SqlLogin         = 'labapp'
-    IntervalSeconds  = 30
+    IntervalSeconds  = 300
 } | ConvertTo-Json -Depth 4 | Set-Content $trafficSettingsPath -Encoding UTF8
-Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
+Write-Log "Traffic controller staged at $trafficScriptPath; required network startup/verification follows host readiness in the deployment client. CPU remains optional."
 
 # =============================================================
 # PHASE 7 - Prepare this host for Azure Migrate discovery
@@ -1481,9 +1548,10 @@ Write-Log "Traffic generator staged at $trafficScriptPath (not started)."
 #                                      the host, so it is left off deliberately.
 #
 # Each step is applied directly and idempotently rather than by driving the interactive script,
-# because a Run Command session has no console to answer prompts on. Microsoft's script is then
-# run as a verifier if it can be fetched. WinRM/verifier failures remain recorded for manual
-# repair. Guest KVP communication is mandatory and rechecked before setup can complete.
+# because a Run Command session has no console to answer prompts on. Microsoft's script is
+# optional manual learning in Module 1 section 2.2, not a deployment step. Direct prerequisite
+# failures remain recorded for manual repair. Guest KVP communication is mandatory and
+# rechecked before setup can complete.
 Write-Log "PHASE 7: Preparing the host for Azure Migrate discovery..."
 
 $hostPrep = [ordered]@{}
@@ -1537,49 +1605,7 @@ $hostPrep['GuestCommunication'] = $guestCommunication
 
 $hostPrep['CredSSP'] = 'Not enabled (guest disks are local, not on SMB shares)'
 
-# Microsoft's own script, run as a verifier. It is Authenticode-signed, so the signature is
-# checked rather than a published hash, which changes with each release.
-try {
-    $prepScript = "$labRoot\MicrosoftAzureMigrate-Hyper-V.ps1"
-    $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
-    & $curlExe --location --fail --silent --show-error --max-time 300 --output $prepScript 'https://aka.ms/migrate/script/hyperv'
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $prepScript)) { throw "Download failed (curl exit $LASTEXITCODE)." }
-    $sig = Get-AuthenticodeSignature $prepScript
-    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
-        throw "Signature check failed (status $($sig.Status)). The script was not run."
-    }
-    $hostPrep['MicrosoftScriptSha256'] = (Get-FileHash -Path $prepScript -Algorithm SHA256).Hash
-
-    # The script is INTERACTIVE. Its answers cannot be piped in: Read-Host reads the console,
-    # not the pipeline. This session has no console, so the script will either exit early or
-    # block on its first prompt. It is therefore run inside a job with a hard timeout, so a
-    # blocked prompt costs 5 minutes and a log line instead of hanging the deployment. Its
-    # checks still print useful detail before any prompt is reached.
-    # Nothing here is load-bearing: the steps above already configured the host, idempotently.
-    $scriptJob = Start-Job -ScriptBlock {
-        param($Path)
-        try { & $Path 2>&1 | Out-String } catch { "Script raised: $($_.Exception.Message)" }
-    } -ArgumentList $prepScript
-    if (Wait-Job -Job $scriptJob -Timeout 300) {
-        $prepOutput = (Receive-Job -Job $scriptJob) -join "`n"
-        $hostPrep['MicrosoftScript'] = "Ran to completion; output in $labRoot\hyperv-prep-output.txt"
-        Write-Log "Microsoft host-preparation script completed. Output saved to $labRoot\hyperv-prep-output.txt"
-    } else {
-        $prepOutput = ((Receive-Job -Job $scriptJob) -join "`n") +
-                      "`n[stopped after 300s - the script was waiting for console input]"
-        $hostPrep['MicrosoftScript'] = 'Stopped at an interactive prompt (expected; it needs a console)'
-        Write-Log "Microsoft host-preparation script stopped at a prompt, as expected without a console."
-        Write-Log "         The prerequisites above were applied directly, so this is not a failure."
-    }
-    Stop-Job -Job $scriptJob -ErrorAction SilentlyContinue
-    Remove-Job -Job $scriptJob -Force -ErrorAction SilentlyContinue
-    Set-Content -Path "$labRoot\hyperv-prep-output.txt" -Value $prepOutput -Encoding UTF8
-} catch {
-    $hostPrep['MicrosoftScript'] = "Did not run: $($_.Exception.Message)"
-    Write-Log "WARNING: Microsoft's host-preparation script did not run ($($_.Exception.Message))."
-    Write-Log "         The prerequisites above were applied directly, so discovery should still work."
-    Write-Log "         Confirm Module 1 section 2 by hand if the appliance cannot reach this host."
-}
+Write-Log "Microsoft's host-preparation script is not run automatically; optional manual learning: Module 1 section 2.2."
 
 foreach ($item in $hostPrep.GetEnumerator()) { Write-Log "  $($item.Key): $($item.Value)" }
 $hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
@@ -1616,18 +1642,20 @@ if ($applianceJob) {
 $hostPrep['ApplianceStaging'] = [ordered]@{ Status = $applianceStatus; HashCheck = $applianceHashCheck
     ArchiveSha256 = $applianceArchiveSha256 }
 
-# A download/verifier can take time: never mark completion on an old readiness snapshot.
+# Optional appliance staging can take time: never mark completion on an old readiness snapshot.
 $hostPrep['GuestCommunication'] = @(Assert-LabGuestCommunication)
 Assert-LabSourceWorkloads
 $hostPrep['GuestCommunicationCheckedUtc'] = [DateTime]::UtcNow.ToString('o')
 $hostPrep['AutomaticStartPolicy'] = @(Set-LabSourceBootPolicy)
+$hostPrep['ReplicationPreparation'] = $replicationPreparation
 $hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
 
 @{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
-   TrafficScript = $trafficScriptPath } |
-    ConvertTo-Json | Set-Content "$labRoot\setup-complete.json" -Encoding UTF8
+   TrafficScript = $trafficScriptPath; ReplicationPreparation = $replicationPreparation } |
+    ConvertTo-Json -Depth 6 | Set-Content "$labRoot\setup-complete.json" -Encoding UTF8
 # Fixed status tokens and a hash only: never emit the raw job, completion record or credentials.
 Write-Output "LAB_APPLIANCE_STAGE|$applianceStatus|$applianceHashCheck|$applianceArchiveSha256"
+Write-Output 'LAB_REPLICATION_HELPER_STAGED'
 Write-Output 'LAB_WORKLOADS_READY'
 
 } catch {
