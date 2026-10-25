@@ -750,25 +750,62 @@ function Write-LabTrafficOutcome {
     return $confirmed
 }
 
+function Assert-LabFreshTrafficHostIdentity {
+    param($Model, $Status, [Parameter(Mandatory)][string]$SourceResourceGroup,
+        [Parameter(Mandatory)][string]$ExpectedName, [Parameter(Mandatory)][string]$ExpectedSubscriptionId)
+    $models = @($Model); $views = @($Status)
+    if ($models.Count -ne 1 -or $views.Count -ne 1 -or $null -eq $models[0] -or $null -eq $views[0]) {
+        throw 'Source host model/status unavailable.'
+    }
+    $hostModel = $models[0]; $hostStatus = $views[0]
+    foreach ($item in @($hostModel,$hostStatus)) {
+        if ($null -eq $item.PSObject.Properties['Name'] -or $null -eq $item.PSObject.Properties['ResourceGroupName'] -or
+            [string]$item.Name -ine $ExpectedName -or [string]$item.ResourceGroupName -ine $SourceResourceGroup) {
+            throw 'Source host name/group mismatch.'
+        }
+    }
+    $expectedId = "/subscriptions/$ExpectedSubscriptionId/resourceGroups/$SourceResourceGroup/providers/Microsoft.Compute/virtualMachines/$ExpectedName"
+    $hostId = [guid]::Empty
+    if ($null -eq $hostModel.PSObject.Properties['Id'] -or [string]$hostModel.Id -ine $expectedId -or
+        $null -eq $hostModel.PSObject.Properties['VmId'] -or
+        -not [guid]::TryParse([string]$hostModel.VmId, [ref]$hostId) -or $hostId -eq [guid]::Empty) {
+        throw 'Source host resource identity unavailable or mismatched.'
+    }
+    if ($null -eq $hostStatus.PSObject.Properties['Statuses']) { throw 'Source host power unavailable.' }
+    $power = @($hostStatus.Statuses | Where-Object {
+        $null -ne $_ -and $null -ne $_.PSObject.Properties['Code'] -and [string]$_.Code -like 'PowerState/*'
+    })
+    if ($power.Count -ne 1 -or [string]$power[0].Code -cne 'PowerState/running') { throw 'Source host is not confirmed running.' }
+    return $hostId
+}
+
 function Start-LabFreshSourceTraffic {
     param([bool]$StartNetwork, [bool]$StartCpu)
     $job = $null; $probeJob = $null; $protectedTraffic = $null; $trafficPassword = $null
-    $attempted = $false; $terminal = $false
+    $attempted = $false; $startupConfirmed = $false
+    $phase = 'command-prerequisites'
     $runName = 'fresh-source-traffic-' + [guid]::NewGuid().ToString('N')
     try {
         foreach ($name in @('Set-AzVMRunCommand','Get-AzVMRunCommand','Remove-AzVMRunCommand','Invoke-AzVMRunCommand')) {
             $null = Get-Command $name -ErrorAction Stop
         }
         if (-not (Get-Command Set-AzVMRunCommand).Parameters.ContainsKey('ProtectedParameter')) { throw 'Protected parameters unavailable.' }
-        $hostVm = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -Status -ErrorAction Stop
-        $power = @($hostVm.Statuses | Where-Object { $_.Code -like 'PowerState/*' })
-        if ($power.Count -ne 1 -or [string]$power[0].Code -cne 'PowerState/running' -or
-            [string]$hostVm.VmId -eq [string][guid]::Empty) { throw 'Source host power/identity unavailable.' }
-        $guard = New-LabFreshTrafficGuard -HostId ([guid]$hostVm.VmId)
+        $trafficSubscriptionId = ConvertFrom-LabSecureString -Secure $SubscriptionId -Name 'SubscriptionId'
+        $trafficContext = Assert-LabContext $trafficSubscriptionId
+        $phase = 'host-model'
+        $hostModel = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -DefaultProfile $trafficContext -ErrorAction Stop
+        $phase = 'host-status'
+        $hostStatus = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -Status -DefaultProfile $trafficContext -ErrorAction Stop
+        $phase = 'host-identity'
+        $hostId = Assert-LabFreshTrafficHostIdentity -Model $hostModel -Status $hostStatus -SourceResourceGroup $ResourceGroupName -ExpectedName 'HyperVHost' -ExpectedSubscriptionId $trafficSubscriptionId
+        $guard = New-LabFreshTrafficGuard -HostId $hostId
         $probe = "try {`n$guard`nWrite-Output 'LAB_DEPLOY_TRAFFIC_READY'`n} catch { Write-Output 'LAB_DEPLOY_PREFLIGHT_FAILED'; exit 1 }"
+        $phase = 'readiness-probe-submit'
         $probeJob = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -CommandId RunPowerShellScript -ScriptString $probe -AsJob -ErrorAction Stop
+        $phase = 'readiness-probe-wait'
         $waited = Wait-Job -Job $probeJob -Timeout 300
         if (-not $waited -or $probeJob.State -ne 'Completed') { throw 'Readiness probe not confirmed.' }
+        $phase = 'readiness-probe-result'
         $probeResult = Receive-Job -Job $probeJob -ErrorAction Stop
         $null = Get-LabTrafficProbeText -Result $probeResult
         $payload = @'
@@ -825,6 +862,7 @@ finally { $AdminPassword = $null; $secure = $null; $result = $null }
         $networkLiteral = if ($StartNetwork) { '$true' } else { '$false' }
         $cpuLiteral = if ($StartCpu) { '$true' } else { '$false' }
         $payload = $payload.Replace('__FRESH_GUARD__', $guard).Replace('__START_NETWORK__', $networkLiteral).Replace('__START_CPU__', $cpuLiteral).Replace('__CPU_HOURS__', [string]$CpuDurationHours)
+        $phase = 'protected-start-submit'
         $trafficPassword = ([pscredential]::new($AdminUsername, $AdminPassword)).GetNetworkCredential().Password
         $protectedTraffic = @(@{Name='AdminPassword';Value=$trafficPassword})
         $attempted = $true
@@ -832,27 +870,31 @@ finally { $AdminPassword = $null; $secure = $null; $result = $null }
         $waited = Wait-Job -Job $job -Timeout 300
         if (-not $waited -or $job.State -ne 'Completed') { throw 'Submission not confirmed.' }
         $null = Receive-Job -Job $job -ErrorAction Stop
+        $phase = 'managed-observation'
         $deadline = [DateTime]::UtcNow.AddSeconds(1860)
         while ([DateTime]::UtcNow -lt $deadline) {
             $run = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
             if ($null -ne $run -and $run.PSObject.Properties['InstanceView'] -and $null -ne $run.InstanceView -and
                 $run.InstanceView.PSObject.Properties['ExecutionState'] -and
                 [string]$run.InstanceView.ExecutionState -in @('Succeeded','Failed','TimedOut','Canceled','Cancelled')) {
-                $terminal = $true
-                return (Write-LabTrafficOutcome -View $run.InstanceView -StartNetwork $StartNetwork -StartCpu $StartCpu)
+                $phase = 'result-validation'
+                $startupConfirmed = Write-LabTrafficOutcome -View $run.InstanceView -StartNetwork $StartNetwork -StartCpu $StartCpu
+                return $startupConfirmed
             }
             Start-Sleep -Seconds 10
         }
         throw 'Observation timed out.'
     } catch {
         # Protected Run Command exceptions/output can contain credentials: report only fixed text.
-        if ($attempted) { Write-Warning "Source startup outcome UNKNOWN; generators or remote execution may still be running. Inspect managed Run Command '$runName' and source Status/Stop before retrying. No automatic retry or rollback occurred." }
-        else { Write-Warning 'Source startup NOT initiated by this invocation: fresh-source readiness/protected remote prerequisites were not verified. Inspect the source before using the host-interactive fallback.' }
+        if ($attempted) { Write-Warning "Source startup outcome UNKNOWN (phase: $phase); generators or remote execution may still be running. Inspect managed Run Command '$runName' and source Status/Stop before retrying. No automatic retry or rollback occurred." }
+        else { Write-Warning "Source startup NOT initiated by this invocation (phase: $phase): fresh-source readiness/protected remote prerequisites were not verified. Inspect the source before using the host-interactive fallback." }
         return $false
     } finally {
-        if ($terminal) {
+        if ($startupConfirmed) {
             try { Remove-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runName -ErrorAction Stop | Out-Null }
-            catch { Write-Warning 'Terminal source-startup Run Command needs manual cleanup; removing it does not stop generators.' }
+            catch { Write-Warning 'Confirmed source-startup Run Command needs manual cleanup; removing it does not stop generators.' }
+        } elseif ($attempted) {
+            Write-Warning 'Unconfirmed source-startup Run Command is retained for review. Inspect it before any manual cleanup; removing it does not stop generators.'
         }
         foreach ($finishedJob in @($job,$probeJob)) {
             if ($null -ne $finishedJob -and $finishedJob.State -in @('Completed','Failed','Stopped')) {

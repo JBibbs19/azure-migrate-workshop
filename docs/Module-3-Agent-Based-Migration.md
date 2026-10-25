@@ -156,9 +156,9 @@ The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generatio
 
 3.  **HyperVHost — Hyper-V Manager:** Confirm SQL and App are running, with approved guest access and existing authorized SQL access. Keep §2's source identities and method assignments; do not dual-protect either VM.
 
-4.  **HyperVHost — elevated Windows PowerShell / Azure portal:** Confirm target/test networks are available or will be completed in §6, and the standalone helper plus retained original Windows base image are staged as checked in Module 0 §5.1. `MigrateRepl` need not exist yet: §7 creates it automatically after assessment, without manual sizing/build. The discovery appliance is not a substitute; Microsoft appliance software installation/registration still follows below.
+4.  **HyperVHost — elevated Windows PowerShell / Azure portal:** Confirm target/test networks are available or will be completed in §6, and review Module 0 §5.1's staged helper/base-image result for §7. `MigrateRepl` need not exist yet: §7 creates it automatically, without manual sizing/build; Microsoft appliance installation/registration follows separately.
 
-5.  **Instructor confirmation:** Confirm the provided build matches the [instructor-qualified baseline](../README.md#instructor-preparation--qualify-the-provided-baseline). If qualification or the match is unconfirmed, or the image/kernel, agent, storage or architecture changed, **STOP and ask the instructor before agent installation or replication**.
+5.  **Local workstation — student notes:** Confirm the provided build matches the [instructor-qualified baseline](../README.md#instructor-preparation--qualify-the-provided-baseline). If qualification or the match is unconfirmed, or the image/kernel, agent, storage or architecture changed, **STOP and ask the instructor before agent installation or replication**.
 
 **Execution location:** Azure-copy commands run inside the explicitly selected guest through **VM → Run command → RunPowerShellScript / RunShellScript** after guest-agent readiness, or approved RDP/SSH. SQL checks use existing tooling, authorized access and the approved **trusted local SQL connection**. Missing access/tooling/trust requires its owner; no permission grant, certificate change, trust bypass or password exposure is a student prerequisite.
 
@@ -351,19 +351,19 @@ The current [physical-server tutorial](https://learn.microsoft.com/azure/migrate
 
 Before enabling this pair's protection, recheck Module 2 §4.3's **project-association prerequisite**: the owner must verify project/provider/appliance/managed-vault compatibility for both methods. The presence of both source choices is not shared-vault certification. Do not force associations, guess blank IDs, silently create separate projects, or patch scripts.
 
-### 7.1 Create the Replication VM Automatically, Verify It and Prepare the Physical-Server Route
+### 7.1 Create and Verify MigrateRepl
 
 #### Hands-On Steps
 
 **HyperVHost — elevated Windows PowerShell (Run as administrator):**
 
-1.  Confirm Module 1's **four-workload assessment is complete**, then run the standalone helper staged in Module 0. It prompts privately for the existing guest `Administrator` password as a SecureString; do not put the password in command history, notes or source.
+1.  After §4's entry checks, run the standalone helper staged in Module 0. It prompts privately for the existing guest `Administrator` password as a SecureString; do not put the password in command history, notes or source.
 
     ```powershell
     C:\AzMigrateLab\prepare-replication.ps1
     ```
 
-    This creates the fixed-spec `MigrateRepl` automatically from retained original `C:\AzMigrateLab\VHDs\WindowsServer2022-Base.vhdx`, the **same clean generalized Windows Server 2022 base** used for the Windows workload guests. It does not clone a workload's IIS/SQL installation, install Microsoft's replication software or register a project. No manual VM build/sizing is required. **Do not rerun `deploy-lab.ps1`.** A repeat for the helper's existing owned prepared VM verifies it read-only rather than recreating it; stop for the instructor on an unverified/partial result, identity mismatch or retired source.
+    This creates fixed-spec `MigrateRepl` from the **same original clean generalized Windows Server 2022 base** retained in Module 0 §5.1, never a configured workload clone. It does not install Microsoft's replication software or register a project. No manual VM build/sizing is required. A repeat for the helper's existing owned prepared VM verifies it read-only rather than recreating it.
 
     After successful helper completion, record the actual VM ID and inspect the result:
 
@@ -395,7 +395,7 @@ Before enabling this pair's protection, recheck Module 2 §4.3's **project-assoc
 
 **Local workstation — student notes:**
 
-3.  Confirm the instructor-qualified build match from §4, the **helper's actual** storage/memory and OS-readiness result, SQL/App-to-`.21` TCP 443/9443 reachability and the appliance's approved outbound Azure HTTPS path. Initial deployment's staged result is not this VM-readiness result. If helper preparation is incomplete or qualification is unconfirmed, stop for the instructor rather than build another VM, resize disks or repeat a hosting assessment. The instructor handles actual nested-placement/vendor qualification; nominal minimums are not certification.
+3.  Record the **helper's actual** storage/memory and OS-readiness result; initial deployment's staged result is not this VM-readiness result. Stop for the instructor on a failed/unverified/partial result, identity mismatch or retired source; do not rebuild an existing VM, resize disks or rerun `deploy-lab.ps1`. Review the planned private SQL/App-to-`.21` TCP 443/9443 route, scoped firewall rules and approved appliance-to-Azure HTTPS path. A clean Windows guest has no appliance listeners yet: verify actual source-to-appliance connections in §7.2 **after installation/registration**, before Mobility installation or protection.
 
 **Local workstation — Azure portal:**
 
@@ -427,7 +427,7 @@ Before enabling this pair's protection, recheck Module 2 §4.3's **project-assoc
 
 3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator inside `MigrateRepl`**, not on HyperVHost, the discovery appliance or a workload.
 
-    This is the Microsoft appliance installer, not a workshop `migrate-step` helper. No copied installer command, fixed binary URL, execution-policy bypass, or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
+    Follow the current signed Microsoft installer's instructions; no fixed binary URL, execution-policy bypass or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
 
 **Replication appliance — Microsoft Azure Appliance Configuration Manager:**
 
@@ -456,6 +456,10 @@ Before enabling this pair's protection, recheck Module 2 §4.3's **project-assoc
 12. Confirm this modern appliance is registered and healthy in the intended project/region, with its current component versions.
 
 13. Record its identity, versions, registration status and the verified SQL/App source associations without secrets.
+
+**Source OnPrem-SQL and OnPrem-Linux-App — approved guest sessions:**
+
+14. Now that appliance installation/registration is complete and its TCP 443/9443 listeners are ready, verify **both source guests** can connect to the configured private appliance endpoint (`192.168.0.21` for this lab) on **both TCP 443 and 9443**, using the approved guest connection checks. Confirm the appliance's required outbound Azure HTTPS checks pass as well. Record the results before any Mobility installation or replication enablement. If a listener or path fails, resolve that specific service/routing/scoped-firewall issue; do not disable firewalls, broaden access or proceed on the earlier route review alone.
 
 ### 7.3 Choose a Supported Mobility Installation Route
 
@@ -503,7 +507,7 @@ Before enabling this pair's protection, recheck Module 2 §4.3's **project-assoc
 
 ## 8. Step 4 — Configure Replication
 
-SQL and Tomcat use the **modern physical-server/Mobility path**, not the registered Hyper-V provider. Select every disk needed for the existing database and application; replication preserves disk state rather than rebuilding an app. Keep all four sources serving throughout initial/delta replication. No workshop `migrate-step1`–`migrate-step6` script is part of this manual sequence.
+SQL and Tomcat use the **modern physical-server/Mobility path**, not the registered Hyper-V provider. Select every disk needed for the existing database and application; replication preserves disk state rather than rebuilding an app. Keep all four sources serving throughout initial/delta replication.
 
 ### 8.1 Start the Replication Wizard
 
@@ -1249,7 +1253,7 @@ flowchart TD
 
 16. Match all four VM IDs to the lab identity register and require **AutomaticStartAction = Nothing** for every one before proceeding.
 
-    Module 0's successful deployment normally assigns a future-host-boot start policy. A later HyperVHost reboot must not resurrect retired writers. This manual VM policy action does **not** modify a workshop script. Do not rerun deployment, host configuration, migrate helpers, traffic helpers, or source startup automation after this boundary. Do not change the appliances' policies or unrelated VMs.
+    Module 0's successful deployment normally assigns a future-host-boot start policy. A later HyperVHost reboot must not resurrect retired writers. This manual VM policy action does **not** modify a workshop script. Do not rerun deployment, host configuration, the source traffic controller or source startup automation after this boundary. Do not change the appliances' policies or unrelated VMs.
 
 **Source guests — approved task/service controls:**
 

@@ -688,7 +688,7 @@ The original five-minute network generator sends low-rate HTTP through Nginx →
     $orders | Select-Object count,customerCount
     ```
 
-5.  Wait at least five minutes plus a little processing time (or the configured 20–600-second baseline interval) and repeat Step 4. Confirm readiness remains `ready` and API `count` rises. Record both totals in your lab register/worksheet. Use API `count`, not `.orders.Count`: the returned `orders` array contains at most 20 recent rows.
+5.  Record the first total and timestamp, then wait one configured **baseline-generator interval** (default **300 seconds / five minutes**, configurable 20–600 seconds) and repeat Step 4. If the total has not risen, continue GET-only observations for up to two additional minutes of processing margin: **up to seven minutes total at 300 seconds, or twelve at 600**. Require readiness to remain `ready` and a later API `count` to exceed the first; record both totals and timestamps. Use API `count`, not `.orders.Count`: the returned `orders` array contains at most 20 recent rows. The employee service's random daytime cycle or overnight sleep is not the baseline timer. If growth is still unconfirmed, inspect Status/readiness and resolve the issue before discovery; do not submit a POST, repeat Start or restart a healthy service just to force the count upward.
 
 6.  Only for an approved troubleshooting stop, stop network generators without stopping applications or changing CPU simulation:
 
@@ -700,7 +700,7 @@ The original five-minute network generator sends low-rate HTTP through Nginx →
 
 **Expected Result:** Source network generators are active, direct/proxy readiness succeeds and two total-order reads demonstrate ongoing activity before Module 1. Keep the traffic running while Azure Migrate collects dependencies. See [README — Lab Traffic](../README.md#lab-traffic) for settings, credentials and detailed outcomes.
 
-> **Traffic boundary:** Keep all four source workloads serving, including already enabled synthetic orders, during discovery and both methods' initial/delta replication and isolated tests. Stop/disarm **copied** generators, including `contoso-employee-orders.service` on Linux-Web, in test guests before functional traffic; do not leave a next-day/reboot restart armed. Freeze source manual and synthetic writes only at Module 3's final planned cutover boundary (or an explicitly approved troubleshooting stop), not because replication starts. Use Module 3's ordinary per-guest stop controls, not a workshop helper.
+> **Traffic boundary:** Keep all four source workloads serving, including already enabled synthetic orders, during discovery and both methods' initial/delta replication and isolated tests. Stop/disarm **copied** generators, including `contoso-employee-orders.service` on Linux-Web, in test guests before functional traffic; do not leave a next-day/reboot restart armed. Freeze source manual and synthetic writes only at Module 3's final planned cutover boundary (or an explicitly approved troubleshooting stop), not because replication starts. Use Module 3's ordinary per-guest stop controls.
 
 ### Optional CPU Simulation
 

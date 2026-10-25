@@ -149,7 +149,7 @@ Before you create the project, confirm that the environment you built in Module 
 
     If a workload is missing, resolve the incomplete Module 0 setup before proceeding.
 
-8.  Complete [Module 0, Section 6](Module-0-Setup.md#6-start-the-sample-business-traffic)'s required network-traffic startup and checks before discovery. Confirm source network Status, direct Tomcat readiness and Nginx-proxy readiness, then read the API's total order `count` twice, a minute or two apart.
+8.  Review [Module 0, Section 6](Module-0-Setup.md#6-start-the-sample-business-traffic)'s required network-traffic startup evidence; do not repeat a confirmed successful Start. Before discovery, take fresh source network Status, direct Tomcat readiness, Nginx-proxy readiness and API total-order observations:
 
     ```powershell
     C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Network
@@ -158,7 +158,7 @@ Before you create the project, confirm that the environment you built in Module 
     Invoke-RestMethod http://192.168.0.13:3000/api/orders | Select-Object count
     ```
 
-    Repeat the final read after a minute or two and require the second total `count` to be greater than the first; do not use the length of the capped recent-orders array. If Status, either readiness check, or increasing counts cannot be confirmed, return to Module 0, Section 6, and resolve the issue before continuing. Do not skip this preflight after deployment's automatic network startup. CPU simulation remains optional and is not required for these network checks.
+    Record the first total and timestamp. Repeat the readiness checks and final GET using Module 0 §6, Step 5's configured baseline interval and bounded processing margin (default five-minute interval, up to seven minutes total; up to twelve at 600 seconds). Require a later total `count` greater than the first and record both observations, not the length of the capped recent-orders array. If Status, either readiness check or growth remains unconfirmed, follow Module 0 §6's troubleshooting boundary before continuing; do not force growth with a POST or restart. Do not skip this fresh preflight after automatic startup. CPU simulation remains optional.
 
 **Expected Result:** HyperVHost's location is recorded and differs from your migration region, quota is still sufficient, all four workload VMs are Running, and required source network traffic has confirmed Status, ready direct/proxy endpoints and two increasing API total-count observations. CPU simulation is optional. No replication or cutover has started.
 

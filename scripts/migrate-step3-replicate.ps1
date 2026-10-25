@@ -1,26 +1,32 @@
 ﻿<#
 .SYNOPSIS
-    Step 3: Read-only Hyper-V replication preflight and supported portal handoff.
+    Step 3: Method-aware manual handoff; read-only Hyper-V preflight for frontends only.
 
 .DESCRIPTION
-    Checks the requested workload group, target sizing, discovered Hyper-V identities
-    and installed command contracts without changing Azure resources.
+    Agentless checks the Web/Linux-Web Hyper-V identities, target sizing and installed
+    command contracts without changing Azure resources. Its sizing check retains the
+    full four-workload plan; it does not select SQL/App for Hyper-V replication.
+
+    AgentBased and All stop before Azure sign-in, resource reads or Hyper-V preflight.
+    They report the course's modern physical-server/Mobility route for SQL/App, not an
+    implemented replication backend. All maps both methods; it never routes all four
+    workloads through Hyper-V. Skipped inventory, sizing and quota checks are NotRun.
 
     The published Az.Migrate replication API uses VMwareCbt inputs, not Hyper-V VMs.
     Az.RecoveryServices supports Hyper-V disaster recovery, but using that DR API against
     an Azure Migrate-created vault is not a verified migration contract for this lab.
-    Therefore this iteration fails closed and gives the supported Azure Migrate portal
-    replication and selected-set monitoring path. It never guesses ResourceName, creates
-    a vault, installs a module/provider, or reports replication ready from a submitted job.
+    This script fails closed: it never guesses ResourceName, creates a vault, installs a
+    provider or Mobility Service, runs the staged replication-VM helper, or reports
+    replication ready from a submitted job. No modern replication automation is enabled.
 
-    A nonzero exit means the automated Step 3 did NOT complete. No replication writes,
-    test migration, test cleanup, cutover or source shutdown are performed. Complete
-    replication and monitoring in the portal; verify support separately before using
-    the Step 4/5 scripts with Hyper-V. Keep the SAME workload group for subsequent stages.
+    A nonzero exit means automated Step 3 did NOT complete. No replication writes,
+    test migration, test cleanup, cutover or source shutdown are performed. Follow
+    Module 2 for frontend replication/test, Module 3 for SQL/App replication/test and
+    Module 3 section 11 for the one shared final maintenance window.
 
-    Prerequisites: complete Steps 1/2, register the Hyper-V provider using the documented
-    portal workflow, and review Step 1's actual SKU/provider/quota guards with the same
-    selected target region. AutoCost guidance is recalculated from live metadata, prices and quota.
+    Complete discovery and assessment first. For Agentless, review the actual
+    SKU/provider/quota guards in the same target region and register the Hyper-V provider
+    manually if needed. AutoCost guidance is recalculated from live metadata, prices and quota.
 
 .PARAMETER SourceResourceGroup
     The on-premises simulation resource group. Prompted when not supplied (example: rg-ces-source-01).
@@ -53,31 +59,35 @@
     Inventory is not replication readiness or cutover authorization.
 
 .PARAMETER Workload
-    All selects four VMs; Agentless selects OnPrem-Web and OnPrem-Linux-Web;
-    AgentBased (also Agent-based) selects OnPrem-SQL and OnPrem-Linux-App.
-    Names are workload groups only. Later steps must use this SAME normalized value.
+    Agentless selects only OnPrem-Web and OnPrem-Linux-Web for read-only Hyper-V preflight.
+    AgentBased (also Agent-based) hands off OnPrem-SQL and OnPrem-Linux-App to the manual
+    modern physical-server/Mobility route. All gives the two-method manual course map.
+    AgentBased/All exit nonzero before Azure reads; no inventory, sizing or quota is validated.
 
 .PARAMETER TargetVmSizes
-    Optional exact four-key mapping: OnPrem-Web, OnPrem-SQL, OnPrem-Linux-Web and
-    OnPrem-Linux-App to exact eligible SKU strings. Revalidated against live subscription
-    metadata, RAM and combined quotas. Omit to choose a number for each workload;
-    blank cancels the entire selection. Prices may be unavailable, never a quota bypass.
+    For Agentless only, optional exact four-key mapping: OnPrem-Web, OnPrem-SQL,
+    OnPrem-Linux-Web and OnPrem-Linux-App to exact eligible SKU strings. Revalidated
+    against live subscription metadata, RAM and combined quotas. Omit to choose a number
+    for each workload; blank cancels the selection. Prices are never a quota bypass.
+    AgentBased/All do not evaluate this map; their handoff is not a sizing approval.
 
 .EXAMPLE
     .\migrate-step3-replicate.ps1
 
 .EXAMPLE
-    .\migrate-step3-replicate.ps1 -TargetResourceGroup "mycloud-rg" -Location "westus2"
+    .\migrate-step3-replicate.ps1 -Workload Agentless -TargetResourceGroup "mycloud-rg" -Location "westus2"
 MODULE COVERAGE
-    -Workload Agentless: Module 2, sections 5-7 (replication and monitoring).
-    -Workload AgentBased: Module 3, sections 8-9 (replication and monitoring).
-    -Workload All: both selected groups, four VMs. Agent-based is accepted as AgentBased.
+    -Workload Agentless: frontend-only Hyper-V preflight; manual Module 2 sections 4-8.
+    -Workload AgentBased: manual SQL/App modern physical/Mobility handoff, Module 3 sections 4-10.
+    -Workload All: manual two-method map, not an all-four Hyper-V preflight.
+    Agent-based is accepted as AgentBased. HyperVHost, MigrateAppl and MigrateRepl are excluded.
 
-    These names select workload groups, not different replication technologies. This lab
-    uses Hyper-V host-based replication. It does not deploy a replication appliance or
-    install Mobility Service in the guests for Module 3 sections 5-7.
-    Step 4 and Step 5 remain separate: use the SAME -Workload value after verifying readiness.
-    This script never performs test migration, test cleanup, cutover or source shutdown.
+    Module 3 section 7 runs the staged prepare-replication.ps1 helper manually after
+    assessment to create clean MigrateRepl; Microsoft appliance installation/registration
+    and SQL/App Mobility Service remain manual. This script performs none of those actions
+    and never asserts that the replication appliance exists, is installed or is registered.
+    Configure both pairs before testing; hold final cutover for Module 3 section 11.
+    No replication, test migration, test cleanup, cutover or source shutdown runs here.
 #>
 
 [CmdletBinding()]
@@ -100,10 +110,8 @@ param(
 
     [hashtable]$TargetVmSizes,
 
-    # Which workload group to act on (prompted when not supplied).
-    #   Agentless  = OnPrem-Web, OnPrem-Linux-Web      (the Module 2 pair)
-    #   AgentBased = OnPrem-SQL, OnPrem-Linux-App      (the Module 3 pair)
-    #   All        = all four
+    # Agentless preflights only the frontends; AgentBased/All return a manual method map.
+    # SQL/App never enter the Hyper-V vault/provider/source pipeline.
     [string]$Workload
 )
 
@@ -199,7 +207,7 @@ function Format-LabSafeErrorDiagnostic {
     if ($Stage -in @('environment-preflight', 'authentication/Connect-AzAccount', 'installed-command-contracts',
         'target-resource-group/Get-AzResourceGroup', 'target-network/Get-AzVirtualNetwork', 'project/REST',
         'project-inventory/REST', 'project-solutions/REST', 'vault-list/REST', 'vault/REST', 'providers/REST', 'replication-inventory/REST', 'target-sizing/preflight',
-        'source-inventory/Get-AzMigrateDiscoveredServer', 'backend-contract')) { $safeStage = $Stage }
+        'source-inventory/Get-AzMigrateDiscoveredServer', 'backend-contract', 'method-handoff')) { $safeStage = $Stage }
     $exceptionType = 'OtherOrUnknownException'; $category = 'NotSpecified'; $lineNumber = 0
     if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
         if ($null -ne $ErrorRecord.Exception) {
@@ -233,7 +241,7 @@ function Write-LabTerminatingError {
     foreach ($line in @(Format-LabSafeErrorDiagnostic -ErrorRecord $ErrorRecord -Stage $script:LabReplicationStage)) {
         Microsoft.PowerShell.Utility\Write-Host $line -ForegroundColor Red
     }
-    Microsoft.PowerShell.Utility\Write-Host 'Hyper-V manual path: Azure portal > Azure Migrate > your project > Replicate (Hyper-V), then monitor ONLY the selected workload. Step 4/5 are separate; no readiness is assumed.' -ForegroundColor Yellow
+    Microsoft.PowerShell.Utility\Write-Host 'Manual course path: Module 2 uses Hyper-V for Web/Linux-Web only; Module 3 uses modern physical-server/Mobility replication for SQL/App only. Hold final cutover for Module 3 section 11. No readiness is assumed.' -ForegroundColor Yellow
 }
 
 function Read-LabParameter {
@@ -1778,6 +1786,38 @@ function Resolve-LabReplicationWorkload {
     }
 }
 
+function Get-LabReplicationMethodHandoff {
+    param([Parameter(Mandatory = $true)][string]$Workload)
+    $normalized = Resolve-LabReplicationWorkload $Workload
+    [string[]]$frontends = @('OnPrem-Web', 'OnPrem-Linux-Web')
+    [string[]]$sqlApp = @('OnPrem-SQL', 'OnPrem-Linux-App')
+    [string[]]$selected = switch ($normalized) {
+        'Agentless' { $frontends }
+        'AgentBased' { $sqlApp }
+        'All' { $frontends; $sqlApp }
+    }
+    $methods = @()
+    if ($normalized -in @('Agentless', 'All')) {
+        $methods += [pscustomobject]@{ Method = 'HyperVHostProvider'; Workloads = $frontends; CoursePath = 'Module 2 sections 4-8' }
+    }
+    if ($normalized -in @('AgentBased', 'All')) {
+        $methods += [pscustomobject]@{ Method = 'ModernPhysicalMobility'; Workloads = $sqlApp; CoursePath = 'Module 3 sections 4-10' }
+    }
+    $reason = if ($normalized -eq 'Agentless') {
+        'Frontend-only read-only Hyper-V preflight; manual portal replication still required.'
+    } elseif ($normalized -eq 'AgentBased') {
+        'SQL/App require the manual modern physical-server/Mobility route; this script does not implement it.'
+    } else {
+        'The application uses two replication methods; this script cannot preflight or automate both as one Hyper-V group.'
+    }
+    return [pscustomobject]@{
+        Workload = $normalized; SelectedWorkloads = $selected; MethodMap = @($methods)
+        ExcludedInfrastructure = [string[]]@('HyperVHost', 'MigrateAppl', 'MigrateRepl')
+        CanRunHyperVPreflight = ($normalized -eq 'Agentless'); ManualActionRequired = $true
+        SharedFinalCutover = 'Module 3 section 11'; Reason = $reason
+    }
+}
+
 function Get-LabReplicationSelectedMachines {
     param([object[]]$Inventory, [object[]]$Configurations, [string]$SubscriptionId)
     if ($Configurations.Count -eq 0) { throw '[source-inventory] No workloads were selected. No changes were made.' }
@@ -1850,7 +1890,7 @@ function Get-LabReplicationVaultDiagnostic {
 # launched by double-click closes the moment the script exits.
 $script:LabScriptPath = $PSCommandPath
 $script:LabVaultReport = [ordered]@{
-    SchemaVersion = '1.0'; StartedUtc = [DateTimeOffset]::UtcNow.ToString('o'); FinishedUtc = $null
+    SchemaVersion = '1.1'; StartedUtc = [DateTimeOffset]::UtcNow.ToString('o'); FinishedUtc = $null
     Stage = 'environment-preflight'; Handoff = 'ManualActionRequired'
     Inputs = [ordered]@{ Subscription = 'Unknown'; SourceResourceGroup = $null; TargetResourceGroup = $null; ProjectId = $null; TargetLocation = $null; Workload = $null }
     VaultDiscoveryScope = [ordered]@{ Complete = $false; State = 'Unknown' }
@@ -1860,6 +1900,7 @@ $script:LabVaultReport = [ordered]@{
     ReplicationInventory = [ordered]@{ Complete = $false; ObservedCount = $null; Items = @(); SourceIdentityMapping = 'NotVerified' }
     JobInventory = [ordered]@{ Complete = $false; ObservedCount = $null; Items = @() }
     SourceInventory = @(); TargetSizing = 'NotEvaluated'; SafeDiagnostic = @()
+    MethodRouting = $null; PreflightExecution = $null
     KnownGaps = @('StudentSelected is not service-verified project binding.', 'Source VM GUID/host to protected-item identity mapping is not verified.', 'Connection and heartbeat inventory do not verify replication readiness.', 'Job success does not prove initial replication complete.', 'No supported automatic Hyper-V replication backend is enabled.')
     PortalConfigurationGuidanceAllowed = $false
     AzureWritesSubmitted = 0; ReplicationEnabledByScript = $false; CanCutOver = $false; ReplicationReadinessNotVerified = $true
@@ -1871,7 +1912,45 @@ trap {
     exit 1
 }
 
-Write-Host 'Subscription-first size selection is read-only; the actual target VNet region is authoritative.' -ForegroundColor Cyan
+if (-not [string]::IsNullOrWhiteSpace($Workload)) { $Workload = Resolve-LabReplicationWorkload $Workload }
+$Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload route (All = two-method manual map; Agentless = frontend preflight; AgentBased = SQL/App manual handoff)'
+$methodHandoff = Get-LabReplicationMethodHandoff -Workload $Workload
+$script:LabVaultReport.Inputs.Workload = $methodHandoff.Workload
+$script:LabVaultReport.MethodRouting = $methodHandoff
+if (-not $methodHandoff.CanRunHyperVPreflight) {
+    $script:LabReplicationStage = 'method-handoff'
+    $script:LabVaultReport.Handoff = 'ManualActionRequired'
+    $script:LabVaultReport.VaultDiscoveryScope.State = 'NotRun'
+    $script:LabVaultReport.ProjectAssociation.Reason = 'NotRun'
+    $script:LabVaultReport.ProviderInventory.State = 'NotRun'
+    $script:LabVaultReport.ReplicationInventory['State'] = 'NotRun'
+    $script:LabVaultReport.JobInventory['State'] = 'NotRun'
+    $script:LabVaultReport.TargetSizing = 'NotEvaluated'
+    $script:LabVaultReport.PreflightExecution = [ordered]@{
+        AzureAuthenticationAndResourceReads = 'NotRun'; HyperVVaultProvider = 'NotRun'
+        SourceIdentity = 'NotRun'; TargetSizingAndQuota = 'NotRun'; InstalledCommandContracts = 'NotRun'
+    }
+    $script:LabVaultReport.KnownGaps = @(
+        'Method mapping is course guidance, not live inventory, backend support or readiness verification.'
+        'Azure sign-in, resource/vault/provider/source reads, sizing and quota checks were not run.'
+        'Modern appliance and Mobility installation, registration and replication remain manual.'
+        'Neither Hyper-V nor modern replication is automated by this script.'
+    )
+    Write-Host 'STEP 3 MANUAL ACTION REQUIRED -- no Azure preflight was run.' -ForegroundColor Yellow
+    Write-Host "Requested group: $Workload -> $($methodHandoff.SelectedWorkloads -join ', ')" -ForegroundColor Cyan
+    foreach ($method in $methodHandoff.MethodMap) {
+        Write-Host "  $($method.Method): $($method.Workloads -join ', ') -> $($method.CoursePath)" -ForegroundColor Cyan
+    }
+    Write-Host "Excluded infrastructure: $($methodHandoff.ExcludedInfrastructure -join ', ')." -ForegroundColor Yellow
+    Write-Host 'After assessment, manually run the staged prepare-replication.ps1 command in Module 3 section 7 to create clean MigrateRepl at 192.168.0.21. This script does not run that helper or verify that the VM exists.' -ForegroundColor White
+    Write-Host 'Then follow Module 3: install/register the Microsoft modern replication appliance, install/register Mobility Service for SQL/App only, configure replication in section 8, and monitor/test in sections 9-10. None of those actions is performed or verified here.' -ForegroundColor White
+    Write-Host 'For All, configure Web/Linux-Web through Module 2 and SQL/App through Module 3 before testing either pair. Use one shared final maintenance window in Module 3 section 11, not separate cutover waves.' -ForegroundColor Yellow
+    Write-Host 'For frontend-only read-only Hyper-V checks, rerun with -Workload Agentless. SQL/App must never be selected for that Hyper-V path.' -ForegroundColor White
+    Write-Host 'Replication writes submitted: 0. Inventory, sizing, quota and replication readiness: NOT VERIFIED. Step 3 did not complete.' -ForegroundColor Yellow
+    throw '[method-handoff] Manual course actions are required; no modern replication backend is implemented and no Azure preflight was run.'
+}
+
+Write-Host 'Frontend Hyper-V preflight only. Subscription-first size selection is read-only; the actual target VNet region is authoritative.' -ForegroundColor Cyan
 $context = Get-LabAzContext -RequiredModules @('Az.Accounts', 'Az.Resources', 'Az.Compute', 'Az.Network') -OptionalModules @('Az.Migrate')
 
 Write-Host ""
@@ -1880,10 +1959,8 @@ $SourceResourceGroup = Read-LabResourceGroupName -Name 'SourceResourceGroup' -Va
 $TargetResourceGroup = Read-LabResourceGroupName -Name 'TargetResourceGroup' -Value $TargetResourceGroup -Prompt 'Target resource group (landing zone for migrated VMs)' -Example 'rg-ces-target-01' -MissingHelp 'It is created by migrate-step1-setup-project.ps1.'
 $Location = Resolve-LabTargetNetworkLocation -Value $Location -ResourceGroupName $TargetResourceGroup
 $MigrateProjectName = Select-LabFromList -Name 'MigrateProjectName' -Value $MigrateProjectName -Options (Get-LabMigrateProjectNames -ResourceGroupName $SourceResourceGroup) -Kind ProjectName -Prompt 'Azure Migrate project' -EmptyHelp "Create the project in the portal (Module 1 section 1), then rerun migrate-step1-setup-project.ps1 with the same environment settings."
-if (-not [string]::IsNullOrWhiteSpace($Workload)) { $Workload = Resolve-LabReplicationWorkload $Workload }
-$Workload = Select-LabFromList -Name 'Workload' -Value $Workload -Options @('All', 'Agentless', 'AgentBased') -Kind Workload -Prompt 'Workload group (All = four VMs; Agentless = the Module 2 pair; AgentBased = the Module 3 pair)'
-
-# Vault/provider evidence must remain reachable even when a later sizing guard blocks.
+# Only Agentless can reach this Hyper-V pipeline. Vault/provider evidence remains
+# reachable even when a later sizing guard blocks the frontend preflight.
 $script:LabVaultReport.Inputs.Subscription = Format-LabSubscriptionId $script:LabSubscriptionId
 $script:LabVaultReport.Inputs.SourceResourceGroup = $SourceResourceGroup
 $script:LabVaultReport.Inputs.TargetResourceGroup = $TargetResourceGroup
@@ -2005,20 +2082,16 @@ foreach ($configuration in $vmConfigurations) {
 # ================================================================
 # WORKLOAD GROUP FILTER
 # ================================================================
-# Modules 2 and 3 are parallel branches off Module 1: Module 2 takes
-# OnPrem-Web and OnPrem-Linux-Web all the way through cutover, Module 3
-# does the same for OnPrem-SQL and OnPrem-Linux-App. -Workload narrows
-# this script to one of those branches so the lab state can be advanced
-# one module at a time. All is the original behaviour.
-$LabWorkloadGroups = @{
-    Agentless  = @("OnPrem-Web", "OnPrem-Linux-Web")
-    AgentBased = @("OnPrem-SQL", "OnPrem-Linux-App")
+# Full four-role sizing above is planning only. Only the frontend method reaches
+# Hyper-V source checks; SQL/App use Module 3's manual modern/Mobility route.
+# Both pairs must be configured before tests and share final cutover in Module 3 section 11.
+$selected = $methodHandoff.SelectedWorkloads
+$vmConfigurations = @($vmConfigurations | Where-Object { $selected -contains $_.DisplayName })
+if ($Workload -ne 'Agentless' -or $vmConfigurations.Count -ne 2 -or
+    @($vmConfigurations | Where-Object { $_.DisplayName -notin @('OnPrem-Web', 'OnPrem-Linux-Web') }).Count -gt 0) {
+    throw '[backend-contract] Only the two frontend workloads may enter Hyper-V source preflight. No replication writes were attempted.'
 }
-if ($Workload -ne "All") {
-    $selected = $LabWorkloadGroups[$Workload]
-    $vmConfigurations = @($vmConfigurations | Where-Object { $selected -contains $_.DisplayName })
-    Write-Host "Workload filter: $Workload -> $($selected -join ', ')" -ForegroundColor Cyan
-}
+Write-Host "Workload filter: $Workload -> $($selected -join ', ')" -ForegroundColor Cyan
 
 # ================================================================
 Write-Section "Step 3: Hyper-V Replication Preflight (read-only)"
@@ -2066,8 +2139,8 @@ function Get-LabReplicationApiDecision {
 # Hyper-V path is the portal. ASR HyperVToAzure is DR, not a verified replacement against
 # a Migrate-created vault; never create a separate vault/policy or guess a resource name.
 Write-StepHeader -Step 0 -Title 'Read-only Hyper-V replication capability and identity preflight'
-Write-Host 'Module coverage requested: Module 2, sections 5-7; Module 3, sections 8-9, according to the selected workload.' -ForegroundColor Cyan
-Write-Host 'Step 4 and Step 5 remain separate; use the SAME -Workload value. No test, cleanup, cutover or source shutdown runs here.' -ForegroundColor Yellow
+Write-Host 'Frontend-only preflight: follow Module 2 sections 4-8 manually; configure SQL/App in Module 3 before either test walkthrough.' -ForegroundColor Cyan
+Write-Host 'Hold one shared final cutover for Module 3 section 11. No test, cleanup, cutover or source shutdown runs here.' -ForegroundColor Yellow
 
 $script:LabReplicationStage = 'installed-command-contracts'
 $discoveryCommand = Get-Command -Name Get-AzMigrateDiscoveredServer -ErrorAction SilentlyContinue
@@ -2161,16 +2234,16 @@ Write-NextSteps @(
     'If a selected VM already replicates, inspect and reuse that exact source VM/host entry; do not overwrite it to match a recommendation.'
     'Monitor ONLY this selected set in the portal. Submission or an in-progress job is not replication readiness; there is no fixed completion-time or cost promise.'
     'If a previous attempt may have submitted a job, inspect the project replication jobs and live selected-source state before retrying; a failed lookup does not authorize creation.'
-    "Step 4 and Step 5 remain separate; use the SAME -Workload $Workload. They are NOT run or authorized by this script."
-    'The current Step 4/5 PowerShell methods are VMware-specific; Hyper-V script support is NOT verified. Use the portal Hyper-V test, cleanup and cutover workflow instead.'
-    'For Hyper-V, use the documented portal test migration, test cleanup and migrate actions only after every selected source is healthy and initial replication is complete. Separate script support must be verified before use.'
+    'Follow Module 2 sections 7-8 for frontend monitoring/test only after SQL/App replication is configured through the separate Module 3 modern/Mobility path.'
+    'Use the manual portal stages in the modules, not unverified Step 4/5 automation. No test, cleanup or cutover is run or authorized here.'
+    'Keep both pairs replicating and hold final cutover for the one shared maintenance window in Module 3 section 11; frontend readiness alone does not authorize application cutover.'
 )
 } else {
     Write-NextSteps @(
         'Read-only inventory only: inspect this existing project/vault, actual target VNet region and any region lock in the portal. No replacement vault is authorized.'
         'Configuration guidance is withheld until the existing vault region matches the actual target VNet and provisioning is Succeeded. Provider/replication inventory is not readiness.'
         'Inspect existing replication/jobs using exact source VM GUID and registered Hyper-V host; do not reinitialize, overwrite or resize existing replication.'
-        "Step 4 and Step 5 remain separate; use the SAME -Workload $Workload. They are NOT run or authorized by this script."
+        'Follow the manual module stages after resolving blockers. No test, cleanup or cutover is authorized; hold the shared final window for Module 3 section 11.'
     )
 }
 $script:LabReplicationStage = 'backend-contract'
