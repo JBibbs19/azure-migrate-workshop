@@ -3,8 +3,8 @@
 Deploy the TD SYNNEX Cloud Enablement Services Hyper-V workshop.
 .DESCRIPTION
 Creates one Standard-security Windows host and provisions four nested workload VMs
-(two Windows, two Linux) that behave as one small-business environment, plus a separate
-staged standalone helper that creates the replication Windows OS VM later in Module 3. Optional discovery archive staging starts alongside OS image preparation
+(two Windows, two Linux) that behave as one small-business environment. All four use the
+existing Hyper-V host provider for migration. Optional discovery archive staging starts alongside OS image preparation
 on the host's own disk; Module 1 imports it manually. This script creates billable Azure resources.
 Use a new dedicated resource group. Existing groups are refused intentionally.
 Process timing starts after parameter binding and includes preflight and user prompts.
@@ -478,38 +478,6 @@ function Read-LabHostConfiguration {
         throw 'Host health helpers are missing or incompatible. Obtain the complete workshop checkout.'
     }
     $content = $content.Replace('# LAB_HEALTH_HELPERS', $health)
-    $replication = [IO.File]::ReadAllText((Join-Path $scriptsRoot 'host/prepare-replication.ps1'), [Text.Encoding]::UTF8)
-    $hostTokens = $null; $hostErrors = $null
-    $hostAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$hostTokens, [ref]$hostErrors)
-    if ($hostErrors.Count) { throw 'Host source syntax invalid before standalone helper assembly.' }
-    $standaloneFunctions = @()
-    foreach ($name in @('Write-Log','Expand-LabTextTemplate','Set-LabReservation','Create-WindowsGuestVM','Wait-ForGuestVM')) {
-        $matches = @($hostAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
-        if ($matches.Count -ne 1) { throw "Missing/ambiguous standalone Windows helper $name." }
-        $definition = $matches[0].Extent.Text
-        if ($name -ceq 'Create-WindowsGuestVM') {
-            $begin = $definition.IndexOf('    $existingVM = Get-VM -Name $VMName')
-            $end = $definition.IndexOf('    Write-Log "Creating Windows VM')
-            if ($begin -lt 0 -or $end -le $begin) { throw 'Standalone fresh-only VM guard assembly failed.' }
-            # The later helper has no legacy source-rebuild/delete branch at all.
-            $definition = $definition.Substring(0,$begin) + "    if (Get-VM -Name `$VMName -ErrorAction SilentlyContinue) { throw 'Existing appliance VM is never replaced.' }`n" + $definition.Substring($end)
-        }
-        $standaloneFunctions += $definition
-    }
-    foreach ($marker in @('# LAB_HEALTH_HELPERS','# LAB_WINDOWS_GUEST_HELPERS')) {
-        if (([regex]::Matches($replication, [regex]::Escape($marker))).Count -ne 1) { throw 'Standalone replication template markers invalid.' }
-    }
-    $replication = $replication.Replace('# LAB_HEALTH_HELPERS',$health).Replace('# LAB_WINDOWS_GUEST_HELPERS',($standaloneFunctions -join "`n`n"))
-    $replicationTokens = $null; $replicationErrors = $null
-    $null = [System.Management.Automation.Language.Parser]::ParseInput($replication, [ref]$replicationTokens, [ref]$replicationErrors)
-    if ($replicationErrors.Count) { throw 'Standalone replication helper syntax invalid.' }
-    $replicationBytes = [Text.UTF8Encoding]::new($false).GetBytes($replication)
-    $replicationSha = [Security.Cryptography.SHA256]::Create()
-    try { $replicationHash = ([BitConverter]::ToString($replicationSha.ComputeHash($replicationBytes))).Replace('-','').ToLowerInvariant() } finally { $replicationSha.Dispose() }
-    foreach ($marker in @('__LAB_REPLICATION_HELPER_B64__','__LAB_REPLICATION_HELPER_SHA256__')) {
-        if (([regex]::Matches($content, [regex]::Escape($marker))).Count -ne 1) { throw 'Standalone replication transport markers invalid.' }
-    }
-    $content = $content.Replace('__LAB_REPLICATION_HELPER_B64__',[Convert]::ToBase64String($replicationBytes)).Replace('__LAB_REPLICATION_HELPER_SHA256__',$replicationHash)
     # Always deliver the controller. After host readiness, deployment runs the protected
     # required network stage; CPU remains a separate optional action.
     $trafficPath = Join-Path $scriptsRoot 'enable-lab-traffic.ps1'
@@ -596,6 +564,9 @@ function Read-LabHostConfiguration {
     try { $actualHash = ([BitConverter]::ToString($sha.ComputeHash($runtimeBytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
     $content = $content.Replace('__TOMCAT_RUNTIME_PAYLOAD__', [Convert]::ToBase64String($runtimeBytes))
     $content = $content.Replace('__TOMCAT_RUNTIME_SHA256__', $actualHash)
+    if ($content -match '__(LAB_[A-Z_]+|EMPLOYEE_(WORKER|CONTROL|UNIT)_(B64|SHA256)|TOMCAT_RUNTIME_(PAYLOAD|SHA256))__|(?m)^# LAB_HEALTH_HELPERS\r?$') {
+        throw 'Unresolved host transport placeholder; obtain the complete compatible workshop checkout.'
+    }
     $tokens = $null; $errors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw 'The host configuration script has syntax errors. Obtain the reviewed workshop revision.' }
@@ -1006,16 +977,18 @@ if ($existingGroup) {
     if (-not $existingGroup.Tags -or $existingGroup.Tags['Workshop'] -ne 'TD-SYNNEX-CES-HyperV') {
         throw "Resource group '$ResourceGroupName' exists and is not tagged as this workshop. Use a new, dedicated source resource group."
     }
-    if ($existingGroup.Tags['Revision'] -ne 'PreparedReplication-2TiB-v1') {
-        throw 'This revision needs a fresh, separate 2048-GiB source deployment; an older lab is never resized or retrofitted.'
+    if ($existingGroup.Tags['Revision'] -ne 'HyperVStudent-512GiB-v1') {
+        throw 'This revision needs a fresh, separate 512-GiB source deployment; an older lab is never resized or retrofitted.'
     }
     $existingHost = Get-AzVM -ResourceGroupName $ResourceGroupName -Name 'HyperVHost' -ErrorAction SilentlyContinue
     if (-not $existingHost) {
         throw "Resource group '$ResourceGroupName' exists but has no HyperVHost. Inspect and remove it, then deploy into a clean group."
     }
     $completed = Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName 'HyperVHost' -RunCommandName $runNameProbe -Expand InstanceView -ErrorAction SilentlyContinue
-    if ([int]$existingHost.StorageProfile.OsDisk.DiskSizeGB -ne 2048 -or [string]$existingHost.StorageProfile.OsDisk.ManagedDisk.StorageAccountType -ne 'Premium_LRS') {
-        throw 'Existing host OS storage differs from this 2048-GiB Premium SSD revision; no in-place resize or storage change is allowed.'
+    if ([int]$existingHost.StorageProfile.OsDisk.DiskSizeGB -ne 512 -or
+        [string]$existingHost.StorageProfile.OsDisk.ManagedDisk.StorageAccountType -ne 'Premium_LRS' -or
+        @($existingHost.StorageProfile.DataDisks).Count -ne 0) {
+        throw 'Existing host OS storage differs from this 512-GiB Premium SSD revision; no in-place resize or storage change is allowed.'
     }
     if ($completed -and [string]$completed.InstanceView.ExecutionState -notin @('Succeeded','Failed','TimedOut','Canceled','Cancelled')) {
         throw 'Previous host setup is running or its termination is unknown. Preserve ConfigureWorkshop and resources; inspect it before any resume.'
@@ -1029,7 +1002,7 @@ if ($existingGroup) {
 $ErrorActionPreference = 'Stop'
 if (Test-Path 'C:\AzMigrateLab\setup-complete.json') { throw 'Completed host: deployment replay is forbidden.' }
 $log = 'C:\AzMigrateLab\setup-log.txt'
-if ((Test-Path $log) -and -not @(Get-Content -LiteralPath $log | Where-Object { $_ -ceq 'LAB_BUILD|ubuntu2404-prepared-replication-v1' }).Count) {
+if ((Test-Path $log) -and -not @(Get-Content -LiteralPath $log | Where-Object { $_ -ceq 'LAB_BUILD|ubuntu2404-hyperv-student-v1' }).Count) {
     throw 'Different or unknown host build: no retrofit or adoption.'
 }
 Write-Output 'LAB_RESUME_ALLOWED'
@@ -1038,7 +1011,7 @@ Write-Output 'LAB_RESUME_ALLOWED'
     $probeResult = Wait-LabJob $probeJob 'Check incomplete host identity' -TimeoutSeconds 300 -HealthPath $HealthPath
     $null = Assert-LabRunResult $probeResult 'LAB_RESUME_ALLOWED'
     $resumeDeployment = $true
-    Write-Host "Resuming the recognized incomplete deployment in '$ResourceGroupName'. Existing resources are reused; only unfinished source workloads may be rebuilt. A prepared replication appliance is never recreated."
+    Write-Host "Resuming the recognized incomplete deployment in '$ResourceGroupName'. Existing resources are reused; only unfinished source workloads may be rebuilt. No completed lab is resized or retrofitted."
 }
 # The appliance VHD is an ~11 GB download and nothing in Module 0 needs it. A learner should
 # skip it: Module 1 downloads the appliance from the Azure Migrate project when it is required,
@@ -1071,7 +1044,7 @@ foreach ($provider in @('Microsoft.Compute','Microsoft.Network','Microsoft.Stora
 }
 Write-Host "Creating source lab in the selected subscription, region $Location."
 Write-LabHealth 'Source deployment' Preparing 0 'Preflight passed. Starting dedicated workshop resource creation.' $HealthPath
-$tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training'; Revision = 'PreparedReplication-2TiB-v1' }
+$tags = @{ Workshop = 'TD-SYNNEX-CES-HyperV'; Team = 'Cloud Enablement Services'; Purpose = 'Training'; Revision = 'HyperVStudent-512GiB-v1' }
 $vmName = 'HyperVHost'
 $diskName = 'WinServerBase-temp'
 # Resolved by the host during the store step, since only the host knows which letters are free.
@@ -1117,7 +1090,7 @@ try {
     $vm = New-AzVMConfig -VMName $vmName -VMSize $VMSize -SecurityType Standard
     $vm = Set-AzVMOperatingSystem -VM $vm -Windows -ComputerName $vmName -Credential $credential -ProvisionVMAgent -EnableAutoUpdate
     $vm = Set-AzVMSourceImage -VM $vm -PublisherName $windowsImages.Host.Publisher -Offer $windowsImages.Host.Offer -Skus $windowsImages.Host.Sku -Version $windowsImages.Host.Version
-    $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 2048
+    $vm = Set-AzVMOSDisk -VM $vm -Name "$vmName-osdisk" -CreateOption FromImage -StorageAccountType Premium_LRS -DiskSizeInGB 512
     $vm = Add-AzVMNetworkInterface -VM $vm -Id $nic.Id
     $vm = Set-AzVMBootDiagnostic -VM $vm -Enable
     $job = New-AzVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $vm -Tag $tags -AsJob
@@ -1158,11 +1131,11 @@ $ErrorActionPreference = 'Stop'
 $requested = '__DRIVE__'
 $storeBytes = __STOREGB__GB
 $label = 'ApplianceStore'
-$guestReserveBytes = 140GB + 700GB
+$guestReserveBytes = 140GB
 $bootPartition = Get-Partition -DriveLetter C -ErrorAction Stop
 $bootDisk = Get-Disk -Number $bootPartition.DiskNumber -ErrorAction Stop
-if (-not $bootDisk.IsBoot -or [string]$bootDisk.PartitionStyle -ne 'GPT' -or [math]::Abs([double]$bootDisk.Size - 2048GB) -gt 1MB) {
-    throw 'This fresh revision requires the single 2048-GiB GPT host OS disk; no additional data disk or in-place retrofit is provisioned.'
+if (-not $bootDisk.IsBoot -or [string]$bootDisk.PartitionStyle -ne 'GPT' -or [math]::Abs([double]$bootDisk.Size - 512GB) -gt 1MB) {
+    throw 'This fresh revision requires the single 512-GiB GPT host OS disk; no additional data disk or in-place retrofit is provisioned.'
 }
 $existing = Get-Volume -FileSystemLabel $label -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existing) {
@@ -1195,8 +1168,8 @@ if ($existing) {
     # store leaves exactly the store free, whether that means growing C: or shrinking it.
     $targetSize = $supported.SizeMax - $storeBytes
     $usedBytes = $system.Size - (Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
-    # Reserve measured host usage plus four fixed workload disks, full new appliance
-    # virtual capacity (including dynamic data growth), and the existing base/tool headroom.
+    # Retain the original budget: measured host usage, four fixed workload disks and
+    # 60 GiB for base images/tools. Host setup checks actual image-conversion overlap too.
     $needed = $guestReserveBytes + 60GB
     $toGB = { param($b) [math]::Round($b / 1GB, 1) }
     if ($targetSize -lt $supported.SizeMin) {
@@ -1204,7 +1177,7 @@ if ($existing) {
         throw ("Cannot reserve __STOREGB__ GB for the appliance store. C: is $(& $toGB $system.Size) GB and can range from $(& $toGB $supported.SizeMin) GB to $(& $toGB $supported.SizeMax) GB on this disk, so at most $maxStore GB can be set aside. Deploy with a larger OS disk, or pass -ApplianceStoreSizeGB with a value at or below $maxStore.")
     }
     if (($targetSize - $usedBytes) -lt $needed) {
-        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140-GiB workloads, 700-GiB appliance disks and base/tool headroom require. Deploy with a larger OS disk or a smaller -ApplianceStoreSizeGB.")
+        throw ("Reserving __STOREGB__ GB would leave C: with $(& $toGB ($targetSize - $usedBytes)) GB free, below the $(& $toGB $needed) GB the 140-GiB fixed workloads and 60-GiB base/tool headroom require. Reduce -ApplianceStoreSizeGB within the documented discovery requirements, or stop and review this fresh deployment; storage is not expanded automatically.")
     }
     if ($targetSize -ne $system.Size) {
         $action = if ($targetSize -gt $system.Size) { 'Extending' } else { 'Shrinking' }
@@ -1222,14 +1195,12 @@ New-Item -ItemType Directory -Path "${letter}:\Appliance" -Force | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not grant the lab administrator access to the appliance store.' }
 $system = Get-Volume -DriveLetter C -ErrorAction Stop
 # On incomplete resumes existing files already consume space. Require every remaining
-# reserved byte without counting allocated workload/appliance files twice.
+# reserved byte without counting allocated fixed workload files twice.
 $reservedPaths = @(
     @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Web.vhdx'; Bytes=40GB },
     @{ Path='C:\AzMigrateLab\VHDs\OnPrem-SQL.vhdx'; Bytes=40GB },
     @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Linux-Web.vhdx'; Bytes=30GB },
-    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Linux-App.vhdx'; Bytes=30GB },
-    @{ Path='C:\AzMigrateLab\ReplicationAppliance\OS.vhdx'; Bytes=80GB },
-    @{ Path='C:\AzMigrateLab\ReplicationAppliance\Data.vhdx'; Bytes=620GB }
+    @{ Path='C:\AzMigrateLab\VHDs\OnPrem-Linux-App.vhdx'; Bytes=30GB }
 )
 $remainingReserve = 60GB
 foreach ($entry in $reservedPaths) {
@@ -1260,10 +1231,14 @@ Write-Output 'APPLIANCE_STORE_READY'
         $null = Wait-LabJob $job 'Create guest image disk' -TimeoutSeconds ($AzureOperationTimeoutMinutes * 60) -HealthPath $HealthPath
     }
     $diskCreated = $true
+    $imageDisk = Get-AzDisk -ResourceGroupName $ResourceGroupName -DiskName $diskName -ErrorAction Stop
+    if ([int]$imageDisk.DiskSizeGB -lt 1 -or [int]$imageDisk.DiskSizeGB -gt 40) {
+        throw 'The actual temporary Windows source image must fit each 40-GiB workload disk. No image size or extra storage is guessed.'
+    }
     $access = Grant-AzDiskAccess -ResourceGroupName $ResourceGroupName -DiskName $diskName -Access Read -DurationInSecond 18000
     $parameters = @(
         @{ Name = 'AdminUsername';       Value = $AdminUsername }
-        @{ Name = 'HostVMId';            Value = [string](Get-AzVM -ResourceGroupName $ResourceGroupName -Name $vmName -ErrorAction Stop).VmId }
+        @{ Name = 'WindowsImageSizeGB';  Value = [string]$imageDisk.DiskSizeGB }
         @{ Name = 'IncludeApplianceVhd'; Value = $IncludeApplianceVhd }
         @{ Name = 'ApplianceVhdSha256';  Value = $ApplianceVhdSha256 }
     )
@@ -1285,14 +1260,14 @@ Write-Output 'APPLIANCE_STORE_READY'
     $setupResult = Wait-LabManagedSetup -ReadStatus {
         Get-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $vmName -RunCommandName $runName -Expand InstanceView -ErrorAction Stop
     } -Observation $setupObservation -TimeoutSeconds (($GuestSetupTimeoutMinutes * 60) + 600) -HealthPath $HealthPath
-    if ([string]$setupResult.Output -cnotmatch '(?m)^LAB_REPLICATION_HELPER_STAGED\r?$') { throw 'Replication helper/base staging was not confirmed; deployment is incomplete.' }
+    if ([string]$setupResult.Output -cnotmatch '(?m)^LAB_HOST_STORAGE_READY\r?$') { throw 'Final measured host storage headroom was not confirmed; deployment is incomplete.' }
     $setupPassed = $true
     Write-Host 'Host preparation complete. Wait for the deployment process end/timing message before connecting to HyperVHost.'
     Write-Host "Workload setup verified. Host public IP: $($pip.IpAddress). Host login: $AdminUsername."
     Write-Host 'Windows guests: Administrator and the supplied lab password. Linux guests: the supplied username/password.'
     Write-Host 'Contoso Order Desk runs on Tomcat 10.1 / OpenJDK 17 at .13:3000; initial SQL and Nginx proxy readiness passed.'
     Write-Host 'Four workload VMs are running: OnPrem-Web (.10), OnPrem-SQL (.11), OnPrem-Linux-Web (.12) and OnPrem-Linux-App (.13).'
-    Write-Host 'Module 3 replication helper and original generalized Windows base are staged; MigrateRepl is NOT created yet. After assessment, run C:\AzMigrateLab\prepare-replication.ps1 in elevated Windows PowerShell on HyperVHost. It prompts securely and prepares the fixed-spec VM; appliance installation/registration remains manual.'
+    Write-Host 'All four workloads use the existing Hyper-V host provider. Module 1 imports the discovery appliance manually; no additional replication VM or guest Mobility Service is provisioned.'
     if ($stagingSummary) { Write-Host $stagingSummary }
     Write-Host 'Guest disks are fixed: OnPrem-Web 40 GB, OnPrem-SQL 40 GB, OnPrem-Linux-Web 30 GB, OnPrem-Linux-App 30 GB.'
     Write-Host 'Traffic controller/settings and CPU assets are staged at C:\AzMigrateLab. Required network installation/start/verification follows automatically, before cleanup and the deployment timing message. CPU remains optional afterward.'

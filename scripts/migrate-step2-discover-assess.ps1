@@ -2419,14 +2419,14 @@ Read-Host "Press Enter to continue to Step 2..."
 $workloadVMNames = @('OnPrem-Web', 'OnPrem-SQL', 'OnPrem-Linux-Web', 'OnPrem-Linux-App')
 $hostVMText = Invoke-HostScript -Script 'Get-VM | Select-Object -ExpandProperty Name' -Stage 'List VMs on the Hyper-V host'
 $hostVMNames = @($hostVMText -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$applianceCandidates = @($hostVMNames | Where-Object { $workloadVMNames -notcontains $_ -and $_ -notin @('HyperVHost','MigrateRepl') })
+$applianceCandidates = @($hostVMNames | Where-Object { $workloadVMNames -notcontains $_ -and $_ -notin @('HyperVHost') })
 
 $ApplianceVMName = Select-LabFromList -Name 'ApplianceVMName' -Value $ApplianceVMName `
     -Options $applianceCandidates -Kind VMName -AllowNew `
     -NewLabel 'Not there yet -- name it and this script will download and import it' `
     -Prompt 'Azure Migrate appliance VM on the Hyper-V host' -Example 'MigrateAppl'
-if ($ApplianceVMName -in @('HyperVHost','MigrateRepl') -or $ApplianceVMName -in $workloadVMNames) {
-    throw 'Discovery appliance must have its own identity; HyperVHost, MigrateRepl and the four workload VMs cannot be reused as MigrateAppl.'
+if ($ApplianceVMName -in @('HyperVHost') -or $ApplianceVMName -in $workloadVMNames) {
+    throw 'Discovery appliance must have its own identity; HyperVHost and the four workload VMs cannot be reused as MigrateAppl.'
 }
 
 # Azure Migrate applies its own rule to the name entered under "Generate project key":
@@ -3159,7 +3159,7 @@ if (-not $assessmentReady) {
     Write-Host "  2. Inspect existing '$groupName' / '$assessmentName' first; use classic Assessment tools > Assess > Azure VM if needed" -ForegroundColor White
     Write-Host "  3. Target location: $Location; sizing: As on-premises; VM series: Include all" -ForegroundColor White
     Write-Host "     Currency: $AssessmentCurrency; offer: $AzureOfferCode; Azure Hybrid Benefit: $AzureHybridBenefit" -ForegroundColor White
-    Write-Host "  4. Select exactly the four workloads (not HyperVHost, $ApplianceVMName or MigrateRepl); wait for Completed and review all four results" -ForegroundColor White
+    Write-Host "  4. Select exactly the four workloads (not HyperVHost or $ApplianceVMName); wait for Completed and review all four results" -ForegroundColor White
     Write-Host '  Missing solution association: review actual listed backend names and use -AssessmentProjectName.' -ForegroundColor White
     Write-Host '  Group/assessment name conflict: preserve it and choose unused -AssessmentGroupName / -AssessmentName.' -ForegroundColor White
     Write-Host '  Classic Azure VM assessment is default. Modern requires explicit -AssessmentMode Modern and remains experimental/deferred. No automatic fallback between modes.' -ForegroundColor Gray

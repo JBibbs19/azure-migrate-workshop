@@ -12,7 +12,7 @@ In this module you build the on-premises environment that the rest of the worksh
 
 In a real migration engagement this phase corresponds to **preparing the landing zone** — the target Azure environment that will host migrated workloads. Enterprise projects use [Azure Landing Zones](https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/) with management groups, policy-driven governance, hub-spoke networking and identity integration. That level of infrastructure is out of scope for a hands-on migration lab.
 
-Instead, this module deploys a **self-contained simulation of an on-premises datacenter** inside a single Azure VM using nested Hyper-V virtualization. `deploy-lab.ps1` provisions the host, virtual networking and **only the four workload guests**, while staging a standalone helper and retaining the original generalized Windows Server 2022 base image. After assessment, Module 3 runs that helper to create clean `MigrateRepl` automatically; there is no manual guest-sizing/build exercise. You connect through RDP afterwards to verify this module's staged result. Microsoft replication-appliance installation and registration remain manual in Module 3.
+Instead, this module deploys a **self-contained simulation of an on-premises datacenter** inside a single Azure VM using nested Hyper-V virtualization. `deploy-lab.ps1` provisions the host, virtual networking and **four workload guests**. You connect through RDP afterwards to verify the host and applications. Module 1 separately imports the discovery appliance; Modules 2 and 3 use the same Azure Migrate Hyper-V host provider for all four workload VMs.
 
 **Why this approach?** It gives every participant an isolated, reproducible "datacenter" with realistic workloads (IIS, SQL Server, Nginx, Tomcat) while keeping cost and complexity low. The trade-off is that it does not exercise subscription-level governance, which you would address through Azure Landing Zones in a production engagement.
 
@@ -29,9 +29,9 @@ This will serve as the **source environment**. You will build the destination la
 
 All four guests run on an internal Hyper-V switch (`intSwitch`) with NAT on the `192.168.0.0/24` subnet. The host is reachable from the guests at `192.168.0.1`. Guest addresses are DHCP reservations, not static guest configuration, so their NICs can obtain Azure addresses after migration.
 
-Deployment stages the helper and original clean base image for infrastructure guest **`MigrateRepl`**, which is created **later in Module 3, after assessment**: DHCP-reserved `192.168.0.21`, Windows Server 2022 Desktop Experience English (`en-*`), 8 shared vCPUs, **16 GiB static RAM**, 80-GiB OS VHDX and separate 620-GiB local data VHDX. It is not a fifth workload and must not be assessed, replicated, used for network/CPU generators or included in the workload-backup exercise. Discovery `MigrateAppl` at `.20` is still imported manually in Module 1.
+Discovery **`MigrateAppl` at `192.168.0.20`** is imported manually in Module 1 for inventory and assessment, not disk replication. It is infrastructure, not a fifth workload or a traffic/CPU/backup target.
 
-**Count the layers separately:** initial deployment creates **four nested workload VMs**. Importing `MigrateAppl` in Module 1 brings the nested total to **five**. After assessment, Module 3's standalone helper creates `MigrateRepl`, bringing the total to **six**. Azure still has **one source host VM and one persistent 2-TiB managed OS disk**; the replication guest's two VHDXs are files on that disk, not two Azure managed-disk resources. The existing temporary `WinServerBase-temp` disk is used during image preparation and removed when setup termination is confirmed. This is not a count of networking or later migration resources. Only **four workload identities** enter assessment, replication and coordinated cutover.
+**Count the layers separately:** initial deployment creates **four nested workload VMs**. Importing `MigrateAppl` in Module 1 brings the nested total to **five**. Azure has **one source host VM and one persistent 512-GiB managed OS disk**; the nested disks and discovery `ApplianceStore` partition are backed by that host disk, not separate Azure managed-disk resources. The existing temporary `WinServerBase-temp` disk is used during image preparation and removed when setup termination is confirmed. These counts do not enumerate networking or later migration resources. Only **four workload identities** enter assessment, replication and coordinated cutover.
 
 ---
 
@@ -41,13 +41,13 @@ Every infrastructure choice in this lab was made deliberately. The table below d
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| **Host VM size** | `Standard_E8s_v7` | 8 vCPUs, 64 GiB RAM with nested virtualization. The four workloads retain 12 GiB total static memory; Module 1's discovery appliance needs 16 GiB and Module 3's later `MigrateRepl` adds another 16 GiB. The standalone helper checks actual available memory and discovery/host reserve at creation time, not just nominal subtraction. `MigrateRepl`'s eight vCPUs share the host's eight; they are not additional dedicated Azure cores. A replacement host must meet the same 8-vCPU / 64-GiB floor and support nesting. |
+| **Host VM size** | `Standard_E8s_v7` | 8 vCPUs, 64 GiB RAM with nested virtualization. The four workloads retain 12 GiB total static memory and Module 1's discovery appliance needs 16 GiB; actual host overhead and available memory still require verification. A replacement host must meet the same 8-vCPU / 64-GiB floor and support nesting. |
 | **Host image and security** | Windows Server 2022, x64 Gen 2, NVMe-compatible image, Standard security | Matches the default host's requirements for this nested Hyper-V lab. The Esv7 series requires an image that supports its NVMe disk controller. |
-| **OS disk** | One 2 TiB (2048 GiB) Premium SSD, `Premium_LRS` | Holds the host OS, Hyper-V, base images, unchanged 140 GB of fixed workload VHDs, retained 100-GiB discovery partition and `MigrateRepl`'s 80+620-GiB VHDXs. No additional Azure managed data disk is created. Before carving the discovery partition, deployment budgets measured host usage, workload disks, the full 700-GiB replication guest capacity, base-image allowance and safe free-space headroom; a dynamic VHDX is not permission to oversubscribe storage. |
+| **OS disk** | One 512-GiB Premium SSD, `Premium_LRS` | Holds the host OS, Hyper-V, base/tool files, unchanged 140 GB of fixed workload VHDs and the 100-GiB discovery partition. No additional Azure managed data disk is created. Deployment checks measured host usage, image-preparation overlap and free-space headroom before partitioning/provisioning and fails closed if insufficient; the nominal disk size alone does not prove capacity. Preserve at least 30 GiB measured free on host `C:` at final readiness, in addition to checking the discovery store separately. |
 | **Guest disk type** | Fixed, not dynamic | Each guest VHD is allocated in full at creation: 40 GB for each Windows guest and 30 GB for each Linux guest, 140 GB in total. Host capacity is therefore known from the start and does not shift under the workshop as guests write. A dynamic disk also expands on write, and that write amplification appears as erratic disk I/O in the Module 1 performance-based assessment. The cost is deployment time — see Section 4. |
 | **Guest memory** | Static, not dynamic | Fixed startup memory with dynamic memory disabled, for the same reason: the assessment should observe a stable machine, not one whose memory the hypervisor is resizing. The four guests use 12 GB in total. |
-| **Appliance storage** | Retained 100-GiB discovery `ApplianceStore` partition, first free drive letter (normally `E:`) | Contains the `Appliance` staging/import folder on the single host OS disk. It is not a separate managed disk and does not hold the new replication guest. `MigrateRepl` uses host `C:\AzMigrateLab\ReplicationAppliance\OS.vhdx` (80 GiB fixed), `Data.vhdx` (620 GiB dynamic, full growth budgeted), and the `VM` configuration subdirectory. Both are persistent local SCSI guest disks, not Azure cache/temporary disks. |
-| **Appliance delivery** | Discovery import in Module 1; automated replication-VM creation later in Module 3 | Import the published Generation 1 discovery appliance unchanged in Module 1. Initial deployment only stages `C:\AzMigrateLab\prepare-replication.ps1` and retains `C:\AzMigrateLab\VHDs\WindowsServer2022-Base.vhdx` with recorded SHA256. After assessment, the helper creates clean `MigrateRepl` from that same generalized base, never a workload clone, without Hyper-V, IIS or AD DS roles. Microsoft appliance software, project registration and Mobility Service are still installed/configured manually in Module 3. |
+| **Appliance storage** | 100-GiB discovery `ApplianceStore` partition, first free drive letter (normally `E:`) | Contains the `Appliance` staging/import folder on the single host OS disk. It is not a separate managed disk or Azure temporary storage. Check the actual reported drive and enough space for the published archive, full extraction and any import copy; at least 30 GB free is required for download/extraction, and the current archive/layout may require more. |
+| **Appliance delivery** | Discovery import in Module 1 | Import the published Generation 1 discovery appliance unchanged, with the optional recommended publisher SHA256 comparison. Deployment can optionally stage its download/extraction but does not import or register it. All workload migration uses the HyperVHost provider; discovery and replication remain separate roles. |
 | **Guest network** | `192.168.0.0/24` with host NAT | Simulates an isolated on-premises network. NAT provides outbound internet access, required for package downloads during provisioning, without exposing guests to inbound traffic from the Azure VNet. This mirrors how many on-premises datacenters sit behind NAT with no direct internet-facing exposure. This Hyper-V NAT is not an Azure NAT gateway. |
 | **Azure network plan** | Source `10.0.0.0/16`; later target `10.1.0.0/16` and test `10.2.0.0/16` | Keeps source, target and test address spaces separate. No Azure NAT gateways are automatically built by the lab. |
 | **VM generation** | Gen 2 | UEFI boot, vTPM support and larger OS disk support. Gen 2 is required for several Azure features post-migration (Trusted Launch, Confidential VMs), so starting here avoids a generation conversion later. This applies to the four workloads; the published appliance template is Gen 1 and is a separate choice. |
@@ -80,9 +80,9 @@ Use a non-production subscription such as Dev/Test or Sandbox. Azure Policy can 
 
 ### 3.2 — Quota Verification
 
-The default source host needs **8 Azure vCPUs**. The four nested workloads, Module 1's discovery appliance and Module 3's later `MigrateRepl` consume the host's resources; they are not separate Azure VM allocations. Regional vCPU quota, the selected VM family's quota and VM-count quota all matter. Deallocating an Azure VM does not release its vCPU quota.
+The default source host needs **8 Azure vCPUs**. The four nested workloads and Module 1's discovery appliance consume the host's resources; they are not separate Azure VM allocations. Regional vCPU quota, the selected VM family's quota and VM-count quota all matter. Deallocating an Azure VM does not release its vCPU quota.
 
-The `B2s` / `B2ms` / `B1ms` / `B1ms` examples total **6 vCPUs**; an all-four two-vCPU example totals **8**. These are **not approved target-size selections**. In particular, all actual source guests have two vCPUs, so the one-vCPU Linux examples require manual support/downsize review. Calculate actual target/test quota from the approved per-role selections and overlap; do not infer them from script menus. The later replication guest shares the source host; reserve its storage upfront and check actual memory/storage again when its helper runs, not as a separate Azure VM quota allocation.
+The `B2s` / `B2ms` / `B1ms` / `B1ms` examples total **6 vCPUs**; an all-four two-vCPU example totals **8**. These are **not approved target-size selections**. In particular, all actual source guests have two vCPUs, so the one-vCPU Linux examples require manual support/downsize review. Calculate actual target/test quota from the approved per-role selections and overlap; do not infer them from script menus. Source host storage and actual memory are checked independently from target/test Azure quota; a quota result is not disk or memory readiness.
 
 You can review quota in the portal or with PowerShell. Use either method.
 
@@ -194,43 +194,37 @@ Setup also needs HTTPS access to the Windows image and package sources, Ubuntu c
 
 **Expected Result:** You have a permitted management path and access to the setup downloads. You can supply one public IPv4 address, optionally with `/32`, for the host's RDP rule.
 
-### 3.6 — Two-Method Resources and Isolation
+### 3.6 — Source Identities and Test Isolation
 
-Deployment builds the four-workload source lab and **stages**, but does not execute, the standalone helper for `MigrateRepl`. Its **single 2-TiB Premium SSD OS disk** backs the existing workloads and unchanged 100-GiB discovery `ApplianceStore` partition, with capacity reserved for the later 80/620-GiB replication VHDXs. After Module 1 assessment, Module 3's one elevated-host command creates the separate guest automatically from the retained original clean Windows base image. No additional Azure VM, public IP or managed data disk is required. Do not manually build another appliance VM, clone a workload, repartition/shrink existing guests or rerun deployment. Microsoft appliance installation and project registration remain student work.
+Deployment builds the four-workload source lab on one **512-GiB Premium SSD OS disk**, including its **100-GiB discovery `ApplianceStore` partition**. All four workload VMs use the **same Azure Migrate HyperVHost provider and source-host/project binding** in Modules 2–3. The discovery appliance is imported separately in Module 1; no additional replication VM or appliance disks are required. These instructions are for a fresh deployment, not a disk-shrink or in-place conversion procedure for an existing host.
 
 #### Hands-On Steps
 
 **Local workstation — lab register/worksheet:**
 
-1.  Choose unique names for new source, project, target, and test resources.
+1.  Choose unique names for new source, project, target and test resources.
 
-    Use the examples `rg-ces-target-01`, `vnet-ces-target-01`, `nsg-ces-target-01`, `vnet-ces-test-01` and `nsg-ces-test-01` consistently in your register, substituting your approved unique names where needed.
+    Use `rg-ces-target-01`, `vnet-ces-target-01`, `nsg-ces-target-01`, `vnet-ces-test-01` and `nsg-ces-test-01` consistently in your register, substituting approved unique names where needed.
 
 2.  Deploy a fresh source resource group and host using the command below, supplying your new source group name.
 
-    Keep the four guest names exactly as listed in Section 1, on this separate host. Their VM IDs must be new. Do not reuse, clone, or dual-protect previously replicated source VMs, or clone an already registered discovery/replication appliance. Use a clean deployment rather than assuming existing replication bindings can be cleared safely.
+    Keep the four guest names exactly as listed in Section 1. Their VM IDs must be new. Do not reuse/clone previously protected source VMs or an already registered discovery appliance; do not assume existing replication bindings can be safely cleared.
 
 3.  Record the new source host resource ID and the four new Hyper-V VM IDs before registration.
 
-4.  After deployment completes, verify the standalone helper and original generalized Windows Server 2022 base image are staged, using Section 5's checks. **Do not run the helper yet.** `MigrateRepl` is intentionally absent until Module 3, after discovery and assessment.
+4.  After deployment completes, verify all four workload VMs, application readiness, measured host/discovery-store free space and the required network traffic through Sections 5–6. A failed or unconfirmed capacity/readiness result means stop for review, not repartition, shrink volumes or replay a completed deployment.
 
-5.  Confirm the instructor-provided baseline qualification in the [README](../README.md#instructor-preparation--qualify-the-provided-baseline) and retain the staged-result/storage reservation evidence for Module 3.
+5.  Confirm the instructor-provided baseline qualification in the [README](../README.md#instructor-preparation--qualify-the-provided-baseline). Before replication, verify the actual supported Hyper-V host/source disk/boot configuration, Windows/Ubuntu versions and Azure target settings; an assessment Ready label alone is insufficient.
 
-    The later helper must create a clean Windows Server 2022 Desktop Experience English OS without Hyper-V, IIS or AD DS roles before the Microsoft installer. Never reuse `MigrateAppl`, a workload VM or a registered-appliance clone. If staging or qualification is unconfirmed, stop for the instructor; do not construct another VM, resize workload disks or replay deployment. This nested-training placement still needs instructor/vendor qualification; matching nominal resources alone is not certification.
+6.  Review actual target sizes and test/target overlap in Modules 2–3. All four sources have two vCPUs. Resolve any downsizing/support conflict manually; neither an assessment recommendation nor a script menu reserves capacity.
 
-6.  Review the actual target sizes and test/target overlap in Modules 2–3. B1/B2 examples are not approved choices: all four sources have two vCPUs. Resolve any downsizing or support conflict manually; neither an assessment recommendation nor a script menu reserves capacity.
+7.  Before enabling protection, verify the intended project, connected HyperVHost provider, source VM IDs and Migrate-managed migration-resource association. Module 3 **reuses the same registration** verified in Module 2. STOP on unknown or mismatched associations; do not re-register an already protected host, fill blank IDs or create a separate ASR DR relationship.
 
-7.  Before **either** method enables protection, obtain owner verification of the intended project, provider/appliance registrations, Migrate-managed vault associations and **current mixed-method compatibility**.
+8.  Keep the test VNet isolated from source and final-target networks **before any test VM first boots**. Record actual test VM/NIC identities and permit only approved test peers; stop/disarm inherited network generators and CPU workers before functional tests.
 
-    **Stop if the intended associations or compatibility cannot be verified.** Do not force both methods into a shared vault, declare them incompatible, silently create separate projects, guess a blank vault ID, or patch bindings/scripts. Resolve any required architecture change with the owner before proceeding.
+**Expected Result:** The lab register identifies four fresh workload identities, a verified source environment and one host-provider path, with source/project association and pre-boot test isolation required before migration.
 
-8.  Before installing Mobility Service, verify each SQL/App source's actual OS, architecture, guest storage/boot/security configuration and supported Mobility version; for Linux, include the exact running `uname -r` kernel. Follow Module 3's current support checks rather than assuming Ubuntu 24.04 or an assessment's Ready result is sufficient.
-
-9.  Keep the test VNet isolated from source and final-target networks **before any test VM first boots**. Record actual test VM/NIC identities and permit only approved test peers; stop/disarm inherited network generators and CPU workers before functional tests.
-
-**Expected Result:** The lab register identifies fresh workload identities and confirmed helper/base-image staging for Module 3, with instructor qualification, association and isolation checks required before use. `MigrateRepl` has not been created yet; its later creation is automated, not a manual machine-build exercise.
-
-**CSA Why:** Two replication methods need separate OS roles and identities, even when their storage and compute share one lab host.
+**CSA Why:** Explicit identities and one controlled application boundary prevent duplicate protection, wrong-host selection and copied writers reaching live data.
 
 ---
 
@@ -471,16 +465,16 @@ Instead of answering the prompts, you can set the values as variables first and 
 
 | Phase | What Happens |
 |---|---|
-| Infrastructure | Creates the source group, VNet, NSG, public IP, NIC and Windows HyperVHost with one 2048-GiB Premium SSD OS disk; no additional Azure managed data disk. |
+| Infrastructure | Creates the source group, VNet, NSG, public IP, NIC and Windows HyperVHost with one 512-GiB Premium SSD OS disk; no additional Azure managed data disk. |
 | Hyper-V installation | Installs Hyper-V and restarts the host. |
 | Network setup | Creates `intSwitch`, host NAT and DHCP reservations for the guests. |
 | Appliance storage | Creates the 100 GB appliance store partition on the host OS disk. If selected, appliance download/extraction starts during image preparation and its result is collected before final readiness. No appliance VM is imported. |
-| Guest provisioning | Creates the four unchanged fixed-disk workload guests and installs IIS, SQL Server, Nginx and the SQL-connected Tomcat order desk. Stages the standalone replication helper and retains the original clean Windows base image, without creating `MigrateRepl` yet. The Module 3 helper creates it after assessment; Microsoft appliance software and registration remain manual. |
+| Guest provisioning | Creates the four unchanged fixed-disk workload guests and installs IIS, SQL Server, Nginx and the SQL-connected Tomcat order desk. Verifies host capacity and workload/application readiness; discovery import/registration and Azure Migrate host-provider registration remain later manual exercises. |
 | Traffic generator | Always stages the controller, settings and CPU assets. After application readiness, deployment automatically installs/starts required source network traffic and confirms task/unit status, direct/proxy readiness and two increasing API total-order counts before completion. Only independent optional CPU simulation is offered after cleanup/timing, default No. |
 
 **Expected Result:** Deployment completes and prints the host's public IP. Detailed setup progress is recorded at `C:\AzMigrateLab\setup-log.txt` on the host. Do not interrupt a progressing deployment merely because a stage is slow.
 
-> **Wait before RDP:** Do not access HyperVHost while deployment is preparing it. Wait for the four-workload readiness and replication-helper/base-image **staging** results, the selected discovery-appliance staging result, and the **Deployment process ended** timing message (cleanup included). `MigrateRepl` is not created by this initial deployment; its later Module 3 helper execution is outside these timings. A successful selected stage means download, extraction and recording finished before host readiness; a **NOT COMPLETE** warning means staging failed or could not be confirmed, not success. Let deployment finish first, then resolve staging through Module 1 §2.1 before manual import. An existing ZIP rehash alone does not verify previously extracted files.
+> **Wait before RDP:** Do not access HyperVHost while deployment is preparing it. Wait for the four-workload/application readiness and required network-traffic results, the selected discovery-appliance staging result, and the **Deployment process ended** timing message (cleanup included). A successful selected stage means download, extraction and recording finished before host readiness; a **NOT COMPLETE** warning means staging failed or could not be confirmed, not success. Let deployment finish first, then resolve staging through Module 1 §2.1 before manual import. An existing ZIP rehash alone does not verify previously extracted files.
 
 ### Step 5: Connect to the Hyper-V Host
 
@@ -543,19 +537,7 @@ Verification goes beyond "can I ping it?" — confirm that the environment match
 | OnPrem-Linux-Web | Running | 2048 MB | 2 |
 | OnPrem-Linux-App | Running | 2048 MB | 2 |
 
-**HyperVHost — elevated PowerShell:**
-
-4.  Verify the replication helper and retained original base image are staged; do not execute the helper until Module 3, after assessment.
-
-    ```powershell
-    Get-Item -LiteralPath C:\AzMigrateLab\prepare-replication.ps1,
-        C:\AzMigrateLab\VHDs\WindowsServer2022-Base.vhdx |
-        Select-Object FullName,Length
-    ```
-
-    Deployment's staged result includes integrity/readiness checks; file presence alone does not replace that result. The retained VHDX is the original generalized base used for the Windows workloads, not a copy of their configured disks.
-
-**Expected Result:** All four workloads retain the memory/vCPUs above, and the helper/base image are staged for later use. `MemoryAssigned` is displayed in bytes. Neither `MigrateAppl` nor `MigrateRepl` is expected yet: discovery is imported in Module 1; replication guest creation runs in Module 3. Staged is not VM-created, OS-ready or Microsoft-appliance-installed/registered.
+**Expected Result:** All four workloads retain the memory/vCPUs above. `MemoryAssigned` is displayed in bytes. `MigrateAppl` is not expected yet; it is imported in Module 1. The main migration path does not add another nested VM.
 
 If you need a guest console, use **Connect** in Hyper-V Manager. Windows guests use `Administrator`; Linux guests use the deployment username, normally `labadmin`. Both use the lab password.
 
@@ -865,12 +847,12 @@ Understanding the cost profile is essential for planning a lab budget. Estimates
 | Resource | SKU / Tier | Cost Consideration |
 |---|---|---|
 | Host VM compute | `Standard_E8s_v7`, Windows Server | Charged while allocated; deallocation stops host compute charges. |
-| OS disk | One 2 TiB (2048 GiB) Premium SSD, `Premium_LRS` | Billed while retained, including when the host is deallocated. The discovery partition and both `MigrateRepl` VHDXs share this disk; no additional managed data disk. Remove through approved source-group cleanup after the workshop. |
+| OS disk | One 512-GiB Premium SSD, `Premium_LRS` | Billed while retained, including when the host is deallocated. Workload VHDs and the discovery partition share this disk; no additional managed data disk. Remove only through approved source-group cleanup after the workshop. |
 | Public IP | Standard, static | May continue billing while retained. |
 | Networking | Data transfer and any separately chosen access services | Depends on usage and access design. |
 | Later migration resources | Target/test VMs, disks and migration storage | Additional to the source lab; include them in the overall budget. |
 
-The four nested workloads, discovery appliance imported in Module 1 and `MigrateRepl` created later in Module 3 do not incur separate Azure VM compute charges. They share the source host's CPU, memory and single 2-TiB OS disk. Fewer Azure resources does not remove the larger disk's persistent charge.
+The four nested workloads and discovery appliance imported in Module 1 do not incur separate Azure VM compute charges. They share the source host's CPU, memory and single 512-GiB OS disk. Nested placement does not remove the host disk's persistent charge.
 
 ### 9.2 — Cost Optimization Tips
 

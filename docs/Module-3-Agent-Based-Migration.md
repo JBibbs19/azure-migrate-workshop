@@ -1,14 +1,14 @@
-# Module 3: Agent-Based Migration — SQL/Tomcat and Coordinated Cutover
+# Module 3: Hyper-V Replication — Stateful Workloads and Coordinated Cutover
 
-| **Estimated Time** | 75–90 minutes of student activity, plus Microsoft appliance installation/registration, replication, and full-system testing |
+| **Estimated Time** | 75–90 minutes of student activity, plus replication and full-system testing; the optional alternate path requires separate preparation |
 |---------------------|---------------|
 | **Level**           | Advanced — Cloud Solution Architect |
-| **Prerequisites**   | [Module 1](Module-1-Discovery.md) completed; [Module 2 §§4–6](Module-2-Agentless-Migration.md#4-step-1--prepare-for-migration) frontend replication configured; separate modern appliance and support prerequisites in §§4–7 |
+| **Prerequisites**   | [Module 1](Module-1-Discovery.md) completed; [Module 2 §§4–6](Module-2-Agentless-Migration.md#4-step-1--prepare-for-migration) frontend replication configured on the same HyperVHost provider; stateful prerequisites in §§4–7 |
 | **CAF Phase**       | **Migrate** — Cloud Adoption Framework |
 
 ### Learning Objectives — Concepts
 
-By the end of this module, you will distinguish disk-block replication from application requests, run the staged helper after assessment to create `MigrateRepl` automatically, verify its clean OS/disks and manually install/register Microsoft's modern replication appliance on it, install/register supported guest Mobility Service, validate the four isolated test peers across **both** engines, and coordinate **one planned business maintenance window**. Initial and delta replication do not require a business outage. SQL + App are the assigned modern physical/Mobility pair; Web + Linux-Web remain exclusively on the Hyper-V provider.
+By the end of this module, you will distinguish disk-block replication from application requests, reuse the **existing Azure Migrate Hyper-V host provider and Recovery Services agent** for SQL + App, validate the four isolated test peers, and coordinate **one planned business maintenance window**. All four workload VMs use the same provider, project and source-host binding. Initial and delta replication do not require a business outage. Stateful workloads add database/application validation, not a guest migration-agent requirement.
 
 Enter here after [Module 2 §§4–6](Module-2-Agentless-Migration.md#4-step-1--prepare-for-migration) configured the frontend pair. Complete **this module §§4–8** to configure replication for **SQL + App together**, then return to [Module 2 §§7–8](Module-2-Agentless-Migration.md#7-step-4--monitor-replication) to review and test **both frontends**. Return here for **§§9–10** to review and test **both SQL/App VMs**, validate SQL and the complete four-VM isolated application, and clean up all test copies. Only then perform **§11's one coordinated cutover**, SQL first; invoke Module 2's frontend cutover inside that same window, not as an earlier prerequisite.
 
@@ -20,36 +20,39 @@ When a workload has state — a database with open transactions, a file server w
 
 ### How It Works Architecturally
 
-This lab deliberately treats **`OnPrem-SQL` and `OnPrem-Linux-App` as physical servers** for Azure Migrate. A **Mobility Service inside each of these two guests** tracks changed disk blocks and sends them through a **separate modern Windows Server 2022 replication appliance** to Azure. The Module 1 `MigrateAppl` remains discovery/assessment only. The Module 2 Hyper-V provider replicates **only Web and Linux-Web**. Do not select SQL/App under that provider or dual-protect a VM.
+For this lab, the **Azure Site Recovery Provider and Azure Recovery Services agent already installed on HyperVHost** replicate SQL and App VM disks to Azure, just as they do for Web and Linux-Web in Module 2. This is **Azure Migrate Hyper-V host-based migration**, not the native Hyper-V Replica feature or a standalone Site Recovery disaster-recovery exercise. The Module 1 `MigrateAppl` remains discovery/assessment only.
+
+**No guest Mobility Service installation is used in the main lab; optional modern-appliance/Mobility instructions are at the end for learners who choose the alternate approach.** That alternate is a separately qualified source scenario, not an additional prerequisite or a second protection relationship for these four VMs.
 
 **The replication pipeline:**
 
-1. **Create the clean guest, then install/register the modern appliance** — After Module 1 assessment, §7's staged standalone helper creates `MigrateRepl` automatically from the same original generalized Windows Server 2022 base image used for the Windows workloads. Never clone a configured workload or discovery appliance. Verify its prepared OS/disks, then use this fresh project's physical-server flow to install/register Microsoft's appliance manually.
-2. **Install/register supported Mobility Service** — Use the registered appliance's matching installer/configuration and approved credentials on SQL and App only.
-3. **Initial replication** — Copy every required OS/application/database disk while the four sources keep serving.
-4. **Delta replication** — Track changed blocks, not HTTP requests, SQL log shipping, open transaction memory, or CPU utilization. Source-to-appliance control uses TCP 443 and data uses TCP 9443; appliance-to-Azure uses TCP 443 under the current documented network requirements. These are scoped data-path requirements, **not an old appliance management URL**.
-5. **Test and final migration** — Boot separate isolated test peers first. At the later shared final boundary, freeze writers, drain work, verify the supported final-sync/source-shutdown procedure for each engine, and validate all targets before releasing traffic.
+1. **Reuse host registration** — Verify the same connected HyperVHost provider, Azure Migrate project, managed migration resources and target region used in Module 2. Do not register this host to a different vault or project for SQL/App.
+2. **Initial replication** — Copy every required OS/application/database disk while all four sources keep serving.
+3. **Delta replication** — The host provider sends changed VM disk blocks, not HTTP requests, SQL log shipping, open transaction memory or CPU utilization.
+4. **Test migration** — Boot separate copies in the same approved isolated test VNet; keep source/live-target peers unreachable before first boot, then disarm copied generators before functional tests.
+5. **Planned final migration** — At the shared final boundary, freeze writers, drain work, verify planned source shutdown and final synchronization for each VM, and validate all targets before releasing traffic.
 
 ```text
-Web + Linux-Web → Hyper-V host provider ─────────────┐
-                                                   ├→ Azure replica disks → isolated tests / final targets
-SQL + App → guest Mobility → modern replication appliance ┘
-Discovery appliance → inventory / assessment only
+Web + Linux-Web + SQL + App (no guest migration agent)
+    → Existing HyperVHost provider + Recovery Services agent
+    → Azure replica disks
+    → Isolated four-VM test copies OR final target VMs
+Discovery appliance → Inventory / assessment only
 ```
 
 ### RPO/RTO Characteristics
 
 | Metric | Meaning | Implication |
 |--------|---------|-------------|
-| **RPO** | Acceptable age of recovered data | Inspect actual points and final accepted changes; neither engine promises zero RPO |
-| **RTO** | Acceptable restoration time | Include the planned outage, both engines, boot, SQL checks, alias updates, and acceptance |
+| **RPO** | Acceptable age of recovered data | Inspect actual points and final accepted changes; the migration method does not promise zero RPO |
+| **RTO** | Acceptable restoration time | Include the planned outage, per-VM jobs, boot, SQL checks, alias updates, and acceptance |
 | **Initial sync** | First copy of all required disks | Depends on disk size, bandwidth, and ongoing churn; sources remain active |
-| **Ongoing overhead** | Tracking/transmitting changed blocks | Observe guest/appliance/network load; a busy CPU alone is not changed-disk evidence |
+| **Ongoing overhead** | Tracking/transmitting changed blocks | Observe workload/host/network load; a busy CPU alone is not changed-disk evidence |
 
 ### When Stateful Planning Matters
 
 - SQL stores the real business orders in `ContosoApp`; the application VM stores its OS, application code/configuration and logs. The HTTP generator's location is **not** the reason to choose a migration method.
-- Both host-based and Mobility-based replication can handle active stateful disk writes where supported. This pairing is for comparing two hands-on methods, not a rule that databases require agents.
+- The supported source platform determines the migration method. In this Hyper-V lab, statefulness adds validation and coordination; it does not require different guest software or another replication appliance.
 - A booted VM or healthy replication label is not proof of consistent, current business data.
 - Contoso Order Desk is a small unauthenticated Java/JSP order form and API. Customer records support basic sample requests; customer/employee login profiles or an employee portal are illustrative business scenarios, **not implemented features**.
 
@@ -57,42 +60,40 @@ Discovery appliance → inventory / assessment only
 
 **Local workstation — student notes:**
 
-1.  Identify **`OnPrem-SQL`** and **`OnPrem-Linux-App`**, their fresh source IDs, and their physical-server replication architecture in the lab identity register.
+1.  Identify **`OnPrem-SQL`** and **`OnPrem-Linux-App`**, their fresh source VM IDs, and their existing HyperVHost provider association in the lab identity register.
 
 2.  Record that SQL holds Orders/Customers, while App holds the runtime/configuration/logs and issues JDBC reads/writes.
 
 3.  Record which frontends and background generators can reach SQL through the five edges in §3.
 
-**Expected Result:** You can explain the two replication data paths and why disk replication still needs database/application validation.
+**Expected Result:** You can explain the shared Hyper-V data path and why disk replication still needs database/application validation.
 
 **CSA Why:** Method selection, disk churn, and application-consistency planning answer different questions.
 
 ---
 
-## 2. Agentless vs. Agent-Based — Decision Matrix
+## 2. Host-Based vs. Guest-Agent Replication — Decision Matrix
 
-Compare **supported source configurations and operational requirements**, not a rule that statefulness forces an agent. Neither method is a separate application boundary in this lab.
+Compare **supported source configurations and operational requirements**, not a rule that statefulness forces a guest agent. The student actions in §§4–13 remain Hyper-V host replication; the separate alternate notes are [at the bottom of this module](#14-optional-alternate-path--modern-appliance-and-guest-mobility-service).
 
-| Criteria | Module 2 — Hyper-V Host Replication | Module 3 — Modern Physical-Server Route |
-|----------|------------------------------------|------------------------------------------|
-| **Assigned sources** | Web + Linux-Web only | SQL + Linux-App only, treated as physical |
-| **Replication software** | Provider / Recovery Services agent on HyperVHost | Mobility Service in each of the two guests + separate modern replication appliance |
-| **Discovery appliance** | Inventory/assessment, not replication | Same independent discovery role; cannot be reused as replication appliance |
-| **Data tracked** | Selected VM disk changes | Selected guest disk blocks; not HTTP or SQL log shipping |
-| **Guest change approval** | No guest migration agent | Required before Mobility installation, including supported privileged installation access |
-| **Readiness** | Supported Hyper-V/source/target configuration | Exact OS + running kernel + Mobility version + storage/boot tuple and approved appliance hosting |
-| **Data consistency / RPO** | Inspect points, validate business data | Same requirement; no zero-loss guarantee |
-| **Portal source** | **From replication provider (Hyper-V)** | **From a replication appliance (Physical or others)**, or verified inventory/assessment route |
-| **Final cutover** | Separate frontend jobs inside the shared window | Separate SQL/App jobs in that **same** planned window; not one cross-engine atomic job |
+| Criteria | Main Lab — Hyper-V Host Replication | Optional Separate Source Scenario |
+|----------|------------------------------------|-----------------------------------|
+| **Assigned sources** | All four workload VMs; Modules 2 and 3 are teaching pairs | Fresh, unprotected SQL/App equivalents only after separate qualification |
+| **Replication software** | Existing provider / Recovery Services agent on HyperVHost | Separate modern replication appliance plus Mobility Service in each selected guest |
+| **Discovery appliance** | Inventory/assessment only, not replication | Same independent role; not reusable as the replication appliance |
+| **Data tracked** | Required VM disk changes | Supported guest disk blocks; not HTTP or SQL log shipping |
+| **Guest change approval** | No guest migration-agent installation | Required privileged installation and connectivity approvals |
+| **Readiness** | Supported Hyper-V host, source VM, disks and Azure target | Exact OS/kernel/agent/storage/boot tuple plus separately qualified appliance hosting |
+| **Data consistency / RPO** | Inspect recovery points and validate business data | Same requirement; no zero-loss guarantee |
+| **Portal source** | **From replication provider (Hyper-V)** | **From a replication appliance (Physical or others)** |
+| **Final cutover** | Per-VM jobs in one coordinated four-VM window | Requires its own approved scenario plan; not a conversion step in this lab |
 
-> **CSA Decision Rule:** Never enable both replication architectures for the same source VM. If an existing registration, duplicate inventory identity, or wrong-source selection cannot be conclusively resolved, STOP and use a clean source deployment; no automated binding-clearing or registered-appliance clone is provided.
+> **CSA Decision Rule:** Never enable both architectures for the same source VM. If an existing registration, duplicate inventory identity or source-host binding cannot be conclusively resolved, STOP for the owner; do not clear bindings, re-register the protected host or try records until something executes.
 
 ```mermaid
 flowchart TD
-    Scope[One four-VM application boundary] --> Web[Web pair: Hyper-V provider]
-    Scope --> Data[SQL and App: modern appliance plus Mobility]
-    Web --> Test[One isolated four-VM application test]
-    Data --> Test
+    Scope[One four-VM application boundary] --> Host[Existing HyperVHost provider for all four VMs]
+    Host --> Test[One isolated four-VM application test]
     Test --> Window[One planned maintenance window]
     Window --> Validate[Data and application acceptance before traffic]
 ```
@@ -101,13 +102,13 @@ flowchart TD
 
 **Local workstation — student notes:**
 
-1.  Mark Web/Linux-Web as **Hyper-V** and SQL/App as **modern physical/Mobility**, with each verified source identity and project/appliance association.
+1.  Mark **all four workload VMs as Hyper-V host-provider replication**, with each verified source VM ID, the same project and source-host binding.
 
-2.  Mark all four as **one connected application**, with no frontend final cutover until SQL/App preparation and the full test succeed.
+2.  Distinguish the two teaching pairs from the **one connected application**. Hold frontend final cutover until SQL/App preparation and the full test succeed.
 
-**Expected Result:** Two different hands-on replication methods are planned without dual protection or independent application waves.
+**Expected Result:** SQL and App use the same host replication path as the frontends, without dual protection or independent application waves.
 
-**CSA Why:** An explicit architecture and identity register prevents silently selecting the Hyper-V discovery record for a physical-route migration.
+**CSA Why:** Explicit source-platform and identity decisions prevent unnecessary guest changes or the wrong replication record.
 
 ---
 
@@ -135,7 +136,7 @@ Protected JNDI credentials, the SQL alias and Tomcat's JDBC pool must remain coh
 
 ### Application Dependency Map
 
-The five-edge map is already documented in [Module 1 §6](Module-1-Discovery.md#step-6-dependency-analysis) and [README — Lab Traffic](../README.md#lab-traffic). The full isolated test and final acceptance cover all four VMs, across both replication methods.
+The five-edge map is already documented in [Module 1 §6](Module-1-Discovery.md#step-6-dependency-analysis) and [README — Lab Traffic](../README.md#lab-traffic). The full isolated test and final acceptance cover all four VMs, through the same HyperVHost provider.
 
 ---
 
@@ -146,7 +147,7 @@ The five-edge map is already documented in [Module 1 §6](Module-1-Discovery.md#
 | `OnPrem-SQL` | Windows Server 2022 | SQL Server 2022 Express, `ContosoApp`, TCP 1433 | `192.168.0.11` |
 | `OnPrem-Linux-App` | Ubuntu 24.04 | Tomcat 10.1 / OpenJDK 17 JSP Order Desk, TCP 3000 | `192.168.0.13` |
 
-The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generation 2 **HyperVHost** hosts this pair and the Module 2 pair; §7 creates separate `MigrateRepl` only after assessment. The source nested network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`, replication guest `.21`), separate from the source Azure VNet `10.0.0.0/16`. The single 2-TiB Premium SSD host OS disk backs `MigrateRepl`'s separate 80-GiB OS and 620-GiB local data VHDXs; the 100-GiB discovery partition remains unchanged.
+The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generation 2 **HyperVHost** hosts this pair and the Module 2 pair. The source nested network is `192.168.0.0/24` (host `.1`, discovery appliance `.20`), separate from the source Azure VNet `10.0.0.0/16`. The main lab requires no additional replication VM, guest migration agent or appliance data disks.
 
 #### Hands-On Steps
 
@@ -154,15 +155,15 @@ The same single, nonclustered Windows Server 2022 **Standard_E8s_v7**, Generatio
 
 2.  **Local workstation — Azure portal:** Confirm Module 2 §6 configured **both Web + Linux-Web replication records**, including setup jobs and per-VM mappings. Frontend testing and cutover are **not** entry prerequisites.
 
-3.  **HyperVHost — Hyper-V Manager:** Confirm SQL and App are running, with approved guest access and existing authorized SQL access. Keep §2's source identities and method assignments; do not dual-protect either VM.
+3.  **HyperVHost — Hyper-V Manager:** Confirm SQL and App are running, with approved guest access and existing authorized SQL access. Match their fresh source VM IDs to §2's register.
 
-4.  **HyperVHost — elevated Windows PowerShell / Azure portal:** Confirm target/test networks are available or will be completed in §6, and review Module 0 §5.1's staged helper/base-image result for §7. `MigrateRepl` need not exist yet: §7 creates it automatically, without manual sizing/build; Microsoft appliance installation/registration follows separately.
+4.  **Local workstation — Azure portal:** Confirm target/test networks are available or will be completed in §6. In §7, reuse the **same connected HyperVHost provider, project, target region and managed migration-resource association** already verified in Module 2. Do not re-register the host or create a second migration association for this pair.
 
-5.  **Local workstation — student notes:** Confirm the provided build matches the [instructor-qualified baseline](../README.md#instructor-preparation--qualify-the-provided-baseline). If qualification or the match is unconfirmed, or the image/kernel, agent, storage or architecture changed, **STOP and ask the instructor before agent installation or replication**.
+5.  **Local workstation — student notes:** Confirm the provided build matches the [instructor-qualified baseline](../README.md#instructor-preparation--qualify-the-provided-baseline). A Ready assessment is not a substitute for host/source/disk/target support or application testing. STOP for the instructor if the build match or supported configuration is unconfirmed.
 
 **Execution location:** Azure-copy commands run inside the explicitly selected guest through **VM → Run command → RunPowerShellScript / RunShellScript** after guest-agent readiness, or approved RDP/SSH. SQL checks use existing tooling, authorized access and the approved **trusted local SQL connection**. Missing access/tooling/trust requires its owner; no permission grant, certificate change, trust bypass or password exposure is a student prerequisite.
 
-**Expected Result:** The five entry checks are confirmed; §§6–7 complete network/appliance preparation before use. Detailed build qualification belongs to the instructor, not a repeated student support-matrix investigation.
+**Expected Result:** The five entry checks are confirmed; §§6–7 verify networks and the existing host-provider association before use. Detailed baseline qualification belongs to the instructor; unresolved support or identity findings remain blockers.
 
 ---
 
@@ -269,9 +270,9 @@ Target planning is shared across the whole application. The target region must d
 | Role / Exact Final Target Name | Selection evidence required |
 |--------------------------------|-----------------------------------|
 | IIS — `OnPrem-Web` | Actual assessment + Windows source/target support + regional capacity/quota |
-| SQL — `OnPrem-SQL` | SQL performance/data-disk needs + Windows/Mobility route support + capacity/quota |
+| SQL — `OnPrem-SQL` | SQL performance/data-disk needs + Windows/Hyper-V migration support + capacity/quota |
 | Nginx — `OnPrem-Linux-Web` | Two-vCPU source configuration + Hyper-V target support + capacity/quota |
-| Tomcat — `OnPrem-Linux-App` | Two-vCPU source configuration + exact Linux/Mobility/storage support + capacity/quota |
+| Tomcat — `OnPrem-Linux-App` | Two-vCPU source configuration + exact Linux/Hyper-V/storage support + capacity/quota |
 
 No fixed all-four SKU is prescribed here. The historical B1/B2 table in Module 2 is **not approved lab sizing**; resolve its one-vCPU Linux examples against the actual two-vCPU sources. A previous IaaS export recommended `Standard_D2als_v6` for all four, but that is an assessment result, not a lab default, availability promise, or instruction to change a script menu. Record the actual reviewed size for each role before enabling replication.
 
@@ -345,169 +346,49 @@ No fixed all-four SKU is prescribed here. The historical B1/B2 table in Module 2
 
 ---
 
-## 7. Step 3 — Deploy and Register the Modern Replication Appliance
+## 7. Step 3 — Confirm Hyper-V Provider Registration
 
-The current [physical-server tutorial](https://learn.microsoft.com/azure/migrate/tutorial-migrate-physical-virtual-machines?view=migrate), updated 2026-06-27, uses the **simplified/modern agent-based experience**. The classic agent-based appliance retired on 2026-09-30; that retirement does **not** retire the Classic Azure VM assessment in Module 1. Do not substitute an old Windows Server 2016/configuration-server/MySQL recipe, a guessed download URL, or the discovery appliance installer.
+The registration belongs to **HyperVHost**, not to SQL or App individually. Reuse the **Azure Site Recovery Provider and Azure Recovery Services agent already installed and registered in Module 2**. The discovery appliance's registration is not proof that the replication host is registered. No modern replication appliance or guest Mobility Service installation is part of this main-path step.
 
-Before enabling this pair's protection, recheck Module 2 §4.3's **project-association prerequisite**: the owner must verify project/provider/appliance/managed-vault compatibility for both methods. The presence of both source choices is not shared-vault certification. Do not force associations, guess blank IDs, silently create separate projects, or patch scripts.
-
-### 7.1 Create and Verify MigrateRepl
+### 7.1 Reuse a Correct Existing Registration
 
 #### Hands-On Steps
-
-**HyperVHost — elevated Windows PowerShell (Run as administrator):**
-
-1.  After §4's entry checks, run the standalone helper staged in Module 0. It prompts privately for the existing guest `Administrator` password as a SecureString; do not put the password in command history, notes or source.
-
-    ```powershell
-    C:\AzMigrateLab\prepare-replication.ps1
-    ```
-
-    This creates fixed-spec `MigrateRepl` from the **same original clean generalized Windows Server 2022 base** retained in Module 0 §5.1, never a configured workload clone. It does not install Microsoft's replication software or register a project. No manual VM build/sizing is required. A repeat for the helper's existing owned prepared VM verifies it read-only rather than recreating it.
-
-    After successful helper completion, record the actual VM ID and inspect the result:
-
-    ```powershell
-    Get-VM -Name MigrateRepl | Select-Object Name,VMId,State,ProcessorCount,MemoryAssigned
-    Get-VMMemory -VMName MigrateRepl | Select-Object DynamicMemoryEnabled,Startup
-    Get-VMHardDiskDrive -VMName MigrateRepl | Get-VHD |
-        Select-Object Path,VhdType,Size,FileSize
-    Get-VMNetworkAdapter -VMName MigrateRepl | Select-Object SwitchName,IPAddresses
-    ```
-
-    Expect Running, eight shared vCPUs, 16 GiB static memory, `intSwitch`/`192.168.0.21`, 80-GiB OS and separate 620-GiB data disk. Both VHDXs are under host `C:\AzMigrateLab\ReplicationAppliance`, backed by the single 2-TiB Premium SSD host OS disk, not the discovery partition or temporary storage. Disk `Size` is capacity; a dynamic data disk's smaller `FileSize` does not reduce its reserved backing requirement. The nested total is now six, but the existing assessment group remains the four workload identities. Ongoing host discovery may now list `MigrateRepl`; leave it out of assessment and migration selections.
-
-**MigrateRepl — VMConnect / elevated PowerShell:**
-
-2.  Open **Connect** for `MigrateRepl` in Hyper-V Manager and sign in with the approved guest credentials. Verify Windows Server 2022 Desktop Experience English (`en-*`), the separate data volume labelled `ReplicationData`, and no installed Hyper-V, IIS or AD DS roles before the vendor installer.
-
-    ```powershell
-    Get-CimInstance Win32_OperatingSystem | Select-Object Caption,OSArchitecture,OSLanguage
-    Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' |
-        Select-Object InstallationType
-    Get-WindowsFeature Hyper-V,Web-Server,AD-Domain-Services |
-        Select-Object Name,InstallState
-    Get-Disk | Select-Object Number,FriendlyName,Size,OperationalStatus
-    Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,Size,SizeRemaining
-    ```
-
-    Record the actual data drive letter; it is normally `E:` **inside this guest**, independent of host `ApplianceStore`'s drive letter. No Microsoft replication appliance is installed or registered yet. Do not add server roles or clone a workload/registered appliance.
-
-**Local workstation — student notes:**
-
-3.  Record the **helper's actual** storage/memory and OS-readiness result; initial deployment's staged result is not this VM-readiness result. Stop for the instructor on a failed/unverified/partial result, identity mismatch or retired source; do not rebuild an existing VM, resize disks or rerun `deploy-lab.ps1`. Review the planned private SQL/App-to-`.21` TCP 443/9443 route, scoped firewall rules and approved appliance-to-Azure HTTPS path. A clean Windows guest has no appliance listeners yet: verify actual source-to-appliance connections in §7.2 **after installation/registration**, before Mobility installation or protection.
 
 **Local workstation — Azure portal:**
 
-4.  Open the fresh lab project and verify its subscription/resource ID.
+1.  Open **Azure Migrate → All projects → the Module 1 project** and verify its subscription/resource ID.
 
-5.  Select **Execute → Migrations → Start execution**.
+2.  Open **Execute → Migrations → Start execution**, choose **Servers or virtual machines (VMs)** → **Azure VM**, then **From replication provider (Hyper-V)** and inspect the provider-preparation view.
 
-6.  Select **Servers or virtual machines (VMs)** and target **Azure VM**.
+3.  Confirm the existing connected **HyperVHost**, its recorded source-host identity, project-managed migration-resource association and the same target region selected in Module 2.
 
-7.  Under **Other sources**, select **From a replication appliance (Physical or others)** and follow the portal's appliance setup link.
+4.  Confirm `OnPrem-SQL` and `OnPrem-Linux-App` are available from **that same host**, matching the source VM IDs in your lab register.
 
-    The overview uses **Migrations**; some tutorial/screenshots use singular **Migration**. Match the actual equivalent operation, not a guessed legacy menu.
+5.  Reuse this registration. Do not install another provider, obtain a different project's key, change vault bindings or register SQL/App individually.
 
-8.  Confirm virtualization type **Physical**, the reviewed target region, and the region confirmation.
-
-9.  Select **Create resources** only after checking the fresh lab scope and region.
-
-    This prepares project-managed migration resources, including the background recovery vault. The region is then locked. Do not create a separate ASR DR policy or rebind an existing protected environment.
-
-### 7.2 Install and Register the Appliance
+### 7.2 Resolve a Missing or Mismatched Registration Before Continuing
 
 #### Hands-On Steps
 
-**MigrateRepl (`192.168.0.21`) — elevated PowerShell / installer UI:**
+**Local workstation — Azure portal / student notes:**
 
-1.  Download the current appliance package from the **actual project's setup link**.
+1.  If Module 2's provider is missing, disconnected or bound to a different project/region, STOP and review its recorded jobs and association with the instructor/resource owner. A matching display name alone is not proof.
 
-2.  Verify the publisher/signature and any currently published hash using the official instructions; extract to the documented location on the guest's actual data volume. If that volume is `E:`, the usual appliance agent path is `E:\Software\Agents`; use the installed path reported by the current installer, not a guessed host drive.
+2.  If the approved **fresh, unregistered host** genuinely still needs installation/registration, complete [Module 2 §4.4](Module-2-Agentless-Migration.md#44-download-install-and-register-the-host-provider) with this project's provider package and private registration key. Reuse a correct installed registration; do not reinstall or re-register an already protected host.
 
-3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator inside `MigrateRepl`**, not on HyperVHost, the discovery appliance or a workload.
+3.  Return to §7.1 and confirm the connected host and exact source identities before enabling SQL/App replication.
 
-    Follow the current signed Microsoft installer's instructions; no fixed binary URL, execution-policy bypass or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
+    Do not create a separate Site Recovery DR vault, policy or protection relationship to get past a migration readiness issue.
 
-**Replication appliance — Microsoft Azure Appliance Configuration Manager:**
+**Expected Result:** SQL and App are available through the same existing HyperVHost registration and Azure Migrate project as the frontend pair, without additional guest migration software or a replication VM.
 
-4.  Let prerequisite checks and component status load, resolve approved prerequisite issues, then select **Continue**.
-
-5.  Select the approved **FQDN or NAT IP** connectivity choice; verify source guests can reach that actual endpoint and the appliance can reach required Azure endpoints. Save and continue.
-
-6.  Enter a unique **Friendly name of appliance** and the **Azure Migrate replication appliance key** obtained from this project's portal setup page.
-
-    This is not a legacy shared passphrase. Keep key/configuration files and all credentials private.
-
-7.  Select **Login** and complete the Azure authentication tab/device-code flow before its five-minute code expires.
-
-8.  Verify the displayed **Subscription, Resource Group, and Recovery Services Vault** belong to this fresh lab project; then continue.
-
-9.  Under **Provide Physical Server Details**, select **Add Credentials** where approved: record OS, credential friendly name, and the actual source username/password in the protected UI.
-
-    Current push installation requires a source **Windows administrator** and source **Linux root** credential. Existing SSH/sudo inventory access does not by itself prove push eligibility. **STOP** if these privileges are not approved; do not enable root/password SSH, relax UAC/firewalls, or change security policy merely for push. Use the supported manual-agent option below only if its separately approved privileges and procedure are available.
-
-10. Select **Add Server**, entering each exact SQL/App **source IP/FQDN** and the approved credential account as required by the selected installation route.
-
-11. Confirm fresh identities and source access; exclude HyperVHost, `MigrateAppl`, the replication appliance itself, Web, and Linux-Web.
-
-**Local workstation — Azure portal:**
-
-12. Confirm this modern appliance is registered and healthy in the intended project/region, with its current component versions.
-
-13. Record its identity, versions, registration status and the verified SQL/App source associations without secrets.
-
-**Source OnPrem-SQL and OnPrem-Linux-App — approved guest sessions:**
-
-14. Now that appliance installation/registration is complete and its TCP 443/9443 listeners are ready, verify **both source guests** can connect to the configured private appliance endpoint (`192.168.0.21` for this lab) on **both TCP 443 and 9443**, using the approved guest connection checks. Confirm the appliance's required outbound Azure HTTPS checks pass as well. Record the results before any Mobility installation or replication enablement. If a listener or path fails, resolve that specific service/routing/scoped-firewall issue; do not disable firewalls, broaden access or proceed on the earlier route review alone.
-
-### 7.3 Choose a Supported Mobility Installation Route
-
-#### Hands-On Steps
-
-**Local workstation — student notes:**
-
-1.  Recheck the exact OS/kernel/Mobility support evidence from §4 before any guest installation.
-
-2.  Select **push installation** in §8 only if the documented Windows administrator/Linux root privileges, scoped connectivity and change approval are satisfied.
-
-3.  Otherwise, use **manual installation** only from the registered modern appliance and the current [Mobility Service instructions](https://learn.microsoft.com/azure/site-recovery/vmware-physical-mobility-service-overview), updated 2026-10-15.
-
-**Source OnPrem-SQL — approved local administrator / installer UI (manual option):**
-
-4.  Obtain the appliance-matched Windows installer using the current documented transfer method and verify its publisher/version.
-
-5.  Open the installer, select **Install**, and obtain that source machine's **Machine Details** string from its configurator.
-
-**Replication appliance — Configuration Manager (manual option):**
-
-6.  Open **Mobility service configuration details**, supply that machine's details string, and select **Download configuration file**.
-
-**Source OnPrem-SQL — Unified Agent configurator (manual option):**
-
-7.  Supply the resulting **machine-specific configuration file** and select **Register**. Confirm successful registration to this appliance.
-
-**Source OnPrem-Linux-App — approved privileged SSH session (manual option):**
-
-8.  Open the current official article's **Linux manual installation** instructions and choose the exact supported OS/agent package matching this appliance.
-
-9.  Follow that current terminal-based install, machine-details/configuration generation, and registration sequence with the approved privilege model.
-
-    **STOP** if the precise package, command arguments, machine-specific configuration or privileges cannot be verified. Do not use the Windows GUI sequence for Linux, guess an old binary URL/CLI/passphrase, or force an unsupported agent/kernel combination. This guide deliberately does not invent a version-dependent Linux command block.
-
-**Local workstation — Azure portal / replication appliance:**
-
-10. Verify the actual Mobility version, source identity, registered appliance and successful agent connection for both SQL and App. If using push, perform this verification after §8 enables replication.
-
-**Expected Result:** The separate modern appliance and selected supported agent-install route meet the recorded prerequisites; otherwise stop before installation/replication and refer the unresolved condition to its owner. Discovery, appliance registration, guest-agent registration and successful disk replication are distinct checks.
-
-**CSA Why:** Correct modern registration and approved guest privileges prevent mixing a retired workflow, the wrong appliance, or a duplicate source record with a successful migration.
+**CSA Why:** Verifying one existing source-host/project binding prevents unnecessary installations and accidental protection changes.
 
 ---
 
 ## 8. Step 4 — Configure Replication
 
-SQL and Tomcat use the **modern physical-server/Mobility path**, not the registered Hyper-V provider. Select every disk needed for the existing database and application; replication preserves disk state rather than rebuilding an app. Keep all four sources serving throughout initial/delta replication.
+SQL and Tomcat use the **same registered Hyper-V host-provider path as the Module 2 frontends**. Select every disk needed for the existing database and application; replication preserves disk state rather than rebuilding an app. Keep all four sources serving throughout initial/delta replication.
 
 ### 8.1 Start the Replication Wizard
 
@@ -519,11 +400,11 @@ SQL and Tomcat use the **modern physical-server/Mobility path**, not the registe
 
 2.  Choose **Servers or virtual machines (VMs)** → **Azure VM**.
 
-3.  Select **From a replication appliance (Physical or others)** and the registered modern appliance from §7.
+3.  Select **From replication provider (Hyper-V)** and the **same registered HyperVHost** confirmed in §7.
 
-4.  Alternatively, use **From all inventory** or **From an assessment** only when the displayed record/architecture can be verified as this physical-route SQL/App source; select the corresponding Physical discovery appliance when prompted.
+4.  If entering from **all inventory** or **an assessment**, verify the exact SQL/App source VM IDs and the **same Hyper-V host/provider architecture** before continuing.
 
-    The Hyper-V discovery inventory may contain a same-name record. It is not permission to select **From replication provider (Hyper-V)** for this pair. **STOP on ambiguous identity, duplicate selection, wrong architecture or unresolved readiness**; do not try different records until something executes.
+    STOP on ambiguous identity, duplicate selection, wrong source-host binding or unresolved readiness; do not choose the Physical/others route or try different records until something executes.
 
 ### 8.2 Select Virtual Machines
 
@@ -533,11 +414,11 @@ SQL and Tomcat use the **modern physical-server/Mobility path**, not the registe
 
 1.  Select exactly **`OnPrem-SQL`** and **`OnPrem-Linux-App`**.
 
-2.  On **Workloads**, verify the two fresh source identities, source addresses, physical replication architecture and correct **replication-appliance** dropdown; review each readiness finding.
+2.  On **Workloads**, verify the two fresh source VM IDs, source addresses, **Hyper-V** architecture and the same registered **HyperVHost** used for the frontends; review each readiness finding.
 
-3.  Review imported assessment values if used, then the supported **Target VM security type**, approved **Guest credentials** for push, or the already verified manual-agent registration. Do not silently accept a security change or grant extra privileges.
+3.  Review imported assessment values if used and the supported **Target VM security type**. Do not silently accept a security change. No guest Mobility installer or push-install credentials are required for this host-based route.
 
-4.  For **manual installation**, require verified agent registration now. For **push**, record installation as **approved / pending initial execution**, not already complete; installation occurs after §8.6 submission. Require support, credential and readiness gates before **Next**, and verify successful installation/registration in the resulting jobs before treating replication as active.
+4.  Confirm these are SQL/App records from the intended host, not duplicate same-name inventory or already-protected sources. Select **Next** only after support and identity gates pass.
 
 ### 8.3 Configure Target Settings
 
@@ -563,9 +444,9 @@ SQL and Tomcat use the **modern physical-server/Mobility path**, not the registe
 
 **Local workstation — student notes / Azure portal:**
 
-1.  Open the compute row for **each of the two selected physical-route sources**. Copy each actual target SKU approved in §6 into your notes and choose that exact SKU in the portal; the table's size descriptions are not literal values to enter.
+1.  Open the compute row for **each of the two selected Hyper-V sources**. Copy each actual target SKU approved in §6 into your notes and choose that exact SKU in the portal; the table's size descriptions are not literal values to enter.
 
-2.  Apply the individual mappings below, matching source identity/IP and modern appliance before editing a row:
+2.  Apply the individual mappings below, matching source VM identity/IP and the same HyperVHost provider before editing a row:
 
 | Source VM / Source IP | Source OS | Source vCPU / RAM | Exact Target Name / OS Type | Target Size to Select | OS / Boot Disk to Identify | Required Source Disk Set | Target Disk Type |
 |-----------------------|-----------|-------------------|----------------------------|-----------------------|----------------------------|--------------------------|------------------|
@@ -604,17 +485,17 @@ SQL and Tomcat use the **modern physical-server/Mobility path**, not the registe
 
 **Local workstation — Azure portal:**
 
-1.  Review **both SQL + App records**: source identities/IPs, physical/Mobility architecture, modern appliance, exact target names, region, **`rg-ces-target-01`**, final **`vnet-ces-target-01` → `default`**, OS types, actual approved sizes, boot disks, Windows licensing choice, and all required selected disks.
+1.  Review **both SQL + App records**: source VM identities/IPs, Hyper-V architecture, the same HyperVHost provider/project association, exact target names, region, **`rg-ces-target-01`**, final **`vnet-ces-target-01` → `default`**, OS types, actual approved sizes, boot disks, Windows licensing choice, and all required selected disks.
 
-2.  Confirm neither SQL nor App is enabled under the Hyper-V provider, and Web/Linux-Web are excluded from this modern appliance request.
+2.  Confirm SQL/App are selected only once under this Hyper-V provider. Web/Linux-Web already have their own Module 2 records on **the same provider**; exclude them from this new two-VM submission, not from the overall Hyper-V migration.
 
 3.  Review **Tags**, then select **Review and start execution** / **Start execution** for this two-VM selection, as shown in the current portal.
 
     This enables **initial replication**, not final migration or business cutover. Both sources remain serving; do not pause source orders or stop SQL/Tomcat for initial/delta replication.
 
-4.  Open the resulting **Preparation** jobs and record the setup job associated with each VM. Verify successful Mobility installation/registration and the intended appliance association as those stages complete; resolve reported errors before treating replication as active.
+4.  Open the resulting **Preparation** jobs and record the setup job associated with each VM. Verify the intended HyperVHost/source association and successful provider setup stages; resolve reported errors before treating replication as active.
 
-5.  Confirm Module 2 §6 already recorded the two frontend replication jobs. If not, complete **Module 2 §§5–6**, selecting the Hyper-V provider for **only Web + Linux-Web**, before starting any test migration.
+5.  Confirm Module 2 §6 already recorded the two frontend replication jobs. If not, complete **Module 2 §§5–6**, selecting the **same Hyper-V provider** for the Web + Linux-Web submission, before starting any test migration.
 
 **Local workstation — course instructions:**
 
@@ -630,7 +511,7 @@ SQL and Tomcat use the **modern physical-server/Mobility path**, not the registe
 
 ## 9. Step 5 — Monitor Replication
 
-Return here **after Module 2 §§7–8 has reviewed and tested the frontend pair**, retaining or deliberately recreating its isolated outputs as directed there. Replication for SQL/App was already submitted in §8. Replication readiness comes from each **modern physical-route** workload's **Preparation** details, installed agent/appliance versions, jobs, and actual recovery points—not a generic protection label or successful submission. The frontend Hyper-V records must be reviewed separately in the same project's **Execute → Migrations** view.
+Return here **after Module 2 §§7–8 has reviewed and tested the frontend pair**, retaining or deliberately recreating its isolated outputs as directed there. Replication for SQL/App was already submitted in §8. Replication readiness comes from each **Hyper-V** workload's **Preparation** details, the connected host/provider association, jobs and actual recovery points—not a generic protection label or successful submission. Review the frontend records as well in the same project's **Execute → Migrations** view; all four use the same host provider.
 
 | Observation | Meaning | Student Action |
 |-------------|---------|----------------|
@@ -703,7 +584,7 @@ Return here **after Module 2 §§7–8 has reviewed and tested the frontend pair
 
 ## 10. Step 6 — Test Migration
 
-A stateful test validates data integrity and the entire application, not just successful boot. Before **any** test copy boots, verify no test peering/route/DNS path to source or final SQL/App peers, and confirm both engines can create their test peers in the **same approved isolated VNet**. Inherited Windows startup tasks/Linux traffic services may auto-start against old aliases; network isolation protects the source before guest controls are available. Local CPU workers need a separate check, not an assumption about expiry.
+A stateful test validates data integrity and the entire application, not just successful boot. Before **any** test copy boots, verify no test peering/route/DNS path to source or final SQL/App peers, and confirm the Hyper-V workflow can create all four test peers in the **same approved isolated VNet**. Inherited Windows startup tasks/Linux traffic services may auto-start against old aliases; network isolation protects the source before guest controls are available. Local CPU workers need a separate check, not an assumption about expiry.
 
 Names ending in `-test` below are **illustrative role labels only**. Use the unique generated name and **resource ID produced by each actual test job**, never a guessed suffix or an unsuffixed source/final VM. Record all four test names/IDs/NIC IPs; verify all four alias mappings on all four guests **before any cross-tier request or controlled write**. If isolation, unique identities or common-VNet support cannot be verified, **STOP / DEFERRED**.
 
@@ -1152,9 +1033,9 @@ Names ending in `-test` below are **illustrative role labels only**. Use the uni
 
 ## 11. Step 7 — Cutover for Stateful Workloads
 
-Cutover is **one planned maintenance window for the four-VM application**, with separate modern-physical SQL/App jobs and Hyper-V frontend jobs—not an atomic cross-engine transaction or a frontend-only wave. Temporary business downtime is expected from write freeze through accepted target activation; neither zero downtime nor session/RAM preservation is promised. Sequence per-VM actions and validate each dependency. Keep manual order entry and all generators stopped until the complete target system passes the pre-write go/no-go checks.
+Cutover is **one planned maintenance window for the four-VM application**, with separate per-VM Hyper-V jobs—not an atomic four-VM transaction or a frontend-only wave. Temporary business downtime is expected from write freeze through accepted target activation; neither zero downtime nor session/RAM preservation is promised. Sequence per-VM actions and validate each dependency. Keep manual order entry and all generators stopped until the complete target system passes the pre-write go/no-go checks.
 
-The current physical tutorial (2026-06-27) offers **Completion → Migrate → Yes** for **“Shut down virtual machines and perform a planned migration with no data loss”**, and describes source shutdown plus on-demand replication of subsequent changes. The option label describes the planned path; it does not replace source-fencing and data-freshness checks or guarantee zero data loss. For **each** engine require a successful final-sync job, fresh accepted changes and the **actual source VM OFF**, followed by target business-data comparison. If shutdown/final sync cannot be verified, **STOP**; do not force host power-off and then expect a powered-off guest agent to upload a final delta, or substitute ASR failover instructions.
+Use the same **Hyper-V planned migration** flow as Module 2: **Completion → Migrate**, with **“Shut down virtual machines and perform a planned migration with no data loss”: Yes** (or the equivalent source-shutdown option shown). The option label does not replace source-fencing and data-freshness checks or guarantee zero data loss. For **each VM**, require a successful host-provider final-sync job, accepted changes through the final write boundary and the **actual source VM OFF**, followed by target business-data comparison. If shutdown/final sync cannot be verified, **STOP**; do not force power-off as a substitute for a completed migration job or use ASR failover instructions.
 
 ### 11.1 Cutover Sequence for the Application
 
@@ -1261,7 +1142,7 @@ flowchart TD
 
 **Local workstation — Azure portal:**
 
-18. Confirm both engines still have healthy replication and fresh points after the write freeze; review pending data/jobs and each planned source-shutdown/final-sync behavior before opening a Migrate pane.
+18. Confirm all four Hyper-V records still have healthy replication and fresh points after the write freeze; review pending data/jobs and each planned source-shutdown/final-sync behavior before opening a Migrate pane.
 
 19. Confirm final target routing/NSG/guest firewall paths for the five edges and approved management access, with pre-boot containment preventing **inherited source aliases or copied generators from reaching source SQL/App**. Deny source nested/source-VNet prefixes and do not create an interim hybrid path.
 
@@ -1345,7 +1226,7 @@ flowchart TD
 
 **HyperVHost — Hyper-V Manager:**
 
-6.  Confirm the mapped source App VM ID is **OFF**, with `AutomaticStartAction Nothing`. Require a successful modern-physical final-sync job accepting changes through the final boundary; STOP on uncertain shutdown/synchronization, not a force-off workaround.
+6.  Confirm the mapped source App VM ID is **OFF**, with `AutomaticStartAction Nothing`. Require a successful Hyper-V host-provider final-sync job accepting changes through the final boundary; STOP on uncertain shutdown/synchronization, not a force-off workaround.
 
 **Local workstation — Azure portal:**
 
@@ -1483,7 +1364,7 @@ flowchart TD
 
 **Local workstation — Azure portal / student notes:**
 
-1.  Record both engines' final job/synchronization evidence, actual four source OFF states, final data comparison and the single accepted target marker order.
+1.  Record all four Hyper-V records' final job/synchronization evidence, actual four source OFF states, final data comparison and the single accepted target marker order.
 
 2.  Inspect each workload's **Completion** stage. **Complete migration** is a separate action that stops replication/cleans migration state; it is not application acceptance, source backup or permission to delete source VMs.
 
@@ -1520,7 +1401,7 @@ For 100 VMs with 10 GB/day each:
     1,000 GB/day must be replicated, before overhead and initial-copy demand.
 ```
 
-Observed lag and recovery-point age matter more than theoretical line speed. Review host-provider throughput, source load, and network capacity; the approved modern appliance is a required second-method component, not a generic throughput fix.
+Observed lag and recovery-point age matter more than theoretical line speed. Review host-provider throughput, source load, and network capacity; an additional replication appliance is not a remedy for this main lab's host-provider bottlenecks.
 
 ### Network Path Selection
 
@@ -1652,7 +1533,7 @@ Rollback is more complex once Azure has accepted new transactions. You cannot si
 
 ## Key Takeaways
 
-1. **Two methods, one application.** Web/Linux-Web use the host provider; SQL/App use the separate modern appliance and Mobility. Statefulness alone does not mandate either method.
+1. **One Hyper-V method, one application.** All four workload VMs use the existing HyperVHost provider and Recovery Services agent; stateful SQL/App validation does not require guest Mobility Service or another replication appliance.
 2. **Test the full isolated application.** Recreate cleaned-up frontend test copies if needed; never substitute live VMs.
 3. **Health is not SQL readiness.** Validate database integrity, data freshness, the proxy, and one deliberate order readback.
 4. **Use one coordinated cutover window.** Pause writes, capture the final baseline, migrate dependencies in order, and repoint all targets before acceptance.
@@ -1669,7 +1550,292 @@ After shared-window acceptance, the expected final mapping is:
 |----|----------------|-----------------|----------|
 | `OnPrem-Web` | Hyper-V host provider | 2 | Windows IIS static frontend |
 | `OnPrem-Linux-Web` | Hyper-V host provider | 2 | Ubuntu 24.04 Nginx static site and proxy |
-| `OnPrem-SQL` | Modern physical / Mobility | 3 | SQL Server 2022 Express / ContosoApp |
-| `OnPrem-Linux-App` | Modern physical / Mobility | 3 | Ubuntu 24.04 Tomcat 10.1 / OpenJDK 17 Order Desk |
+| `OnPrem-SQL` | Hyper-V host provider | 3 | SQL Server 2022 Express / ContosoApp |
+| `OnPrem-Linux-App` | Hyper-V host provider | 3 | Ubuntu 24.04 Tomcat 10.1 / OpenJDK 17 Order Desk |
 
 Continue to **[Module 4: Azure Site Recovery Comparison](Module-4-ASR-Comparison.md)** for the conceptual comparison, then **[Module 5: Post-Migration Optimization](Module-5-Post-Migration.md)** for monitoring, backup, and optimization. No disaster-recovery deployment is part of this migration module.
+
+---
+
+## 14. Optional Alternate Path — Modern Appliance and Guest Mobility Service
+
+**Optional notes for learners who choose a separate source scenario; not required to complete this course.** The main lab uses the existing HyperVHost provider for **all four VMs**. No additional appliance VM, guest agent, appliance credentials, disks or capacity are required by the main lab.
+
+This alternative would **likely require an additional machine connected to the lab network with the capacity and supported placement required by Microsoft**. That machine is **not provisioned by this lab**. Connection to the host's Azure VNet alone does **not** make the nested `192.168.0.0/24` private `intSwitch` reachable: the owner must provide and verify approved routing, DNS and source-to-appliance TCP paths before use. No ad hoc NAT change, broad firewall rule or security bypass is supplied here. Do not assume the existing nested host has suitable spare capacity or that eight logical processors prove eight guest-visible CPU cores. Do not build another nested appliance on it, resize the host/disk, clone a workload or discovery appliance, or add a lab helper as part of these notes. The operator must supply and qualify the separate environment before installation.
+
+### 14.1 Scope, Support and Capacity Gates — Before Any Installation
+
+#### Hands-On Steps
+
+**Local workstation — alternate-scenario notes / instructor and resource owner:**
+
+1.  Choose the alternate architecture **before enabling Hyper-V protection for its sources**, using a separate approved scenario. If the main lab is already replicating, use **fresh, unprotected separate source machines**. Never dual-protect a VM, rebind the existing host/vault, or stop/delete existing protection to convert this course's SQL/App pair.
+
+2.  Record the separate sources' actual VM/machine IDs, IP/FQDN, OS, disks, dependency group, project/resource IDs, target region/networks and appliance endpoint. Verify the Azure Migrate project's **Physical or others replication-appliance flow**, its managed-resource/appliance/source associations and current support. A matching name or the presence of both portal choices is not proof of compatible associations. Do not silently substitute a standalone ASR DR vault, policy or failover exercise.
+
+3.  Review the current [modern appliance support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/replication-appliance-support-matrix) and its supported hosting/placement conditions with the owner. Required appliance characteristics in the retained guidance include **Windows Server 2022 Desktop Experience, English**, **at least eight CPU cores visible inside the appliance OS**, **16 GB RAM**, **80 GB OS storage and a separate 620 GB data disk**, with full persistent backing and adequate free-space/headroom. Verify actual core topology and installer validation, not merely an eight-vCPU or eight-logical-processor setting; no dedicated physical-core reservation or nested-placement certification is promised. Capacity alone does not qualify placement. The clean appliance OS must not have Hyper-V, IIS or AD DS roles installed.
+
+4.  Qualify the **exact OS + running kernel/flavour + Mobility version + storage/controller/filesystem/logical-sector + boot/EFI/Secure Boot tuple** for every alternate source against the [source support matrix](https://learn.microsoft.com/en-us/azure/site-recovery/vmware-physical-azure-support-matrix). A package filename containing Ubuntu 24.04, a distribution name or an assessment Ready label alone is not support evidence. For Linux, use approved read-only observations:
+
+   ```bash
+   cat /etc/os-release
+   uname -r
+   lsblk -o NAME,KNAME,TYPE,SIZE,FSTYPE,FSVER,MOUNTPOINTS,PKNAME,TRAN,MODEL,LOG-SEC,PHY-SEC
+   findmnt /
+   test -d /sys/firmware/efi && printf 'UEFI boot\n' || printf 'Review boot mode\n'
+   ```
+
+   Record Windows support and every required data/log/application disk as well. For Linux sources, the cited matrix excludes guest NVMe; 4-KiB logical sectors are unsupported for both Windows and Linux sources. An outer host controller does not establish the guest's controller. Do not pin a guessed kernel, replace storage, loosen security or force an unsupported package.
+
+5.  Approve scoped source-to-appliance **TCP 443 and 9443**, appliance-to-Azure HTTPS/endpoints, supported management access, credentials and budget. These are data/control paths, not an old appliance-management URL. Confirm the actual listeners and end-to-end paths **after** appliance installation, before guest registration/protection. Do not disable firewalls, relax UAC or enable root/password SSH to make push installation work.
+
+6.  Rehearse and qualify this exact separate build and hosting placement before inviting students to install or replicate. Unverified support, hardware topology, associations, privileges or network paths mean **STOP / DEFERRED**, not a requirement to repair the current lab.
+
+**Architectural distinction:** Guest Mobility captures changed source disk blocks. The modern replication appliance's process-server/replication roles receive and transfer those changes; the appliance does not replace guest capture, and neither role is the existing HyperVHost provider or the discovery appliance. Disk replication does not copy open memory/sessions, perform SQL log shipping, prove database consistency or guarantee zero RPO.
+
+### 14.2 Prepare the Azure Migrate Physical-Source Flow
+
+The retained [physical-server tutorial](https://learn.microsoft.com/azure/migrate/tutorial-migrate-physical-virtual-machines?view=migrate), updated 2026-06-27, uses the **simplified/modern agent-based experience**. The classic agent-based appliance retired on 2026-09-30; that does not retire Module 1's Classic Azure VM assessment. Do not use an old Windows Server 2016/configuration-server/MySQL recipe, a guessed download URL or the discovery appliance installer.
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal, separate approved scenario:**
+
+1.  Open and verify the intended Azure Migrate project/subscription/resource IDs and its approved source/appliance/managed-resource associations.
+
+2.  Select **Execute → Migrations → Start execution** → **Servers or virtual machines (VMs)** → **Azure VM**.
+
+3.  Under **Other sources**, choose **From a replication appliance (Physical or others)** and its appliance setup link. Match equivalent labels shown in the actual portal; no Wave is required.
+
+4.  Confirm virtualization **Physical**, the approved target region and region confirmation.
+
+5.  Select **Create resources** only if required in this separately verified scope. This prepares project-managed migration resources, including its background recovery vault, and locks the region. Do not change the existing main-lab host's registration or create a standalone ASR DR relationship.
+
+6.  Obtain the current appliance package and **Azure Migrate replication appliance key text** from this project's actual setup page. Keep the key private. The appliance key entered during registration is **not** the later per-machine Mobility configuration file.
+
+### 14.3 Install and Register the Additional Appliance
+
+#### Hands-On Steps
+
+**Additional replication-appliance machine — elevated PowerShell / installer UI:**
+
+1.  Download the current appliance package from the **actual project's setup link**.
+
+2.  Verify the publisher/signature and any currently published hash using the official instructions; extract to the documented location on the guest's actual data volume. If that volume is `E:`, the usual appliance agent path is `E:\Software\Agents`; use the installed path reported by the current installer, not a guessed host drive.
+
+3.  Follow the current vendor **PowerShell appliance setup** instructions and run the supplied **`DRInstaller.ps1` as Administrator inside the additional appliance machine**, not on HyperVHost, the discovery appliance or a workload.
+
+    Follow the current signed Microsoft installer's instructions; no fixed binary URL, execution-policy bypass or lab script modification is supplied here. If the signed installer/prerequisites cannot run under approved policy, **STOP for the owner**, not a security workaround.
+
+**Replication appliance — Microsoft Azure Appliance Configuration Manager:**
+
+4.  Let prerequisite checks and component status load, resolve approved prerequisite issues, then select **Continue**.
+
+5.  Select the approved **FQDN or NAT IP** connectivity choice; verify source guests can reach that actual endpoint and the appliance can reach required Azure endpoints. Save and continue.
+
+6.  Enter a unique **Friendly name of appliance** and the **Azure Migrate replication appliance key** obtained from this project's portal setup page.
+
+    This is not a legacy shared passphrase. Keep key/configuration files and all credentials private.
+
+7.  Select **Login** and complete the Azure authentication tab/device-code flow before its five-minute code expires.
+
+8.  Verify the displayed **Subscription, Resource Group, and Recovery Services Vault** belong to the separately approved Azure Migrate project and associations recorded in §14.1; then continue.
+
+9.  Under **Provide Physical Server Details**, select **Add Credentials** where approved: record OS, credential friendly name, and the actual source username/password in the protected UI.
+
+    Current push installation requires a source **Windows administrator** and source **Linux root** credential. Existing SSH/sudo inventory access does not by itself prove push eligibility. **STOP** if these privileges are not approved; do not enable root/password SSH, relax UAC/firewalls, or change security policy merely for push. Use the supported manual-agent option below only if its separately approved privileges and procedure are available.
+
+10. Select **Add Server**, entering each exact separate SQL/App **source IP/FQDN** and the approved credential account as required by the selected installation route.
+
+11. Confirm fresh identities and source access; exclude every main-lab source already using Hyper-V replication, HyperVHost, `MigrateAppl` and the replication appliance itself.
+
+**Local workstation — Azure portal:**
+
+12. Confirm this modern appliance is registered and healthy in the intended project/region, with its current component versions.
+
+13. Record its identity, versions, registration status and the verified SQL/App source associations without secrets.
+
+**Separate SQL and App source equivalents — approved guest sessions:**
+
+14. Now that appliance installation/registration is complete and its TCP 443/9443 listeners are ready, verify **both source guests** can connect to the configured private appliance endpoint (record the actual privately reachable endpoint; no address is reserved by this lab) on **both TCP 443 and 9443**, using the approved guest connection checks. Confirm the appliance's required outbound Azure HTTPS checks pass as well. Record the results before any Mobility installation or replication enablement. If a listener or path fails, resolve that specific service/routing/scoped-firewall issue; do not disable firewalls, broaden access or proceed on the earlier route review alone.
+
+### 14.4 Choose a Supported Mobility Installation Route
+
+#### Hands-On Steps
+
+**Local workstation — student notes:**
+
+1.  Recheck the exact OS/kernel/Mobility support evidence from §14.1 before any guest installation.
+
+2.  Select **push installation** in §14.5 only if the documented Windows administrator/Linux root privileges, scoped connectivity and change approval are satisfied.
+
+3.  Otherwise, use **manual installation** only from the registered modern appliance and the current [Mobility Service instructions](https://learn.microsoft.com/azure/site-recovery/vmware-physical-mobility-service-overview), updated 2026-10-15.
+
+**Separate source SQL equivalent — approved local administrator / installer UI (manual option):**
+
+4.  Obtain the appliance-matched Windows installer using the current documented transfer method and verify its publisher/version.
+
+5.  Open the installer, select **Install**, and obtain that source machine's **Machine Details** string from its configurator.
+
+**Replication appliance — Configuration Manager (manual option):**
+
+6.  Open **Mobility service configuration details**, supply that machine's details string, and select **Download configuration file**.
+
+**Separate source SQL equivalent — Unified Agent configurator (manual option):**
+
+7.  Supply the resulting **machine-specific configuration file** and select **Register**. Confirm successful registration to this appliance.
+
+**Separate source App equivalent — approved privileged SSH session (manual option):**
+
+8.  Open the current official article's **Linux manual installation** instructions and choose the exact supported OS/agent package matching this appliance.
+
+9.  Follow the current article's **modern `CSPrime` Linux installation** procedure in that source's terminal with approved privileges. Use the matching package's documented installer and exact current arguments; do not substitute a classic configuration-server/passphrase sequence.
+
+10. Use the installed Linux configurator's documented machine-details operation to capture **that Linux source's `MachineDetails` string**. This is source-specific; do not reuse Windows details or another machine's configuration.
+
+**Additional replication appliance — Configuration Manager (Linux manual option):**
+
+11. Open **Mobility service configuration details**, supply the Linux source's actual machine-details string, and select **Download configuration file** for that source.
+
+**Separate source App equivalent — approved privileged SSH session (manual option):**
+
+12. Transfer the resulting **machine-specific configuration file** through the approved protected method, then use the matching Linux configurator's current documented registration operation and configuration-file argument to register to this appliance.
+
+13. Confirm registration succeeded and protect or remove installation/configuration artifacts according to the approved vendor/credential-handling procedure.
+
+    **STOP** if the precise package, `CSPrime` procedure, command arguments, machine-specific configuration or privileges cannot be verified. Do not use the Windows GUI sequence for Linux, guess an old binary URL/CLI/passphrase, or force an unsupported agent/kernel combination. This guide deliberately does not invent a version-dependent Linux command block. The Azure Migrate appliance key text is not a substitute for this guest's configuration file.
+
+**Local workstation — Azure portal / replication appliance:**
+
+14. Verify the actual Mobility version, source identity, registered appliance and successful agent connection for both SQL and App. If using push, perform this verification after §14.5 enables replication.
+
+**Expected Result:** The separate modern appliance and selected supported agent-install route meet the recorded prerequisites; otherwise stop before installation/replication and refer the unresolved condition to its owner. Discovery, appliance registration, guest-agent registration and successful disk replication are distinct checks.
+
+**CSA Why:** Correct modern registration and approved guest privileges prevent mixing a retired workflow, the wrong appliance, or a duplicate source record with a successful migration.
+
+---
+
+### 14.5 Configure Replication for the Separate Alternate Sources
+
+Only the **fresh, unprotected alternate SQL/App equivalents** use this modern physical-server/Mobility path. The familiar role names, IPs, 40-GB/30-GB source disks and target-network examples below come from the sample inventory: substitute the separately verified identities, disks, approved region/resource groups and networks for your alternate environment. Do not submit the protected main-lab SQL/App sources or reuse their target names in a conflicting scope. Select every required disk; replication preserves disk state rather than rebuilding an app. Initial/delta replication does not require the alternate sources to stop serving.
+
+#### 14.5.1 Start the Replication Wizard
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Open the verified lab project → **Execute → Migrations → Start execution**.
+
+2.  Choose **Servers or virtual machines (VMs)** → **Azure VM**.
+
+3.  Select **From a replication appliance (Physical or others)** and the registered modern appliance from §14.3.
+
+4.  Alternatively, use **From all inventory** or **From an assessment** only when the displayed record/architecture can be verified as this physical-route SQL/App source; select the corresponding Physical discovery appliance when prompted.
+
+    The Hyper-V discovery inventory may contain a same-name record. It is not permission to select **From replication provider (Hyper-V)** for this pair. **STOP on ambiguous identity, duplicate selection, wrong architecture or unresolved readiness**; do not try different records until something executes.
+
+#### 14.5.2 Select Virtual Machines
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Select exactly the **separate, unprotected SQL and App equivalent sources recorded in §14.1**, matching each source IP/FQDN and identity; role labels below do not authorize selecting main-lab VMs.
+
+2.  On **Workloads**, verify the two fresh source identities, source addresses, physical replication architecture and correct **replication-appliance** dropdown; review each readiness finding.
+
+3.  Review imported assessment values if used, then the supported **Target VM security type**, approved **Guest credentials** for push, or the already verified manual-agent registration. Do not silently accept a security change or grant extra privileges.
+
+4.  For **manual installation**, require verified agent registration now. For **push**, record installation as **approved / pending initial execution**, not already complete; installation occurs after §14.5.6 submission. Require support, credential and readiness gates before **Next**, and verify successful installation/registration in the resulting jobs before treating replication as active.
+
+#### 14.5.3 Configure Target Settings
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Select the lab subscription.
+
+2.  Select **`rg-ces-target-01`**.
+
+3.  Confirm the project's prepared target region.
+
+4.  Select its offered replication storage/cache account, creating it through the wizard only if required.
+
+5.  Choose final target **`vnet-ces-target-01` → `default` (`10.1.0.0/24`)**.
+
+    The isolated `10.2` network is selected later for test migration, not as the final target.
+
+#### 14.5.4 Configure Each VM's Compute Settings
+
+#### Hands-On Steps
+
+**Local workstation — student notes / Azure portal:**
+
+1.  Open the compute row for **each of the two selected physical-route sources**. Copy each actual target SKU approved for this separate scenario into your notes and choose that exact SKU in the portal; the table's size descriptions are not literal values to enter.
+
+2.  Apply the individual mappings below, matching source identity/IP and modern appliance before editing a row:
+
+| Source VM / Source IP | Source OS | Source vCPU / RAM | Exact Target Name / OS Type | Target Size to Select | OS / Boot Disk to Identify | Required Source Disk Set | Target Disk Type |
+|-----------------------|-----------|-------------------|----------------------------|-----------------------|----------------------------|--------------------------|------------------|
+| `OnPrem-SQL` / `192.168.0.11` | Windows Server 2022 | 2 / 4 GB | `OnPrem-SQL` / **Windows** | Exact SQL SKU approved for this separate scenario | Actual **40-GB** OS/boot disk; match its recorded disk ID | OS disk and every actual disk/volume holding SQL data or logs | **Standard SSD**, unless a reviewed alternative is approved |
+| `OnPrem-Linux-App` / `192.168.0.13` | Ubuntu 24.04 | 2 / 2 GB | `OnPrem-Linux-App` / **Linux** | Exact App SKU approved for this separate scenario | Actual **30-GB** OS/boot disk; match its recorded disk ID | OS disk and every other required disk actually present for application/configuration/logs | **Standard SSD**, unless a reviewed alternative is approved |
+
+3.  Set SQL's target name **`OnPrem-SQL`**, OS **Windows**, and approved SQL size. Review its assessed memory, storage, performance, source/target support and current regional/family quota/capacity.
+
+4.  Set App's target name **`OnPrem-Linux-App`**, OS **Linux**, and approved App size, preserving Ubuntu 24.04 and the existing Tomcat/OpenJDK runtime.
+
+5.  Do not blindly downsize either two-vCPU source. Neither `Standard_D2als_v6` from an assessment export nor an old all-four `Standard_D2as_v5` example is a required SKU or capacity reservation.
+
+6.  Identify **each actual OS/boot disk** by its recorded ID and boot/volume layout, and review supported target settings for its source generation. Resolve any mismatch with the 40-GB/30-GB inventory before submission; do not guess that the first disk is the OS disk.
+
+7.  Keep Windows **Azure Hybrid Benefit / existing-license rights: No** unless eligible rights have been confirmed. Do not apply a Windows benefit to the Linux row.
+
+#### 14.5.5 Configure Each VM's Disk Settings
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal / source inventory:**
+
+1.  Open the disk selections for **SQL and App** within this same wizard. Include SQL's **40-GB** and App's **30-GB** OS/boot disks.
+
+2.  Reconcile **all required source disks and volumes** against the separately captured source inventory. Include every actual SQL data/log location and App file/configuration/log location; if these reside on the OS disk, include that disk without inventing a separate data disk. Verify and include additional disks only where they actually exist and are required.
+
+3.  Choose **Standard SSD** for the lab's target disks unless an assessment-driven alternative has been agreed. Record the selected disk IDs, sizes and target types for both rows.
+
+4.  Confirm no required data/log disk was excluded and no required filesystem depends on an omitted disk.
+
+    Do not move SQL files or logs to an ephemeral disk as part of this exercise.
+
+#### 14.5.6 Review and Start Replication for the Pair
+
+#### Hands-On Steps
+
+**Local workstation — Azure portal:**
+
+1.  Review **both SQL + App records**: source identities/IPs, physical/Mobility architecture, modern appliance, exact target names, region, **`rg-ces-target-01`**, final **`vnet-ces-target-01` → `default`**, OS types, actual approved sizes, boot disks, Windows licensing choice, and all required selected disks.
+
+2.  Confirm neither SQL nor App is enabled under the Hyper-V provider, and Web/Linux-Web are excluded from this modern appliance request.
+
+3.  Review **Tags**, then select **Review and start execution** / **Start execution** for this two-VM selection, as shown in the current portal.
+
+    This enables **initial replication**, not final migration or business cutover. Both sources remain serving; do not pause source orders or stop SQL/Tomcat for initial/delta replication.
+
+4.  Open the resulting **Preparation** jobs and record the setup job associated with each VM. Verify successful Mobility installation/registration and the intended appliance association as those stages complete; resolve reported errors before treating replication as active.
+
+5.  Monitor the separate sources' setup jobs and actual recovery points. Do not treat a submitted request or installed Mobility agent as completed disk replication.
+
+**Local workstation — alternate-scenario plan:**
+
+6.  Before any alternate test or final migration, establish its own complete dependency group and supported same-isolated-VNet test design. Apply the §§5/9–13 data-baseline, independent backup, pre-boot isolation, copied-writer/CPU disarm, actual-IP alias, SQL integrity, final-write-freeze and data-aware rollback safeguards to those separate sources, with the correct physical-route jobs and identities. These are design controls, not permission to execute main-lab host commands against the original protected VMs; verify every scenario-specific identity, name and network before any action.
+
+7.  Do not rejoin this alternate pair to the four-VM main-lab instructions as a mixed-engine substitution. The required course remains all-four Hyper-V with one coordinated cutover. If the separate scenario cannot meet its own support, test, source-shutdown/final-sync and reconciliation gates, record it **DEFERRED** without changing existing protection.
+
+**Expected Result:** The separate alternate pair has reviewed mappings and agent/appliance setup evidence. Initial sync, isolated application testing and any final migration remain separate gated activities; the main lab is unchanged.
+
+**CSA Why:** The paired request preserves each workload's complete disk/runtime mapping without confusing replication submission with recovery-point readiness.
+
+---
+
+**Source guidance retained from the course:** physical migration tutorial — 2026-06-27; modern appliance and source support matrices and Mobility Service overview — 2026-10-15. Recheck the current official instructions for the exact approved environment before using these optional notes. No live environment or vendor support qualification is established by this document.

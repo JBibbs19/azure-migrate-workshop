@@ -4,7 +4,7 @@
 
 > **Cloud Adoption Framework context:** Discovery and assessment support migration planning · **Prerequisite:** [Module 0: Setup](Module-0-Setup.md) completed
 >
-> **Prerequisites:** Use a fresh project and pristine source identities as recorded in [Module 0 §3.6](Module-0-Setup.md#36--two-method-resources-and-isolation). Follow the manual module actions for discovery and assessment.
+> **Prerequisites:** Use a fresh project and pristine source identities as recorded in [Module 0 §3.6](Module-0-Setup.md#36--source-identities-and-test-isolation). Follow the manual module actions for discovery and assessment.
 
 ## Module Overview
 
@@ -21,7 +21,7 @@ A thorough discovery reveals:
 - **Readiness conditions** — configurations that need investigation before replication.
 - **Cost estimates** — target-region estimates whose assumptions you can explain.
 
-The Hyper-V Migrate appliance used here performs **discovery and assessment only**. Module 2 configures host-based replication for Web/Linux-Web; Module 3 configures a **separate modern replication appliance and guest Mobility Service** for SQL/App treated as physical servers. Replication architecture is verified separately from inventory identity; never protect the same VM through both methods.
+The Hyper-V Migrate appliance used here performs **discovery and assessment only**. Module 2 configures host-based replication for Web/Linux-Web; Module 3 adds SQL/App using the **same existing HyperVHost provider, Azure Migrate project and source-host binding**. Inventory identity and replication readiness are separate checks; never create duplicate protection for a source VM.
 
 ------------------------------------------------------------------------
 
@@ -48,7 +48,7 @@ Azure Migrate provides a project in which discovery, assessment, and migration i
 
 ### Discovery Appliance
 
-The Windows-based appliance queries the **Hyper-V host** through WinRM/CIM for VM configuration and performance information. With appropriate guest credentials, it can also connect to Windows guests through PowerShell remoting and Linux guests through SSH for supported software inventory and dependency features. `MigrateRepl` is not created until Module 3, after this assessment. Continuous host-based inventory can then include it even if that guest does not allow discovery-appliance connections; later inventory does not change an already explicitly selected four-workload assessment group. Do not block connectivity or hide inventory to force a four-server portal count; select the four workload identities explicitly for assessment and migration.
+The Windows-based appliance queries the **Hyper-V host** through WinRM/CIM for VM configuration and performance information. With appropriate guest credentials, it can also connect to Windows guests through PowerShell remoting and Linux guests through SSH for supported software inventory and dependency features. Continuous host-based inventory may include infrastructure such as `MigrateAppl`; infrastructure records do not change an explicitly selected four-workload assessment group. Do not block connectivity or hide inventory to force a four-server portal count; select the four workload identities explicitly for assessment and migration.
 
 | Component | Role in this module |
 |---|---|
@@ -736,7 +736,7 @@ VM inventory, software inventory, and performance collection progress separately
 
 3.  Find the four workload names individually.
 
-    Do not treat the headline server count as proof of scope. `MigrateAppl` may also appear as infrastructure inventory; `MigrateRepl` may appear after its later Module 3 creation. Their presence does not add a migration workload.
+    Do not treat the headline server count as proof of scope. `MigrateAppl` may also appear as infrastructure inventory. Its presence does not add a migration workload.
 
 4.  Open each workload record and compare its name, source host, source VM ID, OS, address, CPU, and memory with the lab identity register and Hyper-V Manager.
 
@@ -756,7 +756,7 @@ VM inventory, software inventory, and performance collection progress separately
 
 9.  Record the four server names, source VM IDs, OS values, source host, and discovery status.
 
-    Keep `HyperVHost`, `MigrateAppl` and `MigrateRepl` out of your workload assessment and migration selections.
+    Keep `HyperVHost` and `MigrateAppl` out of your workload assessment and migration selections.
 
 **Expected Result:** The portal contains fresh records for all four named workloads from the correct Hyper-V host, with the expected operating systems and configuration. Inventory may contain additional infrastructure; only the four verified workload identities belong to the assessment and migration scope.
 
@@ -779,7 +779,7 @@ An assessment of the wrong four records can look complete while omitting a workl
 
 ### 5.1 — Start the Assessment Wizard
 
-The required exercise is the **Classic Azure VM server assessment**, which evaluates IaaS readiness, sizing, and cost for four servers. It is not an application or PaaS assessment. The 2026-09-30 retirement of the **classic agent-based appliance** is a different lifecycle change; it does not mean this grouped server assessment was retired.
+The required exercise is the **Classic Azure VM server assessment**, which evaluates IaaS readiness, sizing, and cost for four servers. It is not an application or PaaS assessment. Here **Classic** identifies the grouped server-assessment API, not the migration method; it does not require a guest replication agent.
 
 #### Hands-On Steps
 
@@ -846,7 +846,7 @@ The assessment group must contain exactly the four workload **server records**. 
 
 2.  Select only **OnPrem-Web**, **OnPrem-SQL**, **OnPrem-Linux-Web**, and **OnPrem-Linux-App**, using the source details validated in Step 4.
 
-3.  Verify that the selection contains exactly those four workload identities and excludes `HyperVHost`, `MigrateAppl`, `MigrateRepl` and any other infrastructure record. Do not use **Select all** on an unfiltered inventory.
+3.  Verify that the selection contains exactly those four workload identities and excludes `HyperVHost`, `MigrateAppl` and any other infrastructure record. Do not use **Select all** on an unfiltered inventory.
 
 4.  Continue to the review page.
 
@@ -966,7 +966,7 @@ No separately assessed Tomcat, Nginx or Contoso Order Desk web-application asset
 
     Confirm the supported remediation with the SQL owner/support before changing configuration. Do not enable/disable a trace flag or change SQL configuration based on the warning alone.
 
-4.  Mark unresolved readiness findings as follow-up items; a Ready VM assessment does not clear Module 3's kernel/Mobility/storage gates.
+4.  Mark unresolved readiness findings as follow-up items; a Ready VM assessment does not clear Modules 2–3's Hyper-V source/disk/target support and application-validation gates.
 
 **Expected Result:** Your notes accurately describe the exported recommendations and limitations while keeping the workshop's four-VM IaaS scope unchanged.
 
@@ -1090,7 +1090,7 @@ A live map is evidence about a collection window, not a complete application con
 
 ### Concepts — Plan the Connected Application, Not Just the Teaching Pairs
 
-The four workload VMs form **one application migration boundary**. Modules 2 and 3 are two hands-on replication exercises, **not independent application waves**: Web/Linux-Web use the Hyper-V host provider; SQL/App are treated **as physical servers** with the separate modern simplified replication appliance and guest Mobility Service. Both methods can replicate active, stateful disk writes; statefulness does not mandate Mobility. Never enable both methods for the same source VM.
+The four workload VMs form **one application migration boundary**. Modules 2 and 3 are two teaching-pair exercises, **not independent application waves or different replication engines**: all four use the **same existing HyperVHost provider, project and source-host binding**. Statefulness adds SQL/application validation, not a guest migration-agent requirement. Never create duplicate protection for a source VM.
 
 | Planning stage | Scope | Boundary |
 |---|---|---|
@@ -1118,7 +1118,7 @@ The four workload VMs form **one application migration boundary**. Modules 2 and
 
     Keep the source serving the lab during preparation; do not split application writes between source and target databases.
 
-7.  Record the need for one coordinated window with separate engine-specific final synchronization/source shutdown jobs and a shared traffic-switch decision in the later migration modules, plus a rollback decision before target writes are accepted.
+7.  Record the need for one coordinated window with separate per-VM Hyper-V final synchronization/source-shutdown jobs and a shared traffic-switch decision in the later migration modules, plus a rollback decision before target writes are accepted.
 
     Do not shut down, delete, or cut over any source VM in this module.
 
@@ -1154,7 +1154,7 @@ The [wave execution experience](https://learn.microsoft.com/azure/migrate/how-to
 ## Key Takeaways
 
 - **Discovery establishes identity and scope.** Validate the four named workloads and their source details, not just a count.
-- **The Hyper-V discovery appliance does not replicate workloads.** Web/Linux-Web host replication is set up in Module 2; SQL/App use the separate modern appliance and guest Mobility Service in Module 3.
+- **The Hyper-V discovery appliance does not replicate workloads.** Web/Linux-Web host replication is set up in Module 2; SQL/App use the same registered HyperVHost provider in Module 3.
 - **Manual deployment has security boundaries.** Verify the published archive, preserve the exported configuration, scope host access, and keep project keys and credentials private.
 - **Assessment results need interpretation.** Review completed results for all four servers and record region, readiness, sizing, pricing, and collection limitations.
 - **Missing map edges are not proof of independence.** Combine current observations with known application behavior and architecture.

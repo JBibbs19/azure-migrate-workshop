@@ -882,6 +882,7 @@ Write-Host "  Manual module coverage only: $($manualHandoff.ManualCoverage)" -Fo
 Write-Host '  No Azure calls, migration jobs, network changes, guest commands or source shutdown were performed. No module section is claimed complete.' -ForegroundColor Yellow
 Write-Host '  Missing/unknown source, target, project or workload metadata never authorizes automation; independently validate the exact project and selected source identities in the portal.' -ForegroundColor Yellow
 Write-Host '  Use Azure portal > Azure Migrate > your project > Replicating machines (Hyper-V); never select by display name alone.' -ForegroundColor White
+Write-Host '  Hold one coordinated Module 3 section 11 window for all four workloads: complete all four isolated tests, freeze/drain source writers and take the final SQL backup/data baseline before any source shutdown. No frontend-only early cutover.' -ForegroundColor Yellow
 Write-Host '  Before portal Migrate: verify successful selected-workload test migration and cleanup, application/data/dependency validation, healthy replication and an approved maintenance window.' -ForegroundColor White
 Write-Host '  An authorized operator must explicitly approve and start portal cutover for the exact selected Hyper-V sources, including the approved source-shutdown choice. No authorization is inferred from this script or -TurnOffSourceVMs.' -ForegroundColor Yellow
 Write-Host '  Supported Hyper-V procedure: https://learn.microsoft.com/azure/migrate/tutorial-migrate-hyper-v' -ForegroundColor White
@@ -937,11 +938,10 @@ $vmNames = @("OnPrem-Web", "OnPrem-SQL", "OnPrem-Linux-Web", "OnPrem-Linux-App")
 # ================================================================
 # WORKLOAD GROUP FILTER
 # ================================================================
-# Modules 2 and 3 are parallel branches off Module 1: Module 2 takes
-# OnPrem-Web and OnPrem-Linux-Web all the way through cutover, Module 3
-# does the same for OnPrem-SQL and OnPrem-Linux-App. -Workload narrows
-# this script to one of those branches so the lab state can be advanced
-# one module at a time. All is the original behaviour.
+# Historical group labels narrow inventory only; both pairs use the same Hyper-V
+# host provider and form one application. These unreachable legacy filters never
+# authorize separate cutovers: the manual handoff above stops before Azure calls.
+# Hold all four for the one coordinated final window in Module 3 section 11.
 $LabWorkloadGroups = @{
     Agentless  = @("OnPrem-Web", "OnPrem-Linux-Web")
     AgentBased = @("OnPrem-SQL", "OnPrem-Linux-App")

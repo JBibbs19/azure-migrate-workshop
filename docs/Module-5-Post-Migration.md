@@ -8,7 +8,7 @@
 >
 > **Objectives:** Review application health, configure and verify guest monitoring, assess data protection, harden role-specific network access, review costs, assess updates, and complete an operations runbook.
 >
-> **Prerequisite:** Begin only after [Module 3](Module-3-Agent-Based-Migration.md)'s shared cutover acceptance; otherwise defer these changes. The two replication engines are not ongoing monitoring or DR.
+> **Prerequisite:** Begin only after [Module 3](Module-3-Agent-Based-Migration.md)'s shared cutover acceptance; otherwise defer these changes. The migration host provider is not ongoing monitoring or DR.
 >
 > **Lab Scope:** Four migrated Azure IaaS VMs; both Linux guests remain Ubuntu 24.04. Required student work is manual and portal-first. Resource creation and configuration changes require the appropriate permissions and approved lab scope/budget. Backup/restore, ASR, flow logging, Bastion, paid Defender plans, commitments, and scheduled patch installation are optional, not assumed to exist.
 
@@ -1409,7 +1409,7 @@ Statuses are **verified**, **pending**, **failed**, **deferred**, or **not appro
 | **Module 0: Environment Setup** | Ready | Nested Hyper-V lab with Windows Server 2022 and Ubuntu 24.04 workloads |
 | **Module 1: Discovery & Assessment** | Plan | Discovery, assessment, sizing, and migration planning for the four servers |
 | **Module 2: Migration Preparation** | Migrate | Supported Hyper-V replication preparation and target/test planning |
-| **Module 3: Migration Validation & Cutover** | Migrate | SQL/App modern physical/Mobility plus Web/Linux-Web Hyper-V; one full isolated test and shared planned cutover, alias repointing, and data/application acceptance |
+| **Module 3: Migration Validation & Cutover** | Migrate | All four VMs on the same Hyper-V host provider; one full isolated test and shared planned cutover, alias repointing, and data/application acceptance |
 | **Module 4: ASR vs Azure Migrate** | Migrate — Tool Selection | Tool comparison, ADR, recovery requirements, and optional review-only ASR walkthrough |
 | **Module 5: Post-Migration Operations** | Manage + Govern | Actual monitoring/network/cost/update results and optional protection activities |
 

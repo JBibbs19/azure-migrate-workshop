@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$AdminUsername,
     [Parameter(Mandatory)][string]$AdminPassword,
     [Parameter(Mandatory)][string]$WindowsVhdSasUrl,
-    [Parameter(Mandatory)][string]$HostVMId,
+    [Parameter(Mandatory)][ValidateRange(1,40)][int]$WindowsImageSizeGB,
     [string]$IncludeApplianceVhd = 'No',
     [string]$ApplianceVhdSha256 = '',
     [string]$WorkshopTitle = 'TD SYNNEX - Cloud Enablement Services'
@@ -26,7 +26,7 @@ if (Test-Path "$labRoot\setup-complete.json") {
     throw 'This host has already been provisioned. Use validation, not deployment, after migration starts.'
 }
 $labResuming = Test-Path "$labRoot\setup-log.txt"
-$labBuildMarker = 'LAB_BUILD|ubuntu2404-prepared-replication-v1'
+$labBuildMarker = 'LAB_BUILD|ubuntu2404-hyperv-student-v1'
 $matchingBuild = $labResuming -and @(Get-Content -LiteralPath $logFile | Where-Object { $_ -ceq $labBuildMarker }).Count -gt 0
 if (($labResuming -and -not $matchingBuild) -or
     (@(Get-VM -Name OnPrem-Web,OnPrem-SQL,OnPrem-Linux-Web,OnPrem-Linux-App -ErrorAction SilentlyContinue).Count -gt 0 -and -not $matchingBuild)) {
@@ -406,6 +406,8 @@ try {
                 # context, which is what this script runs as. --continue-at - resumes a partial
                 # file after a drop. This matches what migrate-step2 already does for the same
                 # archive.
+                $free = [long](Get-Volume -DriveLetter $Root.Substring(0,1) -ErrorAction Stop).SizeRemaining
+                if ($free -lt 30GB) { throw 'Less than 30 GiB is free in ApplianceStore before discovery download. Preserve existing files and review capacity.' }
                 $partial = "$zip.partial"
                 $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
                 if (-not (Test-Path $curl)) { throw 'curl.exe was not found on this host.' }
@@ -487,6 +489,27 @@ $ubuntuBaseVhd  = "$vhdPath\Ubuntu2404-Base.vhdx"
 $windowsBaseVhd = "$vhdPath\WindowsServer2022-Base.vhdx"
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Keep full fixed-workload backing plus base/tool room while the downloaded Windows
+# VHD and its converted image coexist. The image size is read from the actual Azure
+# temporary source disk, not inferred from a catalogue name. No host disk is added.
+$remainingWorkloadBytes = 0L
+foreach ($entry in @(
+    @{ Name='OnPrem-Web'; Bytes=40GB }, @{ Name='OnPrem-SQL'; Bytes=40GB },
+    @{ Name='OnPrem-Linux-Web'; Bytes=30GB }, @{ Name='OnPrem-Linux-App'; Bytes=30GB }
+)) {
+    $path = Join-Path $vhdPath ($entry.Name + '.vhdx')
+    $allocated = if (Test-Path -LiteralPath $path) { [long](Get-Item -LiteralPath $path -ErrorAction Stop).Length } else { 0L }
+    $remainingWorkloadBytes += [math]::Max(0L, ([long]$entry.Bytes - $allocated))
+}
+$imageOverlapBytes = if (Test-Path -LiteralPath $windowsBaseVhd) { 0L } else { (2L * $WindowsImageSizeGB * 1GB) + 2GB }
+$requiredPreparationBytes = $remainingWorkloadBytes + 60GB + $imageOverlapBytes
+$preparationFreeBytes = [long](Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
+Write-Log ("Host preparation storage: {0:N1} GiB measured C: free; {1:N1} GiB required (remaining fixed workloads + 60-GiB base/tools + {2:N1}-GiB image overlap)." -f
+    ($preparationFreeBytes/1GB), ($requiredPreparationBytes/1GB), ($imageOverlapBytes/1GB))
+if ($preparationFreeBytes -lt $requiredPreparationBytes) {
+    throw 'Insufficient measured host space for fixed workloads, base/tools and temporary image-conversion overlap. Preserve the fresh deployment for review; no disk expansion, thin oversubscription or volume shrink is attempted here.'
+}
 
 # -- Install qemu-img (needed for image conversion) --
 $qemuImg = "C:\Program Files\qemu\qemu-img.exe"
@@ -589,20 +612,13 @@ Write-Log "PHASE 3: Creating guest VMs..."
 function Create-WindowsGuestVM {
     param(
         [string]$VMName, [string]$IPAddress,
-        [int]$MemoryMB = 4096, [int]$CPUs = 2, [int]$DiskGB = 40,
-        [string]$StorageRoot = '', [switch]$PreparedInfrastructure, [scriptblock]$OnCreated
+        [int]$MemoryMB = 4096, [int]$CPUs = 2, [int]$DiskGB = 40
     )
 
-    if (($VMName -ceq 'MigrateRepl' -and -not $PreparedInfrastructure) -or
-        (-not $PreparedInfrastructure -and $VMName -notin @('OnPrem-Web','OnPrem-SQL'))) {
-        throw 'Windows rebuild helper is restricted to the two source workloads; MigrateRepl requires the non-destructive owned-infrastructure path.'
+    if ($VMName -notin @('OnPrem-Web','OnPrem-SQL')) {
+        throw 'Windows rebuild helper is restricted to the two original source workloads.'
     }
     $existingVM = Get-VM -Name $VMName -ErrorAction SilentlyContinue
-    if ($PreparedInfrastructure) {
-        if ($VMName -cne 'MigrateRepl' -or -not $StorageRoot -or $existingVM -or -not $OnCreated) {
-            throw 'NeedsReview: prepared infrastructure must be new, separately owned MigrateRepl; never remove an existing appliance VM.'
-        }
-    } elseif ($StorageRoot) { throw 'StorageRoot is reserved for the new prepared replication VM.' }
     if ($existingVM) {
         # Left behind by an interrupted run. Its provisioning never completed, so discard it
         # and rebuild rather than adopting a guest in an unknown state.
@@ -617,7 +633,7 @@ function Create-WindowsGuestVM {
 
     Write-Log "Creating Windows VM '$VMName'..."
 
-    $vmVhdPath = if ($PreparedInfrastructure) { Join-Path $StorageRoot 'OS.vhdx' } else { "$vhdPath\$VMName.vhdx" }
+    $vmVhdPath = "$vhdPath\$VMName.vhdx"
     if (-not (Test-Path $vmVhdPath)) {
         # Fixed, not dynamic. The guest disks are allocated in full at creation so host
         # capacity is deterministic and does not shift under the workshop as the guests
@@ -670,12 +686,11 @@ function Create-WindowsGuestVM {
     $null = [xml]$unattendXml
     $unattendXml | Out-File -FilePath "$unattendDir\unattend.xml" -Encoding UTF8 -Force
 
-    $vmDir = if ($PreparedInfrastructure) { Join-Path $StorageRoot 'VM' } else { "$labRoot\VMs\$VMName" }
+    $vmDir = "$labRoot\VMs\$VMName"
     New-Item -ItemType Directory -Path $vmDir -Force | Out-Null
 
     New-VM -Name $VMName -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $vmVhdPath `
         -SwitchName $intSwitchName -Path $vmDir -Generation 2 -ErrorAction Stop | Out-Null
-    if ($PreparedInfrastructure) { & $OnCreated (Get-VM -Name $VMName -ErrorAction Stop) $vmVhdPath }
     Set-LabReservation -VMName $VMName -IPAddress $IPAddress
     Set-VMProcessor -VMName $VMName -Count $CPUs -ErrorAction Stop
     Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false -ErrorAction Stop
@@ -1429,23 +1444,6 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 20
 }
 if (-not $healthy) { throw 'Workload/KVP communication readiness timed out. Check guest hv-kvp-daemon, exact-kernel tools, cloud-init logs and host CIM access; setup is incomplete.' }
-Write-Log 'Staging the standalone Module 3 replication OS helper and retaining the original generalized Windows base; no replication VM is created yet.'
-$replicationHelperBytes = [Convert]::FromBase64String('__LAB_REPLICATION_HELPER_B64__')
-$replicationHelperPath = Join-Path $labRoot 'prepare-replication.ps1'
-[IO.File]::WriteAllBytes($replicationHelperPath, $replicationHelperBytes)
-$replicationHelperHash = '__LAB_REPLICATION_HELPER_SHA256__'
-if ((Get-FileHash -LiteralPath $replicationHelperPath -Algorithm SHA256 -ErrorAction Stop).Hash -ine $replicationHelperHash) { throw 'Staged replication helper checksum mismatch.' }
-$replicationTokens = $null; $replicationErrors = $null
-$null = [System.Management.Automation.Language.Parser]::ParseFile($replicationHelperPath, [ref]$replicationTokens, [ref]$replicationErrors)
-if ($replicationErrors.Count) { throw 'Staged replication helper has syntax errors.' }
-$sourceVMIds = [ordered]@{}
-foreach ($name in $allVMs) { $sourceVMIds[$name] = [string](Get-VM -Name $name -ErrorAction Stop).Id }
-$replicationPreparation = [ordered]@{ Schema=1; State='HelperAndBaseStaged'; HostVMId=$HostVMId;
-    HelperPath=$replicationHelperPath; HelperSha256=$replicationHelperHash; BasePath=$windowsBaseVhd;
-    BaseSha256=(Get-FileHash -LiteralPath $windowsBaseVhd -Algorithm SHA256 -ErrorAction Stop).Hash;
-    BaseFileBytes=[long](Get-Item -LiteralPath $windowsBaseVhd -ErrorAction Stop).Length; SourceVMIds=$sourceVMIds }
-$replicationPreparation | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $labRoot 'replication-preparation.json') -Encoding UTF8 -ErrorAction Stop
-
 # Delete Windows setup password material after successful first boot.
 foreach ($name in @('OnPrem-Web','OnPrem-SQL')) {
     Invoke-Command -VMName $name -Credential $winCred -ScriptBlock {
@@ -1647,15 +1645,21 @@ $hostPrep['GuestCommunication'] = @(Assert-LabGuestCommunication)
 Assert-LabSourceWorkloads
 $hostPrep['GuestCommunicationCheckedUtc'] = [DateTime]::UtcNow.ToString('o')
 $hostPrep['AutomaticStartPolicy'] = @(Set-LabSourceBootPolicy)
-$hostPrep['ReplicationPreparation'] = $replicationPreparation
+$hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
+
+$finalSystemFreeBytes = [long](Get-Volume -DriveLetter C -ErrorAction Stop).SizeRemaining
+if ($finalSystemFreeBytes -lt 30GB) {
+    throw 'Final C: free space is below 30 GiB after workload and optional discovery staging. Setup remains incomplete; no automatic resize or cleanup of user data is authorized.'
+}
+$hostPrep['HostStorage'] = [ordered]@{ SystemFreeBytes=$finalSystemFreeBytes; MinimumFreeBytes=30GB; CheckedUtc=[DateTime]::UtcNow.ToString('o') }
 $hostPrep | ConvertTo-Json -Depth 5 | Set-Content "$labRoot\hyperv-prep.json" -Encoding UTF8
 
 @{ CompletedUtc = (Get-Date).ToUniversalTime().ToString('o'); VMs = $allVMs; Workshop = $WorkshopTitle
-   TrafficScript = $trafficScriptPath; ReplicationPreparation = $replicationPreparation } |
+   TrafficScript = $trafficScriptPath } |
     ConvertTo-Json -Depth 6 | Set-Content "$labRoot\setup-complete.json" -Encoding UTF8
 # Fixed status tokens and a hash only: never emit the raw job, completion record or credentials.
 Write-Output "LAB_APPLIANCE_STAGE|$applianceStatus|$applianceHashCheck|$applianceArchiveSha256"
-Write-Output 'LAB_REPLICATION_HELPER_STAGED'
+Write-Output 'LAB_HOST_STORAGE_READY'
 Write-Output 'LAB_WORKLOADS_READY'
 
 } catch {

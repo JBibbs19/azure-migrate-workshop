@@ -8,7 +8,7 @@
 
 ### Learning Objectives — Concepts
 
-By the end of this module, you will understand host-based replication, target-network planning, isolated test migration, coordinated cutover, and rollback. You will configure **Web + Linux-Web together** through the Hyper-V provider, with a separate settings review for each VM. SQL + App use the modern physical-server replication appliance and guest Mobility Service in Module 3; never enable both methods for one source.
+By the end of this module, you will understand host-based replication, target-network planning, isolated test migration, coordinated cutover, and rollback. You will configure **Web + Linux-Web together** through the Hyper-V provider, with a separate settings review for each VM. SQL + App use **that same existing HyperVHost provider, Azure Migrate project and source-host binding** in Module 3; the pair split is for teaching, not different migration engines.
 
 Complete **this module §§4–6**, then [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites) to configure replication for the second assigned pair. After both pairs are configured, return to **this module §§7–8** to review and test the frontend pair, then [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) to review and test SQL/App and the complete isolated application. Perform final migration only in [Module 3 §11's one coordinated cutover window](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads), returning to this module's §§9–10 for its frontend phase. A frontend final cutover is **not** a prerequisite for starting Module 3.
 
@@ -16,7 +16,7 @@ Complete **this module §§4–6**, then [Module 3 §§4–8](Module-3-Agent-Bas
 
 ## 1. Overview — Zero-Footprint Migration: When and Why
 
-Agentless migration avoids installing a migration agent inside each source guest. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves. In this Hyper-V lab, the **Azure Site Recovery Provider and Recovery Services agent on HyperVHost** perform replication for **only Web and Linux-Web**. The discovery appliance inventories and assesses machines; it is **not a replication appliance**.
+Agentless migration avoids installing a migration agent inside each source guest. As a Cloud Solution Architect, understanding what happens under the hood is essential for setting stakeholder expectations and designing migration waves. In this Hyper-V lab, the **Azure Site Recovery Provider and Recovery Services agent on HyperVHost** perform replication for **all four workload VMs**; this module submits the Web/Linux-Web pair, and Module 3 submits SQL/App through the same provider. The discovery appliance inventories and assesses machines; it is **not a replication appliance**.
 
 ### How It Works Architecturally
 
@@ -64,7 +64,7 @@ sequenceDiagram
 
 - Stateless web servers, reverse proxies, and Linux servers with standard configurations are useful initial migration candidates.
 - Avoiding guest migration software can simplify change approval, but the host still needs its provider.
-- Stateful workloads need data-consistency and dependency planning, **not a different migration architecture merely because they hold state**. SQL and Tomcat deliberately use the modern physical-server/Mobility route in Module 3; that is a teaching choice, not a requirement imposed by statefulness.
+- Stateful workloads need data-consistency and dependency planning, **not a different migration architecture merely because they hold state**. SQL and Tomcat reuse the same Hyper-V provider in Module 3, with additional database/application validation.
 - Source platform, supported configuration, recovery objectives, disk layout, and measured churn determine migration suitability. A web-server label alone is not a readiness test.
 
 #### Hands-On Steps
@@ -298,9 +298,9 @@ The canonical route in the [execution overview](https://learn.microsoft.com/azur
 
 **Local workstation — student notes:**
 
-1.  Before either group enables protection, obtain the instructor/resource owner's verification of the intended **project, Hyper-V provider registration, modern appliance registration, managed-vault associations and current mixed-method compatibility**.
+1.  Before enabling protection, obtain the instructor/resource owner's verification of the intended **Azure Migrate project, connected HyperVHost provider, source VM IDs, managed migration-resource association and target region** for all four workloads.
 
-    **STOP / DEFERRED** while unverified. The overview lists both methods but does not certify one shared vault. Do not force both into one vault, declare them incompatible, silently create separate projects, fill blank vault IDs, or patch resource bindings/scripts. Any architecture correction is separately approved owner work.
+    **STOP / DEFERRED** on unknown or mismatched associations. Module 3 reuses this same registration for SQL/App; do not re-register an already protected host, create a second vault/project for the pair, fill blank IDs or patch bindings/scripts. Any association correction is separately approved owner work.
 
 **Local workstation — Azure portal:**
 
@@ -316,7 +316,7 @@ The canonical route in the [execution overview](https://learn.microsoft.com/azur
 
 7.  Select **From replication provider (Hyper-V)** and follow its provider-preparation link.
 
-    Inventory/assessment entry is also documented, but use only the verified source identity **and Hyper-V architecture** for Web/Linux-Web; review each workload's readiness. A same-name SQL/App inventory record is not part of this protection group.
+    Inventory/assessment entry is also documented, but use only the verified source identity **and Hyper-V architecture** for Web/Linux-Web; review each workload's readiness. SQL/App are submitted separately in Module 3 using this same provider; they are not part of this frontend-pair request.
 
 8.  Confirm **Hyper-V** as source virtualization and the different target region reviewed in §4.1.
 
@@ -414,7 +414,7 @@ Configure **both assigned frontend VMs in the same replication wizard**, reviewi
 
 3.  Match each name to its recorded source VM ID and **HyperVHost** association. Web is the Windows source at `192.168.0.10`; Linux-Web is the Ubuntu source at `192.168.0.12`.
 
-4.  Confirm **SQL and Linux-App are not selected**. Those sources belong only to Module 3's modern physical/Mobility route.
+4.  Confirm **SQL and Linux-App are not selected in this submission**. Module 3 submits them through the **same HyperVHost provider**, after their stateful preparation.
 
 5.  Select **Next** with exactly the two frontend records selected.
 
@@ -525,9 +525,9 @@ Review the settings just submitted for the pair; **do not start another Linux-We
 
 1.  Match the two VM IDs and their **HyperVHost** association to your identity register.
 
-2.  Confirm the method is **From replication provider (Hyper-V)** for both and neither source is also protected through Mobility.
+2.  Confirm the method is **From replication provider (Hyper-V)** for both, with no duplicate source protection.
 
-3.  Confirm SQL and App remain excluded from this provider's replication selection.
+3.  Confirm SQL and App were excluded from **this frontend-pair submission**, not from the provider. Their later Module 3 records must use this same project, provider and source-host binding.
 
 ### 6.3 Confirm Both Destination Mappings
 
@@ -563,13 +563,13 @@ Review the settings just submitted for the pair; **do not start another Linux-We
 
 **Local workstation — course instructions:**
 
-3.  Continue now to [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites): verify SQL/App prerequisites, prepare their sources and separate modern appliance, install/register supported Mobility Service, and submit replication for **SQL + App together**.
+3.  Continue now to [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites): verify SQL/App prerequisites and source data/runtime, confirm the **existing same HyperVHost registration**, and submit replication for **SQL + App together**.
 
 4.  After Module 3 §8.6 has submitted that pair, return to **this module §7**, then §8, to review and test the frontends. Keep all four source workloads serving; do not start test migration or final cutover at this handoff.
 
-**Expected Result:** Both frontend replication records have the intended per-VM mappings, and you continue to configure SQL/App replication before testing either method pair.
+**Expected Result:** Both frontend replication records have the intended per-VM mappings, and you continue to configure SQL/App replication before testing either teaching pair.
 
-**CSA Why:** Explicit confirmation preserves distinct VM settings while keeping the two replication methods and their source identities separate.
+**CSA Why:** Explicit confirmation preserves distinct VM settings while keeping each VM's settings and identity explicit within the same host-provider method.
 
 ---
 
@@ -682,7 +682,7 @@ Both methods can replicate writes while services are active. The frontend pair's
 
 Test migration creates separate copies while all four sources keep serving, including any already active synthetic orders. Isolation is required **before boot**: copied Windows generator startup tasks/Linux traffic services may auto-start against inherited source aliases. Copied local CPU workers are independent; expiry is not evidence they have stopped. This pair-only exercise validates **IIS and Nginx static HTTP on port 80**, not the complete Order Desk chain.
 
-**Identity convention:** Names such as `OnPrem-Web-test` below are **test-role labels, not guaranteed generated names or suffixes**. Open the VM resource produced by the specific test job, record its actual unique name/resource ID/NIC/IP/VNet, and substitute that mapping everywhere. Both engines must support creating all four test peers in the same approved isolated VNet with noncolliding identities; if that cannot be confirmed, STOP before test boot.
+**Identity convention:** Names such as `OnPrem-Web-test` below are **test-role labels, not guaranteed generated names or suffixes**. Open the VM resource produced by the specific test job, record its actual unique name/resource ID/NIC/IP/VNet, and substitute that mapping everywhere. The Hyper-V workflow must support creating all four test peers in the same approved isolated VNet with noncolliding identities; if that cannot be confirmed, STOP before test boot.
 
 ### 8.1 Build the Isolated Test Network
 
@@ -944,7 +944,7 @@ The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 �
 
 7.  Capture the final source data baseline.
 
-8.  In Module 3 §11.2, first verify **AutomaticStartAction Nothing for exactly the four source VM IDs**, stopped/disabled source generators and the final data baseline; then perform the modern physical SQL/App phases.
+8.  In Module 3 §11.2, first verify **AutomaticStartAction Nothing for exactly the four source VM IDs**, stopped/disabled source generators and the final data baseline; then perform the Hyper-V SQL/App phases.
 
     Do not stop SQL, Tomcat, or Nginx merely to stop traffic.
 
@@ -1179,7 +1179,7 @@ A CSA always has a rollback plan — and knows exactly when to trigger it. These
 
 ## Key Takeaways
 
-1. **Guest-agentless does not mean host-software-free.** HyperVHost's registered provider replicates only the frontend pair here; the other pair uses Mobility.
+1. **Guest-agentless does not mean host-software-free.** HyperVHost's registered provider replicates all four workloads; this module submits the frontends and Module 3 submits SQL/App.
 2. **A test migration is a separate portal action.** Static frontend checks are not full application acceptance.
 3. **Teaching pairs are not cutover boundaries.** Complete Module 3's four-VM test before the shared final window.
 4. **Use actual NIC addresses.** Source, test, and final target addresses are different; repoint every application peer.
@@ -1189,4 +1189,4 @@ A CSA always has a rollback plan — and knows exactly when to trigger it. These
 
 ## Next Steps
 
-After **§6**, complete [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites) to submit the SQL/App replication pair through its separate modern appliance and guest Mobility Service. Then return here for **§§7–8**, submit **both frontend tests before validation**, and retain their isolated outputs. Return to [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) to submit **both SQL/App tests before SQL validation**, complete the four-VM application test, and clean up all four test migrations. Remain at the **§9 hold point** until [Module 3 §11](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads) opens the single coordinated window. Perform this module's frontend cutover and final validation only in that shared window, after SQL and App.
+After **§6**, complete [Module 3 §§4–8](Module-3-Agent-Based-Migration.md#4-prerequisites) to submit the SQL/App replication pair through the **same existing HyperVHost provider and project**. Then return here for **§§7–8**, submit **both frontend tests before validation**, and retain their isolated outputs. Return to [Module 3 §§9–10](Module-3-Agent-Based-Migration.md#9-step-5--monitor-replication) to submit **both SQL/App tests before SQL validation**, complete the four-VM application test, and clean up all four test migrations. Remain at the **§9 hold point** until [Module 3 §11](Module-3-Agent-Based-Migration.md#11-step-7--cutover-for-stateful-workloads) opens the single coordinated window. Perform this module's frontend cutover and final validation only in that shared window, after SQL and App.
