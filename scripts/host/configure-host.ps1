@@ -7,7 +7,10 @@ param(
     [Parameter(Mandatory)][ValidateRange(1,40)][int]$WindowsImageSizeGB,
     [string]$IncludeApplianceVhd = 'No',
     [string]$ApplianceVhdSha256 = '',
-    [string]$WorkshopTitle = 'TD SYNNEX - Cloud Enablement Services'
+    [string]$WorkshopTitle = 'TD SYNNEX - Cloud Enablement Services',
+    # Optional (Lab Portal mirror). JSON download manifest with per-file read-only SAS URLs. Pass it only as a
+    # protected parameter. Empty (the default) keeps the publisher downloads exactly as before.
+    [string]$DownloadManifestJson = ''
 )
 try {
 $ErrorActionPreference = "Stop"
@@ -466,13 +469,53 @@ try {
 }
 
 
+# ---------- Optional download mirror (Lab Portal) ----------
+# With no manifest, $labMirror stays empty and every download below runs exactly as before. With a manifest, a
+# listed file is fetched from the mirror and must match the manifest SHA256; a mismatch or failed download stops
+# the build (fail closed). Files the manifest does not list still come from the publisher. URLs are never logged.
+$labMirror = @{}
+if ($DownloadManifestJson) {
+    $parsed = $DownloadManifestJson | ConvertFrom-Json -ErrorAction Stop
+    if ($parsed.schemaVersion -ne 1 -or -not $parsed.files) { throw 'Download manifest is not schema version 1 with a files list.' }
+    foreach ($p in $parsed.files.PSObject.Properties) {
+        $uri = [Uri]$p.Value.url
+        if ($p.Name -notmatch '^[a-z0-9][a-z0-9.-]{1,60}$' -or $uri.Scheme -ne 'https' -or
+            $uri.Host -notmatch '^[a-z0-9]{3,24}\.blob\.core\.windows\.net$' -or
+            [string]$p.Value.sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "Download manifest entry '$($p.Name)' is invalid." }
+        $labMirror[$p.Name] = $p.Value
+    }
+    Write-Log "Download mirror in use for: $(@($labMirror.Keys | Sort-Object) -join ', ')"
+}
+function Get-LabMirrorFile {
+    # Returns $true when the file came from the mirror and its SHA256 matched; $false when the id is not mirrored.
+    param([string]$Id, [string]$Destination)
+    if (-not $labMirror.ContainsKey($Id)) { return $false }
+    $entry = $labMirror[$Id]
+    $partial = "$Destination.mirror-partial"
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    & $curl --fail --silent --show-error --retry 5 --retry-delay 20 --output $partial ([string]$entry.url)
+    if ($LASTEXITCODE -ne 0) { throw "Mirror download of '$Id' failed (curl exit code $LASTEXITCODE)." }
+    $actual = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
+    if ($actual -ne ([string]$entry.sha256).ToUpperInvariant()) {
+        Remove-Item -LiteralPath $partial -Force
+        throw "Mirror file '$Id' failed its SHA256 check; it was deleted and not used."
+    }
+    Move-Item -LiteralPath $partial -Destination $Destination -Force
+    Write-Log "Downloaded '$Id' from the mirror; SHA256 verified."
+    return $true
+}
+
 # Install Windows ADK Deployment Tools (provides oscdimg.exe for cloud-init ISO creation)
 $oscdimgPath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
 if (-not (Test-Path $oscdimgPath)) {
     Write-Log "Installing Windows ADK Deployment Tools (for oscdimg)..."
     $adkInstaller = "$labRoot\adksetup.exe"
-    $adkUrl = "https://go.microsoft.com/fwlink/?linkid=2243390"
-    Invoke-WebRequest -Uri $adkUrl -OutFile $adkInstaller -UseBasicParsing -ErrorAction Stop -TimeoutSec 300
+    # Pinned 2026-11-06: ADK 10.1.26100.9457 (September 2026), listed by Microsoft for Windows Server 2022.
+    $adkUrl = "https://go.microsoft.com/fwlink/?linkid=2289980"
+    if (-not (Get-LabMirrorFile -Id 'windows-adk-deploy' -Destination $adkInstaller)) {
+        Invoke-WebRequest -Uri $adkUrl -OutFile $adkInstaller -UseBasicParsing -ErrorAction Stop -TimeoutSec 300
+    }
     $signature = Get-AuthenticodeSignature $adkInstaller
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'ADK signature validation failed.' }
     Invoke-LabProcess -FilePath $adkInstaller -Arguments '/quiet /norestart /features OptionId.DeploymentTools' -Stage 'Install ADK' -LogDirectory $labRoot -TimeoutSeconds 3600 -SuccessCodes @(0,3010)
@@ -522,13 +565,15 @@ if (-not $qemuImg -or -not (Test-Path $qemuImg)) {
         Set-ExecutionPolicy Bypass -Scope Process -Force
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
         $bootstrap = Join-Path $labRoot 'install-chocolatey.ps1'
+        # Pinned 2026-11-06: install.ps1 installs this Chocolatey CLI release instead of the latest.
+        $env:chocolateyVersion = '2.7.4'
         Invoke-WebRequest 'https://community.chocolatey.org/install.ps1' -OutFile $bootstrap -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
         Invoke-LabProcess -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$bootstrap`"" -Stage 'Install Chocolatey' -LogDirectory $labRoot -TimeoutSeconds 1800
     }
     $chocoCommand = Get-Command choco -ErrorAction SilentlyContinue
     $chocoPath = if ($chocoCommand) { $chocoCommand.Source } else { "$env:ProgramData\chocolatey\bin\choco.exe" }
-    Invoke-LabProcess -FilePath $chocoPath -Arguments 'install qemu --no-progress -y' -Stage 'Install QEMU' -LogDirectory $labRoot -TimeoutSeconds 1800
+    Invoke-LabProcess -FilePath $chocoPath -Arguments 'install qemu --version 2026.8.11 --no-progress -y' -Stage 'Install QEMU' -LogDirectory $labRoot -TimeoutSeconds 1800
     $qemuImg = (Get-ChildItem "C:\Program Files\qemu" -Filter "qemu-img.exe" -ErrorAction SilentlyContinue | Select-Object -First 1) | Select-Object -ExpandProperty FullName
     if (-not $qemuImg) {
         $qemuImg = (Get-ChildItem "C:\ProgramData\chocolatey" -Recurse -Filter "qemu-img.exe" -ErrorAction SilentlyContinue | Select-Object -First 1) | Select-Object -ExpandProperty FullName
@@ -540,6 +585,11 @@ Write-Log "qemu-img available at: $qemuImg"
 # -- Ubuntu cloud image (download QCOW2, convert to VHDX via qemu-img) --
 if (-not (Test-Path $ubuntuBaseVhd)) {
     # A cached QCOW2 is accepted only after the same exact-name checksum check below.
+    if ($labMirror.ContainsKey('ubuntu-noble-cloudimg')) {
+        # Mirror: the pinned image and its manifest SHA256 replace the moving publisher 'current' folder.
+        if (-not (Test-Path $ubuntuQcow2)) { $null = Get-LabMirrorFile -Id 'ubuntu-noble-cloudimg' -Destination $ubuntuQcow2 }
+        $expectedHash = ([string]$labMirror['ubuntu-noble-cloudimg'].sha256).ToUpperInvariant()
+    } else {
     if (-not (Test-Path $ubuntuQcow2)) {
         Write-Log "Downloading Ubuntu 24.04 cloud image (QCOW2 format, ~600MB)..."
         Invoke-LabDownload -Uri $ubuntuCloudUrl -Destination $ubuntuQcow2 -Stage 'Download Ubuntu image'
@@ -550,6 +600,7 @@ if (-not (Test-Path $ubuntuBaseVhd)) {
     $hashLine = Get-Content $hashPath | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s+\*?noble-server-cloudimg-amd64\.img$' }
     if (@($hashLine).Count -ne 1) { throw 'Cannot identify the exact Noble image checksum; retry if the current image changed.' }
     $expectedHash = ($hashLine -split '\s+')[0]
+    }
     if ((Get-FileHash $ubuntuQcow2 -Algorithm SHA256).Hash -ne $expectedHash) { Remove-Item $ubuntuQcow2 -Force; throw 'Ubuntu 24.04 image checksum mismatch; download the matching current image again.' }
     Write-Log "Ubuntu 24.04 cloud image SHA256 verified before conversion."
 
@@ -581,12 +632,21 @@ if (-not (Test-Path $windowsBaseVhd)) {
         $azcopy = (Get-ChildItem "$labRoot\azcopy" -Recurse -Filter "azcopy.exe" -ErrorAction SilentlyContinue | Select-Object -First 1) | Select-Object -ExpandProperty FullName
         if (-not $azcopy) {
             Write-Log "Installing azcopy..."
-            Invoke-WebRequest -Uri "https://aka.ms/downloadazcopy-v10-windows" -OutFile "$labRoot\azcopy.zip" -UseBasicParsing -ErrorAction Stop -TimeoutSec 300
+            # Pinned 2026-11-06: AzCopy 10.34.1 with the SHA256 GitHub publishes for the release asset.
+            $azcopyUrl = 'https://github.com/Azure/azure-storage-azcopy/releases/download/v10.34.1/azcopy_windows_amd64_10.34.1.zip'
+            $azcopySha256 = '6D299FDF2DBF466167E9806576D15CB0DE3C4CE8769CAF5D1C1110877E5F66FF'
+            if (-not (Get-LabMirrorFile -Id 'azcopy-v10-windows' -Destination "$labRoot\azcopy.zip")) {
+                Invoke-WebRequest -Uri $azcopyUrl -OutFile "$labRoot\azcopy.zip" -UseBasicParsing -ErrorAction Stop -TimeoutSec 300
+            }
+            if ((Get-FileHash -LiteralPath "$labRoot\azcopy.zip" -Algorithm SHA256).Hash -ne $azcopySha256) {
+                Remove-Item -LiteralPath "$labRoot\azcopy.zip" -Force
+                throw 'AzCopy 10.34.1 failed its SHA256 check; it was deleted and not used.'
+            }
             Expand-Archive -Path "$labRoot\azcopy.zip" -DestinationPath "$labRoot\azcopy" -Force
             $azcopy = (Get-ChildItem "$labRoot\azcopy" -Recurse -Filter "azcopy.exe" | Select-Object -First 1) | Select-Object -ExpandProperty FullName
             Write-Log "azcopy installed at: $azcopy"
         }
-        Invoke-LabProcess -FilePath $azcopy -Arguments "copy `"$windowsVhdSasUrl`" `"$windowsVhdTemp`" --check-md5 NoCheck --log-level NONE --output-level quiet" -Stage 'Download Windows image' -LogDirectory $labRoot -TimeoutSeconds 5400
+        Invoke-LabProcess -FilePath $azcopy -Arguments "copy `"$windowsVhdSasUrl`" `"$windowsVhdTemp`" --check-md5 NoCheck --log-level NONE --output-level quiet --disable-telemetry=true" -Stage 'Download Windows image' -LogDirectory $labRoot -TimeoutSeconds 5400
         if (-not (Test-Path $windowsVhdTemp) -or (Get-Item $windowsVhdTemp).Length -lt 1GB) {
             throw "azcopy download failed or file is too small."
         }

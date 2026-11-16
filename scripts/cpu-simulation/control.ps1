@@ -1,6 +1,6 @@
 # Dot-sourced by enable-lab-traffic.ps1; shares its protected PS Direct/SSH transports.
 function Show-LabCpuNotice {
-    Write-Host 'Optional CPU Simulation: UTC 06:00-22:00 day (~15% TOTAL guest CPU), 22:00-06:00 night (~2%); no peaks.' -ForegroundColor Yellow
+    Write-Host 'Optional CPU Simulation: 06:00-22:00 EST day (~15% TOTAL guest CPU), 22:00-06:00 EST night (~2%); fixed UTC-5 all year (day = 11:00-03:00 UTC); no peaks.' -ForegroundColor Yellow
     Write-Host 'One low-priority CPU-only worker per guest; measured application load reduces simulation. At >=30% total CPU it rests; resume requires <20% and a 60-second cooldown. This cannot cap real application CPU.'
     Write-Host 'No additional VM, VM size or paid service is created. CPU activity on existing fixed-price VMs has no separate charge; extending uptime for capture continues normal lab charges.'
     Write-Host 'Allow a complete 24-hour capture for the full day/night profile (or the longer selected history), then use/recalculate a performance-based portal assessment. Earlier data can be partial; no recommendation change is guaranteed. Step 2 AsOnPremises does not use CPU history.'

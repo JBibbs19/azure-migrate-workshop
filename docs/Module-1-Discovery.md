@@ -176,7 +176,7 @@ The project gives the appliance and assessment a common scope. Its geography con
 
 3.  On the **Create Project** page, confirm the authorized workshop subscription.
 
-    1.  For **Resource group**, create/select your new workshop project group, separate from existing migration projects.
+    1.  For **Resource group**, select your lab's **source resource group** (the `$sourceRg` you recorded in Module 0, for example `rg-ces-source-01`), the same group that holds HyperVHost. Do not create a separate project group, and do not use a group that holds other migration projects.
     2.  Under **Project Details**, provide a unique workshop project name and record its resource ID.
     3.  Leave the reviewed endpoint choice at **Public Endpoint** for this lab unless a separately approved design requires otherwise.
 
@@ -188,7 +188,7 @@ The project gives the appliance and assessment a common scope. Its geography con
 
 5.  Once complete, find the project in either of two places:
 
-    1.  Under the resource group, as an **Azure Migrate** resource type.
+    1.  Under the source resource group, as an **Azure Migrate** resource type.
     2.  On the **Azure Migrate** page, under **All Projects**.
 
 6.  Open the created project.

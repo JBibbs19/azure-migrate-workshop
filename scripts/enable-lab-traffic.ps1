@@ -645,7 +645,7 @@ echo LAB_NETWORK_STATUS_CONFIRMED
     Write-Host '  OnPrem-Web  -> OnPrem-Linux-App HTTP 3000  scheduled task LabOrderDeskTraffic'
     if ($appReady)   { Write-Host '  OnPrem-Linux-App -> OnPrem-SQL       TDS 1433   Tomcat JVM bounded JDBC pool' }
     if ($appReady)   { Write-Host '  OnPrem-Linux-App -> OnPrem-Linux-Web HTTP 8080  systemd unit contoso-orderdesk-traffic' }
-    if ($nginxReady) { Write-Host '  OnPrem-Linux-Web -> local Nginx 8080 -> OnPrem-Linux-App 3000  synthetic employee orders, UTC 06-22, random 2-20 min' }
+    if ($nginxReady) { Write-Host '  OnPrem-Linux-Web -> local Nginx 8080 -> OnPrem-Linux-App 3000  synthetic employee orders, 06-22 EST (11-03 UTC), random 2-20 min' }
     if (-not ($appReady -and $nginxReady)) {
         Write-Warning "Traffic is PARTIAL: Windows generator may be running; Linux startup/proxy checks were not all confirmed. Their scripts are in $trafficRoot. Inspect or stop traffic before retrying."
         if ($NonInteractive) { throw 'Full traffic startup was not confirmed.' }

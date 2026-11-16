@@ -322,6 +322,8 @@ No fixed all-four SKU is prescribed here. The historical B1/B2 table in Module 2
 
     If missing, perform [Module 2 §4.2's manual creation steps](Module-2-Agentless-Migration.md#42-build-the-target-landing-zone).
 
+    Also confirm the target network's peering to the host network shows **Connected** and the Module 2 §4.2 step 23 management/containment rules are present. The target network is the only network peered with the host network.
+
 3.  Confirm **`vnet-ces-test-01`** and its test NSG exist in the same region.
 
     If missing, perform [Module 2 §8.1's manual creation/isolation steps](Module-2-Agentless-Migration.md#81-build-the-isolated-test-network) before booting any test copy.
@@ -1146,6 +1148,8 @@ flowchart TD
 
 19. Confirm final target routing/NSG/guest firewall paths for the five edges and approved management access, with pre-boot containment preventing **inherited source aliases or copied generators from reaching source SQL/App**. Deny source nested/source-VNet prefixes and do not create an interim hybrid path.
 
+    The only exception is Module 2 §4.2's HyperVHost management path: RDP/SSH from `<HostPrivateIP>/32`, with `Deny-SourceVNet-Target` and `Deny-Target-SourceVNet` in place. It carries no application traffic; do not widen it.
+
     Target peers must become mutually routable only in the intended final network; no user/order ingress opens until every target is valid. Do not introduce a public endpoint.
 
 20. If an existing client DNS record is used, plan its update within this window. No Azure DNS zone is automatically created by this project.
@@ -1198,7 +1202,7 @@ flowchart TD
 
     Do not reuse the test IP.
 
-4.  Use portal Windows Run Command with existing SQL permission, or approved RDP/SSMS as in §10.2.
+4.  Use portal Windows Run Command with existing SQL permission, or RDP/SSMS from HyperVHost ([Module 2 §4.2](Module-2-Agentless-Migration.md#connect-to-a-final-target-from-hypervhost)) as in §10.2.
 
 **Target OnPrem-SQL — Run Command (RunPowerShellScript) or RDP/SSMS:**
 

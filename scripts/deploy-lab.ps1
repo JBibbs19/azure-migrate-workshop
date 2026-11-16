@@ -880,7 +880,7 @@ finally { $AdminPassword = $null; $secure = $null; $result = $null }
 function Invoke-LabFreshCpuOffer {
     Write-Host ''
     Write-Host 'Required network stage and deployment cleanup are complete. Optional CPU startup below is NOT included in deployment timing.' -ForegroundColor Cyan
-    Write-Host "CPU Simulation is independent: approximately 15% day / 2% night total guest CPU (UTC 06:00-22:00 / 22:00-06:00), no peaks. Duration $CpuDurationHours hours (default 24, range 1-168); no reboot auto-resume or automatic renewal." -ForegroundColor Yellow
+    Write-Host "CPU Simulation is independent: approximately 15% day / 2% night total guest CPU (06:00-22:00 / 22:00-06:00 EST, fixed UTC-5), no peaks. Duration $CpuDurationHours hours (default 24, range 1-168); no reboot auto-resume or automatic renewal." -ForegroundColor Yellow
     Write-Host 'For the full day/night profile, collect 24 hours during performance capture. No recommendation change is guaranteed; normal VM uptime charges continue.'
     $cpuStart = ($CpuSimulation -eq 'Start')
     if ($CpuSimulation -eq 'Prompt' -and (Test-LabCpuPromptSession -ExplicitPrompt $script:CpuPromptExplicit)) {

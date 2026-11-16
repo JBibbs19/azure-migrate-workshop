@@ -12,6 +12,8 @@ $dayHours = 16
 $nightHours = 24 - $dayHours
 $dayStart = 6
 $dayEnd = $dayStart + $dayHours
+# Day and night hours are fixed EST (UTC-5) all year, with no daylight-saving shift: day = 11:00-03:00 UTC.
+$utcOffsetHours = -5
 $dayTarget = 15.0
 $nightTarget = 2.0
 $expectedCpus = 2
@@ -47,7 +49,8 @@ function Get-CpuTotalPercent {
 function Get-CpuDecision {
     param($Total,$Worker,[int]$Cpus,[double]$Now,[bool]$Guard,[double]$CooldownUntil,[DateTime]$UtcNow = [DateTime]::UtcNow)
     $phase='night'; $target=$nightTarget
-    if ($UtcNow.Hour -ge $dayStart -and $UtcNow.Hour -lt $dayEnd) { $phase='day'; $target=$dayTarget }
+    $localHour = $UtcNow.AddHours($utcOffsetHours).Hour
+    if ($localHour -ge $dayStart -and $localHour -lt $dayEnd) { $phase='day'; $target=$dayTarget }
     $result=@{phase=$phase;targetTotalCpuPercent=$target;targetWorkerCpuPercent=0.0;measuredTotalCpuPercent=$null;measuredWorkerCpuPercent=$null;baselineCpuPercent=$null;baselineAboveGoal=$false;guard=$Guard;cooldownUntil=$CooldownUntil;cooldownRemainingSeconds=[Math]::Max(0,$CooldownUntil-$Now);reason='measurement_invalid'}
     if ($Cpus -ne $expectedCpus -or $null -eq $Total -or $null -eq $Worker) { return $result }
     foreach ($value in @([double]$Total,[double]$Worker)) { if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0 -or $value -gt 100) { return $result } }

@@ -170,7 +170,9 @@ The nested source network is `192.168.0.0/24` (host `.1`, discovery appliance `.
 
 4.  For Azure test/target guests, plan **VM → Run command → RunPowerShellScript** on Windows or **RunShellScript** on Linux once the VM agent is ready.
 
-    Alternatively, use already-approved RDP/SSH access. Run Command executes **inside the selected guest**, so localhost checks do not require a public IP. Your workstation is not assumed to reach `10.2.0.0/24`.
+    Run Command executes **inside the selected guest**, so localhost checks do not require a public IP. Your workstation is not assumed to reach `10.1.0.0/24` or `10.2.0.0/24`.
+
+    For **final target** guests, you can also use RDP/SSH from **HyperVHost** through the management path you build in §4.2. **Test** guests have no RDP/SSH path in this lab: the isolated test network is never peered and denies the host network, so use Run Command for them.
 
 **Expected Result:** The right project, discovered sources, permissions, and guest-access method are known before replication setup.
 
@@ -265,12 +267,14 @@ Choose the actual target region before preparing the project's migration resourc
 
 16. Add the required TCP rules below, choosing unused priorities ahead of default rules.
 
+    Add the two management rows in step 23, after you record the host's private IP.
+
     Restrict sources and destinations to the approved management/client ranges or application peers; do not expose the demo application or SQL to the Internet.
 
 | Rule Purpose | Source | Destination / TCP Port |
 |--------------|--------|------------------------|
-| Windows management, if using RDP | Approved management range only | Windows guests / 3389 |
-| Linux management, if using SSH | Approved management range only | Linux guests / 22 |
+| Windows management (RDP) | HyperVHost private IP `/32` only — added in step 23 | Windows guests / 3389 |
+| Linux management (SSH) | HyperVHost private IP `/32` only — added in step 23 | Linux guests / 22 |
 | Static web validation | Approved lab client range | Web and Linux-Web / 80 |
 | SQL dependencies | Web and Linux-App private addresses | SQL / 1433 |
 | Tomcat dependencies | Web and Linux-Web private addresses | Linux-App / 3000 |
@@ -289,6 +293,83 @@ Choose the actual target region before preparing the project's migration resourc
 21. Verify the required connectivity against the lab network plan.
 
     Do **not** assume Azure default outbound access or that the lab created a NAT gateway. If the approved path is missing, pause before relying on it.
+
+**Management path — HyperVHost as the jump box:**
+
+The migrated VMs receive private addresses only. You reach them from **HyperVHost**, which you already sign in to over RDP. A VNet peering connects the host's network to the target network, and the target NSG allows only RDP and SSH from the host's own private address. No public IP is added to any migrated VM, and the isolated test network is never peered.
+
+**Local workstation — Azure portal:**
+
+22. Open **Virtual machines → HyperVHost → Networking** and record the host's **private IP address** and its **virtual network** name in your notes.
+
+    This guide calls the address `<HostPrivateIP>`. Use the actual value, not an example. With the default names, the host's network is `rg-ces-source-01-vnet`.
+
+23. In `nsg-ces-target-01`, add the management and containment rules below, using **Inbound security rules → Add** and **Outbound security rules → Add**.
+
+    The priorities are examples. If one is already used, choose another unused value, keeping both allow numbers **lower** than the inbound deny (lower numbers are evaluated first) and every rule ahead of Azure's default rules.
+
+    Replies to an allowed RDP/SSH session return automatically; the outbound deny stops target guests from opening any new connection to the host network.
+
+| Priority | Direction | Name | Source | Destination | Port | Protocol | Action |
+|----------|-----------|------|--------|-------------|------|----------|--------|
+| 140 | Inbound | `Allow-RDP-FromHyperVHost` | `<HostPrivateIP>/32` | `10.1.0.0/24` | 3389 | TCP | Allow |
+| 150 | Inbound | `Allow-SSH-FromHyperVHost` | `<HostPrivateIP>/32` | `10.1.0.0/24` | 22 | TCP | Allow |
+| 160 | Inbound | `Deny-SourceVNet-Target` | `10.0.0.0/16` | `10.1.0.0/24` | `*` | Any | Deny |
+| 160 | Outbound | `Deny-Target-SourceVNet` | `10.1.0.0/24` | `10.0.0.0/16` | `*` | Any | Deny |
+
+24. Open the **host's** virtual network from step 22 → **Settings → Peerings → + Add**, and enter:
+
+| Section | Setting | Value |
+|---------|---------|-------|
+| Remote virtual network summary | Peering link name | `target-to-source` |
+| Remote virtual network summary | Virtual network | `vnet-ces-target-01` |
+| Remote virtual network summary | Allow the remote network to access the host network | Checked (default) |
+| Local virtual network summary | Peering link name | `source-to-target` |
+| Local virtual network summary | Allow the host network to access the remote network | Checked (default) |
+| Both | Forwarded traffic, gateway or route server options | Leave **off** |
+
+25. Select **Add**. The portal creates both directions in one step.
+
+26. On both networks, confirm **Peerings** shows the peering as **Connected**.
+
+    If the target region differs from the host's region, this is a global peering; it works the same way and adds small per-GB data-transfer charges.
+
+27. Never peer **`vnet-ces-test-01`** with either network. Its isolation rules in §8.1 also deny the host network, so a test copy is never reachable this way.
+
+**Expected Result:** The target network is peered with the host network only, the target NSG admits RDP/SSH only from `<HostPrivateIP>/32`, and every other path between the source and target networks is denied.
+
+**CSA Why:** A jump host plus scoped peering is a common private management pattern. It gives operators access without a public endpoint on the migrated workload, while keeping the old and new networks from becoming an application path.
+
+#### Connect to a Final Target From HyperVHost
+
+Use this procedure whenever a later step says to use **RDP/SSH from HyperVHost**. It applies only to **final target** VMs in `vnet-ces-target-01`, after they exist.
+
+**Local workstation — Azure portal:**
+
+1.  Open the target VM → **Networking** and confirm its actual `10.1` **private IP address** (already recorded in your notes). This procedure calls it `<TargetIP>`.
+
+2.  Connect to HyperVHost as in [Module 0 Step 5](Module-0-Setup.md#step-5-connect-to-the-hyper-v-host). Confirm HyperVHost is running; it is the access path even after the source workloads are shut down.
+
+**HyperVHost — Windows PowerShell:**
+
+3.  Confirm the port is reachable before connecting:
+
+    ```powershell
+    Test-NetConnection <TargetIP> -Port 3389   # Windows targets: OnPrem-Web, OnPrem-SQL
+    Test-NetConnection <TargetIP> -Port 22     # Ubuntu targets: OnPrem-Linux-Web, OnPrem-Linux-App
+    ```
+
+    Expect `TcpTestSucceeded : True`. If it is `False`, check that the peering is **Connected**, the VM is running, and the target VM's **effective security rules** (subnet and any NIC NSG) still contain the step 23 rules in the right order.
+
+4.  **Windows target:** run `mstsc /v:<TargetIP>` and sign in as `.\labadmin` with the lab password.
+
+5.  **Ubuntu target:** run `ssh labadmin@<TargetIP>`.
+
+    On first connection, accept the host-key prompt only for the `<TargetIP>` you recorded. If you deployed with a different `-AdminUsername`, substitute it in steps 4 and 5.
+
+6.  Run the module's commands for that guest in this session, then sign out of the guest. Use IP addresses, not VM names: Azure's built-in DNS does not resolve names across peered networks.
+
+**Expected Result:** You have an RDP or SSH session to the named final target from HyperVHost, with no public IP on the target.
 
 ### 4.3 Open the Project and Prepare Hyper-V Migration
 
@@ -948,7 +1029,7 @@ The four VMs form one connected business system: **Nginx:8080 → Tomcat:3000 �
 
     Do not stop SQL, Tomcat, or Nginx merely to stop traffic.
 
-9.  Verify target network rules for the five dependency edges and the approved management path.
+9.  Verify target network rules for the five dependency edges and the HyperVHost management path from §4.2 (peering **Connected**; step 23 rules in place).
 
     Public DNS/FQDN updates are needed only if the lab actually uses them.
 
@@ -1034,7 +1115,7 @@ VM running state and static HTTP success are necessary but insufficient. Complet
 
 1.  In the target resource group, inspect the exact unsuffixed frontend VMs, their actual private IPs, OS types, selected sizes, and required disks.
 
-2.  Use their portal Run Command or already-approved private RDP/SSH access.
+2.  Use their portal Run Command or RDP/SSH from HyperVHost ([§4.2](#connect-to-a-final-target-from-hypervhost)).
 
     Do not assume your workstation can route to them.
 

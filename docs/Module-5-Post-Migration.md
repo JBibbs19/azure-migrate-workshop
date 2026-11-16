@@ -76,7 +76,7 @@ The static sites are not proof of database connectivity. `/api/health` checks ap
 
     Use these actual target addresses throughout this module, not source-lab addresses or sample IPs.
 
-6.  Choose an approved guest-access method: **VM → Run command → RunPowerShellScript/RunShellScript** when the Azure VM agent is ready, or approved RDP/SSH guest access.
+6.  Choose an approved guest-access method: **VM → Run command → RunPowerShellScript/RunShellScript** when the Azure VM agent is ready, or RDP/SSH from HyperVHost ([Module 2 §4.2](Module-2-Agentless-Migration.md#connect-to-a-final-target-from-hypervhost)).
 
 7.  Check agent status in the VM's properties before relying on Run command.
 
@@ -805,6 +805,8 @@ Removing broad access before staging specific allows can lock out management or 
     If replacing a shared NIC association, first review the required existing rules and obtain approval for that NIC-only change; do not modify the shared NSG itself.
 
 4.  Record the approved HTTP client network and management source.
+
+    For this lab's HyperVHost management path ([Module 2 §4.2](Module-2-Agentless-Migration.md#connect-to-a-final-target-from-hypervhost)), use the host's actual private IP `/32` as the management source, so the final **DenyAll** does not block your own access.
 
     For direct public RDP/SSH, use the actual **My public IP /32** only when that path is approved and routable.
 

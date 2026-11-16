@@ -635,7 +635,7 @@ Only if a check fails, read the recent setup entries and identify the failed wor
 
 **Network lab traffic is required before discovery. CPU simulation is optional and independent.** Initial deployment already connects Tomcat to SQL and supplies the Nginx proxy, but dependency results will not appear correctly without the lab traffic that exercises those connections. An empty or partial map is not proof that no dependency exists. Azure Migrate still needs its collection/upload window; starting traffic does not produce an instant complete map.
 
-The original five-minute network generator sends low-rate HTTP through Nginx → Tomcat → SQL, including real sample-order writes. A separate Linux-Web employee-order service reads a randomly selected 1–3 available 20-record order pages through local Nginx before each daytime order attempt, then picks existing full-history customers/products and quantity 1–3. It waits a random 2–20 minutes after each cycle during UTC 06–22 and sleeps overnight independently of CPU; empty/failed browsing skips the write and no new employee GET/POST starts overnight. The original generator continues overnight. The desk starts at the newest 20 records; choose 20, 40, 60, 80 or 100, then **Apply**. **Next X** browses older and **Previous X** newer records without writes, bounded at either end; concurrent new inserts appear when you refresh the snapshot. Extra Nginx → OnPrem-Linux-App:3000 reads increase observation opportunities, not guaranteed dependency capture. The Windows task reads SQL orders and checks application health. Python does not connect directly to SQL; Tomcat performs the application's database reads and writes.
+The original five-minute network generator sends low-rate HTTP through Nginx → Tomcat → SQL, including real sample-order writes. A separate Linux-Web employee-order service reads a randomly selected 1–3 available 20-record order pages through local Nginx before each daytime order attempt, then picks existing full-history customers/products and quantity 1–3. It waits a random 2–20 minutes after each cycle during 06:00–22:00 EST (fixed UTC-5; 11:00–03:00 UTC) and sleeps overnight independently of CPU; empty/failed browsing skips the write and no new employee GET/POST starts overnight. The original generator continues overnight. The desk starts at the newest 20 records; choose 20, 40, 60, 80 or 100, then **Apply**. **Next X** browses older and **Previous X** newer records without writes, bounded at either end; concurrent new inserts appear when you refresh the snapshot. Extra Nginx → OnPrem-Linux-App:3000 reads increase observation opportunities, not guaranteed dependency capture. The Windows task reads SQL orders and checks application health. Python does not connect directly to SQL; Tomcat performs the application's database reads and writes.
 
 > **Deployment starts and verifies required network traffic automatically; there is no network question.** Complete this observation section before Module 1 discovery. An incomplete/unknown network stage means deployment is not complete; inspect Status/Stop before an approved manual retry, never replay deployment.
 
@@ -696,7 +696,7 @@ C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Status -Component Cpu
 C:\AzMigrateLab\enable-lab-traffic.ps1 -Mode Stop -Component Cpu
 ```
 
-The default is 24 hours, with no reboot auto-resume. Stop source CPU simulation before migration testing or cutover. See [README — Optional CPU Simulation](../README.md#optional-cpu-simulation) for the UTC profile, guards, parameters, expiry and the full 24-hour collection guidance. Keeping the lab running longer continues normal compute/storage charges.
+The default is 24 hours, with no reboot auto-resume. Stop source CPU simulation before migration testing or cutover. See [README — Optional CPU Simulation](../README.md#optional-cpu-simulation) for the fixed-EST day/night profile, guards, parameters, expiry and the full 24-hour collection guidance. Keeping the lab running longer continues normal compute/storage charges.
 
 ---
 
@@ -817,7 +817,8 @@ The host still has a public management endpoint, even though its source is restr
 | **Azure Bastion** | RDP/SSH over HTTPS without a public IP on the VM. | Private management access. |
 | **JIT VM access** | Microsoft Defender for Cloud opens NSG ports on demand for a limited window. | Time-bounded direct management access. |
 | **VPN gateway** | Site-to-site or point-to-site VPN, reaching VMs by private IP. | Persistent network-level connectivity. |
-| **Restrict NSG source** | Allowlist a specific public address, as this lab does. | Direct access from a known client address. |
+| **Restrict NSG source** | Allowlist a specific public address, as this lab does for the host. | Direct access from a known client address. |
+| **Jump host + VNet peering** | Sign in to a managed host, then RDP/SSH to private IPs over a peered network restricted to that host. This lab uses HyperVHost this way to reach migrated VMs ([Module 2 §4.2](Module-2-Agentless-Migration.md#connect-to-a-final-target-from-hypervhost)). | Private access without public IPs on workloads. |
 
 ### 8.3 — Credential Management
 
@@ -849,7 +850,7 @@ Understanding the cost profile is essential for planning a lab budget. Estimates
 | Host VM compute | `Standard_E8s_v7`, Windows Server | Charged while allocated; deallocation stops host compute charges. |
 | OS disk | One 512-GiB Premium SSD, `Premium_LRS` | Billed while retained, including when the host is deallocated. Workload VHDs and the discovery partition share this disk; no additional managed data disk. Remove only through approved source-group cleanup after the workshop. |
 | Public IP | Standard, static | May continue billing while retained. |
-| Networking | Data transfer and any separately chosen access services | Depends on usage and access design. |
+| Networking | Data transfer, the host-to-target VNet peering (per-GB) and any separately chosen access services | Depends on usage and access design. |
 | Later migration resources | Target/test VMs, disks and migration storage | Additional to the source lab; include them in the overall budget. |
 
 The four nested workloads and discovery appliance imported in Module 1 do not incur separate Azure VM compute charges. They share the source host's CPU, memory and single 512-GiB OS disk. Nested placement does not remove the host disk's persistent charge.

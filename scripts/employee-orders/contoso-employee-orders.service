@@ -1,5 +1,5 @@
 [Unit]
-Description=Synthetic employee orders via local Nginx (UTC 06-22)
+Description=Synthetic employee orders via local Nginx (06-22 EST, fixed UTC-5)
 After=network-online.target nginx.service
 Wants=network-online.target
 Requires=nginx.service

@@ -20,6 +20,8 @@ DAY_HOURS = 16
 NIGHT_HOURS = 24 - DAY_HOURS
 DAY_START = 6
 DAY_END = DAY_START + DAY_HOURS
+# Day and night hours are fixed EST (UTC-5) all year, with no daylight-saving shift: day = 11:00-03:00 UTC.
+EST = dt.timezone(dt.timedelta(hours=-5), 'EST')
 DAY_TARGET = 15.0
 NIGHT_TARGET = 2.0
 EXPECTED_CPUS = 2
@@ -37,7 +39,7 @@ def utc(epoch=None):
 
 
 def phase_target(epoch):
-    hour = dt.datetime.fromtimestamp(epoch, dt.timezone.utc).hour
+    hour = dt.datetime.fromtimestamp(epoch, EST).hour
     return ('day', DAY_TARGET) if DAY_START <= hour < DAY_END else ('night', NIGHT_TARGET)
 
 

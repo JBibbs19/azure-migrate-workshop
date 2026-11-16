@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent synthetic employee orders through the local Nginx proxy; UTC daytime only."""
+"""Independent synthetic employee orders through the local Nginx proxy; daytime only (06:00-22:00 fixed EST, UTC-5)."""
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import fcntl
@@ -13,6 +13,10 @@ import urllib.parse
 import urllib.request
 
 UTC = dt.timezone.utc
+# The business day is fixed EST (UTC-5) all year, with no daylight-saving shift: 06:00-22:00 EST = 11:00-03:00 UTC.
+EST = dt.timezone(dt.timedelta(hours=-5), 'EST')
+DAY_START, DAY_END = 6, 22  # EST hours: 06:00 inclusive to 22:00 exclusive
+WINDOW = '06:00 inclusive to 22:00 exclusive EST (fixed UTC-5; 11:00-03:00 UTC)'
 BASE = 'http://127.0.0.1:8080'
 STATE = Path('/var/lib/contoso-employee-orders/state.json')
 LOCK = Path('/run/contoso-employee-orders/worker.lock')
@@ -41,17 +45,17 @@ def stamp(value):
 
 
 def daytime(value):
-    return 6 <= value.astimezone(UTC).hour < 22
+    return DAY_START <= value.astimezone(EST).hour < DAY_END
 
 
 def dawn(value):
-    value = value.astimezone(UTC)
-    result = value.replace(hour=6, minute=0, second=0, microsecond=0)
-    return result if value < result else result + dt.timedelta(days=1)
+    value = value.astimezone(EST)
+    result = value.replace(hour=DAY_START, minute=0, second=0, microsecond=0)
+    return (result if value < result else result + dt.timedelta(days=1)).astimezone(UTC)
 
 
 def dusk(value):
-    return value.astimezone(UTC).replace(hour=22, minute=0, second=0, microsecond=0)
+    return value.astimezone(EST).replace(hour=DAY_END, minute=0, second=0, microsecond=0).astimezone(UTC)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -313,7 +317,7 @@ class Worker:
                 due = saved.astimezone(UTC)
         except (ValueError, TypeError):
             pass
-        log('started; UTC active window 06:00 inclusive to 22:00 exclusive')
+        log('started; active window ' + WINDOW)
         while not self.stop.is_set():
             self.wait_until(due)
             if self.stop.is_set():
@@ -337,7 +341,7 @@ def status():
             raise ValueError('Missing UTC offset')
     except (KeyError, ValueError, TypeError):
         fresh, live = False, False
-    print(json.dumps(dict(synthetic='employee-orders', utcPhase='day' if daytime(now) else 'night',
+    print(json.dumps(dict(synthetic='employee-orders', utcPhase='day' if daytime(now) else 'night', dayWindow=WINDOW,
                           healthy=fresh and live, state=state), separators=(',', ':')))
     return 0 if fresh and live else 1
 
